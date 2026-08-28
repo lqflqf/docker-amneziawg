@@ -1,0 +1,32 @@
+#! /usr/bin/with-contenv bash
+# shellcheck shell=bash
+
+USE_DNS="${USE_DNS,,}"
+
+if netstat -apn | grep -q ":53 " && [[ -z "${USE_DNS}" ]]; then
+    USE_DNS="false"
+fi
+
+if [[ "${USE_DNS}" == "false" ]]; then
+    s6-notifyoncheck -d -n 300 -w 10000 -c "echo **** Disabling unbound ****" \
+        sleep infinity
+elif ! unbound-checkconf /config/unbound/unbound.conf; then
+    # Do not exec unboud with a config it will reject: s6 would restart-loop
+    # the service and bury the reason in the churn.
+    echo "**** /config/unbound/unbound.conf is not valid, unbound will not be started. Fix the errors above, or delete the file to restart the default on next start. ****"
+    s6-notifyoncheck -d -n 300 -w 10000 -c "echo **** unbound config is invalid ****" \
+        sleep infinity
+elif grep -q "health.amneziawg" /config/unbound/unbound.conf; then
+    # -d keeps unbound in the foreground, so s6 can supervise it. The config
+    # sets user-syslog/logfile so its output lands on stderr for docker logs.
+    exec \
+        s6-notifyoncheck -d -n 300 -w 10000 -c "redirfd -w 1 /dev/null nslookup health.amneziawg. 127.0.0.1" \
+        unbound -d -c /config/unbound/unbound.conf
+else
+    # Without the health zone the probe above will never answer, leaving
+    # svc-amneziawg waiting on the service forever. Probe the socket instead.
+    # Not localhost: it resolves to ::1 first and unbound listens on 0.0.0.0
+    exec \
+        s6-notifyoncheck -d -n 300 -w 10000 -c "nc -zu 127.0.0.1 53" \
+        unbound -d -c /config/unbound/unbound.conf
+fi

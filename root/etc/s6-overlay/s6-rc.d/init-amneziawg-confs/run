@@ -633,6 +633,24 @@ DUDE
     done
 }
 
+warn_if_subnet_outside_dns_acl () {
+    # The shipped unbound.conf answers 127.0.0.0/8 and the RFC1918 range only.
+    # A VPN subnet outside those is refused, so peers on PEERDNS=auto get no DNS
+    # at all with nothing in the log to explain it. Warn and nanme the line that
+    # fixes it.
+    local first second
+    first=${1%%.*}
+    second=${1#*.}; second=${second%%.*}
+    [[ "$first" =~ ^[0-9]+$ ]] || return 0
+    [[ "$second" =~ ^[0-9]+$ ]] || return 0
+    if [[ "$first" == "10" ]] || [[ "$first" == "127" ]] || \
+        { [[ "$first" == "192" ]] && [[ "$second" == "168" ]]; } || \
+        { [[ "$first" == "172" ]] && (( second >= 16 && second <= 31 )); }; then
+        return 0
+    fi
+    echo "**** WARNING: The internal subnet ${INTERNAL_SUBNET} is outside the ranges the bundled unbound answers (127.0.0.0/8 and RFC1918), so peers using PEERDNS=auto will be REFUSED. Add \"access-control: ${1}.0/24 allow\" to /config/unbound/unbound.conf, or set PEERDNS to a resolver of your own. ****"
+}
+
 save_vars () {
     cat <<DUDE > /config/.donoteditthisfile
 ORIG_SERVERURL="$SERVERURL"
@@ -701,7 +719,8 @@ if [[ -n "$PEERS" ]]; then
     echo "**** AllowedIPs for peers $ALLOWEDIPS ****"
     if [[ -z "$PEERDNS" ]] || [[ "$PEERDNS" = "auto" ]]; then
         PEERDNS="${INTERFACE}.1"
-        echo "**** PEERDNS var is either not set or is set to \"auto\", setting peer DNS to ${INTERFACE}.1 to use the container host's DNS. ****"
+        echo "**** PEERDNS var is either not set or is set to \"auto\", setting peer DNS to ${INTERFACE}.1 to use the container's unbound resolver. ****"
+        warn_if_subnet_outside_dns_acl "${INTERFACE}"
     else
         echo "**** Peer DNS servers will be set to $PEERDNS ****"
     fi
@@ -762,13 +781,17 @@ if [[ -n "$PEERS" ]]; then
     fi
 else
     echo "**** Client mode selected. ****"
-    USE_COREDNS="${USE_COREDNS,,}"
-    printf %s "${USE_COREDNS:-false}" > /run/s6-overlay/container_environment/USE_COREDNS
+    USE_DNS="${USE_DNS,,}"
+    printf %s "${USE_DNS:-false}" > /run/s6/container_environment/USE_DNS
 fi
 
-# set up CoreDNS
-if [[ ! -f /config/coredns/Corefile ]]; then
-    cp /defaults/Corefile /config/coredns/Corefile
+# set up unbound
+if [[ ! -f /config/unbound/unbound.conf ]]; then
+    cp /defaults/unbound.conf /config/unbound/unbound.conf
+fi
+
+if [[ ! -f /config/unbound/root.keys ]]; then
+    cp /usr/share/dnssec-root/trusted-key.key /config/unbound/root.key
 fi
 
 # let openresolv take control of resolv.conf

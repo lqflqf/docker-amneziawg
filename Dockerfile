@@ -60,7 +60,7 @@ RUN \
   echo "**** install dependencies ****" && \
   apk add --no-cache \
     bc \
-    coredns \
+    ca-certificates-bundle \
     grep \
     iproute2 \
     iptables \
@@ -71,7 +71,8 @@ RUN \
     libqrencode-tools \
     net-tools \
     nftables \
-    openresolv && \
+    openresolv \
+    unbound && \
   echo "wireguard" >> /etc/modules && \
   echo "**** cleanup ****" && \
   rm -rf \

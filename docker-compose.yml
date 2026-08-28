@@ -33,7 +33,7 @@ services:
       # - SERVERURL=auto                    # External URL/IP (or 'auto' to detect)
       # - SERVERPORT=51820                  # Listen port
       # - PEERS=3                           # Number or names: 3 or laptop,phone,tablet
-      # - PEERDNS=auto                      # DNS for peers (or specific: 8.8.8.8, 8.8.4.4)
+      # - PEERDNS=auto                      # DNS for peers (auto = container's unbound; or specific: 8.8.8.8, 8.8.4.4)
       # - INTERNAL_SUBNET=10.13.13.0        # VPN subnet
       # - ALLOWEDIPS=0.0.0.0/0, ::/0        # Allowed IPs for peers
       # - PERSISTENTKEEPALIVE_PEERS=all     # Which peers get keepalive (all or comma-separated)
@@ -81,8 +81,8 @@ services:
       # - AWG_RANDOM_TRAILERS=on                # Random-length handshake packets. Defaults to "on" when AWG_VERSION=3.1. Must match on every end
       # - AWG_DISABLE_COOKIES=on                # No cookie-reply under load. Always opt-in; gives up DoS mitigation. Need not match
 
-      # ---- CoreDNS ----
-      # - USE_COREDNS=true                  # Enable CoreDNS (auto in server mode)
+      # ---- use internal DNS resolver ----
+      # - USE_DNS=true                  # Enable internal DNS resolver (unbound)
     volumes:
       - ./config:/config
     ports:
