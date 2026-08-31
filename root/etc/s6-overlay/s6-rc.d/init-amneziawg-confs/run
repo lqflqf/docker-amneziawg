@@ -790,7 +790,7 @@ if [[ ! -f /config/unbound/unbound.conf ]]; then
     cp /defaults/unbound.conf /config/unbound/unbound.conf
 fi
 
-if [[ ! -f /config/unbound/root.keys ]]; then
+if [[ ! -f /config/unbound/root.key ]]; then
     cp /usr/share/dnssec-root/trusted-key.key /config/unbound/root.key
 fi
 
