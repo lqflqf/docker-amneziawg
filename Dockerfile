@@ -10,7 +10,7 @@ ARG AMNEZIAWG_TOOLS_VERSION=v3.1.20260812
 # ============================================================================
 # Stage 1: Compile amneziawg-go
 # ============================================================================
-FROM golang:1.26.5-alpine AS go-builder
+FROM golang:1.26.8-alpine AS go-builder
 
 ARG AMNEZIAWG_GO_VERSION
 RUN apk add --no-cache git build-base
@@ -22,7 +22,7 @@ RUN CGO_ENABLED=1 go build -ldflags '-linkmode external -extldflags "-fno-PIC -s
 # ============================================================================
 # Stage 2: Compile awg-tools from source
 # ============================================================================
-FROM alpine:3.24.1 AS tools-builder
+FROM alpine:3.24.2 AS tools-builder
 
 ARG AMNEZIAWG_TOOLS_VERSION
 RUN apk add --no-cache git build-base linux-headers bash
@@ -59,20 +59,20 @@ ENV LSIO_FIRST_PARTY="false"
 RUN \
   echo "**** install dependencies ****" && \
   apk add --no-cache \
-    bc \
-    ca-certificates-bundle \
-    grep \
-    iproute2 \
-    iptables \
-    ip6tables \
-    iputils \
-    kmod \
-    libcap-utils \
-    libqrencode-tools \
-    net-tools \
-    nftables \
-    openresolv \
-    unbound && \
+    bc=1.08.2-r1 \
+    ca-certificates-bundle=20260909-r0 \
+    grep=3.12-r0 \
+    iproute2=7.0.0-r0 \
+    iptables=1.8.13-r0 \
+    ip6tables=1.8.13-r0 \
+    iputils=20250605-r2 \
+    kmod=34.2-r1 \
+    libcap-utils=2.78-r0 \
+    libqrencode-tools=4.1.1-r3 \
+    net-tools=2.10-r3 \
+    nftables=1.1.6-r1 \
+    openresolv=3.17.4-r0 \
+    unbound=1.25.2-r2 && \
   echo "wireguard" >> /etc/modules && \
   echo "**** cleanup ****" && \
   rm -rf \
