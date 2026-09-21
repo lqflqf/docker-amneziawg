@@ -140,12 +140,12 @@ jobs:
           docker run --rm test-image ls -la /usr/bin/awg /usr/bin/awg-quick /usr/bin/amneziawg-go /usr/bin/wg /usr/bin/wg-quick
           echo "- Binaries present" >> "$GITHUB_STEP_SUMMARY"
 
-          # Check s6-overlay structure (all 4 services + branding)
+          # Check s6-overlay structure (all services + branding)
           echo "### s6-overlay structure" >> "$GITHUB_STEP_SUMMARY"
           docker run --rm test-image sh -c '
             test -f /etc/s6-overlay/s6-rc.d/init-amneziawg-module/type && echo "init-amneziawg-module: OK"
             test -f /etc/s6-overlay/s6-rc.d/init-amneziawg-confs/type && echo "init-amneziawg-confs: OK"
-            test -f /etc/s6-overlay/s6-rc.d/svc-coredns/type && echo "svc-coredns: OK"
+            test -f /etc/s6-overlay/s6-rc.d/svc-unbound/type && echo "svc-unbound: OK"
             test -f /etc/s6-overlay/s6-rc.d/svc-amneziawg/type && echo "svc-amneziawg: OK"
             test -f /etc/s6-overlay/s6-rc.d/init-adduser/branding && echo "branding: OK"
           '
@@ -156,7 +156,7 @@ jobs:
           docker run --rm test-image sh -c '
             echo "init-amneziawg-module: $(cat /etc/s6-overlay/s6-rc.d/init-amneziawg-module/type)"
             echo "init-amneziawg-confs: $(cat /etc/s6-overlay/s6-rc.d/init-amneziawg-confs/type)"
-            echo "svc-coredns: $(cat /etc/s6-overlay/s6-rc.d/svc-coredns/type)"
+            echo "svc-unbound: $(cat /etc/s6-overlay/s6-rc.d/svc-unbound/type)"
             echo "svc-amneziawg: $(cat /etc/s6-overlay/s6-rc.d/svc-amneziawg/type)"
           '
           echo "- Service types verified" >> "$GITHUB_STEP_SUMMARY"
@@ -166,8 +166,8 @@ jobs:
           docker run --rm test-image sh -c '
             test -f /etc/s6-overlay/s6-rc.d/init-amneziawg-module/dependencies.d/init-config && echo "module depends on init-config: OK"
             test -f /etc/s6-overlay/s6-rc.d/init-amneziawg-confs/dependencies.d/init-amneziawg-module && echo "confs depends on module: OK"
-            test -f /etc/s6-overlay/s6-rc.d/svc-coredns/dependencies.d/init-services && echo "coredns depends on init-services: OK"
-            test -f /etc/s6-overlay/s6-rc.d/svc-amneziawg/dependencies.d/svc-coredns && echo "amneziawg depends on coredns: OK"
+            test -f /etc/s6-overlay/s6-rc.d/svc-unbound/dependencies.d/init-services && echo "unbound depends on init-services: OK"
+            test -f /etc/s6-overlay/s6-rc.d/svc-amneziawg/dependencies.d/svc-unbound && echo "amneziawg depends on unbound: OK"
           '
           echo "- Dependency chain correct" >> "$GITHUB_STEP_SUMMARY"
 
@@ -182,10 +182,14 @@ jobs:
           '
           echo "- All defaults present" >> "$GITHUB_STEP_SUMMARY"
 
-          # Check CoreDNS binary
-          echo "### CoreDNS" >> "$GITHUB_STEP_SUMMARY"
-          docker run --rm test-image which coredns
-          echo "- CoreDNS binary present" >> "$GITHUB_STEP_SUMMARY"
+          # Check unbound installation and configuration tooling
+          echo "### Unbound" >> "$GITHUB_STEP_SUMMARY"
+          docker run --rm test-image sh -c '
+            command -v unbound
+            command -v unbound-checkconf
+            test -f /defaults/unbound.conf
+          '
+          echo "- Unbound binaries and default configuration present" >> "$GITHUB_STEP_SUMMARY"
 
           # Generate a real AWG 3.1 config set and check the keys land in the
           # right sections. Tunnel activation is expected to fail on a CI
