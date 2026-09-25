@@ -159,7 +159,7 @@ For custom protocols (DNS, DTLS, SIP, HTTP/3): use [AmneziaWG Architect](https:/
 
 - Push to the default branch (or manual run on it without overrides) -> multi-arch build (`amd64`, `arm64`) -> `:<tools>-r<N>` + `:<tools>` + `:latest` + `:sha-<short>`, then git tag + GitHub Release `v<tools>-r<N>` carrying the image digest. Skipped when nothing image-affecting changed since the last release tag
 - PRs -> smoke tests only (single-platform `--load` build): binaries, s6 structure, service types, dependency chain, CoreDNS, branding
-- `workflow_dispatch` with `amneziawg_go_version`/`amneziawg_tools_version` overrides -> ad-hoc build: `:sha-<short>` + `:dispatch-<run>` only, no `latest`, no release
+- `workflow_dispatch` with `amneziawg_go_version`/`amneziawg_tools_version` overrides -> ad-hoc build: `:dispatch-<run>` only (no `:sha-*`), no `latest`, no release
 - No `v*` tag trigger; release tags are created by the workflow and are the build counter
 
 ### upstream-check.yml
