@@ -102,10 +102,12 @@ All clients and server must use identical values. Key constraints:
 ### Workflows
 
 **`docker-build.yml`** — main build pipeline:
-- Push to `master`/`main` → builds multi-arch (`amd64`, `arm64`) and pushes to `ghcr.io/ayastrebov/docker-amneziawg:latest` + upstream tools version tag, then creates a GitHub Release tagged with the tools version (skipped if the release already exists)
-- `v*` tags → semantic version tags (`1.0.0`, `1.0`, `1`)
-- PRs → smoke tests only (single-platform `--load` build, no multi-arch QEMU): binaries, s6 structure, service types, dependency chain, CoreDNS, branding
-- Upstream versions are read from the Dockerfile `ARG` pins (single source of truth); `workflow_dispatch` accepts `amneziawg_go_version` and `amneziawg_tools_version` overrides for one-off builds
+- Jobs: `changes` (mode + image-path gate) → `version` → `build` → `release`. Only `Dockerfile`, `root/**`, `.dockerignore`, the workflow and `.github/scripts/` are image content; on the default branch the gate diffs against the **last release tag**, not the previous push, so an image change from a failed or superseded run is never lost. Manual runs always build
+- Push to the default branch (or `workflow_dispatch` on it without overrides) = **release mode**: builds multi-arch (`amd64`, `arm64`), pushes `:<tools>-r<N>` (immutable), `:<tools>` and `:latest` (floating) and `:sha-<short>`, then creates the annotated git tag `v<tools>-r<N>` and a GitHub Release with the image digest. One release == one image
+- Publishing runs are serialized (`concurrency` group `…-publish`) because they claim the next `N`
+- PRs → smoke tests only (single-platform `--load` build, no multi-arch QEMU): binaries, s6 structure, service types, dependency chain, CoreDNS, branding, plus `.github/scripts/next-version.test.sh`
+- `workflow_dispatch` with `amneziawg_go_version`/`amneziawg_tools_version` overrides = **ad-hoc mode**: pushes only `:sha-<short>` and `:dispatch-<run>`, never `latest`, a release tag, or a GitHub Release
+- There is no `v*` tag trigger — do not push `v*-r*` tags by hand, they *are* the build counter
 
 **`upstream-check.yml`** — daily upstream version check (06:00 UTC):
 - Compares `ARG` defaults in Dockerfile against latest amneziawg-tools and amneziawg-go releases
@@ -113,7 +115,9 @@ All clients and server must use identical values. Key constraints:
 
 ### Versioning
 
-Container images are tagged with the upstream `amneziawg-tools` version (e.g., `1.0.20260223`). Both upstream versions are pinned as `ARG` defaults at the top of the Dockerfile:
+Releases are `<amneziawg-tools>-r<N>` (e.g. image `3.1.20260812-r2`, git tag/release `v3.1.20260812-r2`), the LinuxServer build-counter pattern. `N` restarts at 1 for each tools version and increments on every published build (script changes, amneziawg-go bumps, base-image refreshes). It is computed by `.github/scripts/next-version.sh` from the existing `v<tools>-r*` tags; each tag's annotation records `run-id: <id>` so a re-run reuses its number, and the image carries the same id in the `io.github.actions.run-id` label so a re-run reuses an already-pushed image instead of overwriting it. The build fails rather than overwrite a `<tools>-r<N>` pushed by a different run. `VERSION` (→ `/build_version`) and `org.opencontainers.image.version` are the full `<tools>-r<N>`.
+
+Both upstream versions are pinned as `ARG` defaults at the top of the Dockerfile (single source of truth):
 - `AMNEZIAWG_GO_VERSION` — amneziawg-go tag (e.g., `v0.2.16`)
 - `AMNEZIAWG_TOOLS_VERSION` — amneziawg-tools release (e.g., `v1.0.20260223`)
 
