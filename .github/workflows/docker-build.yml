@@ -253,7 +253,7 @@ jobs:
           fi
           OWNER=$(jq -r 'if has("config") then . else first(.[]) end | .config.Labels["io.github.actions.run-id"] // empty' <<<"$IMAGE_JSON")
           if [[ "$OWNER" != "$GITHUB_RUN_ID" ]]; then
-            echo "::error::${REF} already exists (pushed by run ${OWNER:-unknown}, this is run ${GITHUB_RUN_ID}). Refusing to overwrite a released image. Re-run the failed jobs of run ${OWNER:-unknown} to finish its release, or delete the orphaned image tag."
+            echo "::error::${REF} already exists (pushed by run ${OWNER:-unknown}, this is run ${GITHUB_RUN_ID}). Refusing to overwrite a published image tag. If run ${OWNER:-unknown} failed before creating its release, re-run its failed jobs to finish it (this run can then be re-run and will take the next number); otherwise delete the orphaned image tag."
             exit 1
           fi
           DIGEST=$(docker buildx imagetools inspect "$REF" --format '{{.Manifest.Digest}}')
@@ -553,5 +553,20 @@ jobs:
           ${CHANGES}
           EOF
 
-          gh release create "$TAG" --verify-tag --latest --title "$TAG" --notes-file release-notes.md
+          # The API can fail (e.g. HTTP 504) after the release was in fact
+          # created, so check before retrying.
+          for attempt in 1 2 3; do
+            if gh release create "$TAG" --verify-tag --latest --title "$TAG" --notes-file release-notes.md; then
+              break
+            fi
+            sleep 10
+            if gh release view "$TAG" > /dev/null 2>&1; then
+              echo "Release ${TAG} exists despite the error above — continuing."
+              break
+            fi
+            if (( attempt == 3 )); then
+              echo "::error::Could not create release ${TAG}; re-run the failed jobs to retry"
+              exit 1
+            fi
+          done
           echo "Created release [${TAG}](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/releases/tag/${TAG}) for ${IMAGE}@${DIGEST}" >> "$GITHUB_STEP_SUMMARY"
