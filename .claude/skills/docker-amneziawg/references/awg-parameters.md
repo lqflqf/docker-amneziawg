@@ -29,13 +29,15 @@ Adds padding bytes to different message types to obscure their true size.
 | `AWG_S1` | int | Random 15-150 | ≤ 1132 (1280-148) | Handshake initiation |
 | `AWG_S2` | int | Random 15-150 | ≤ 1188 (1280-92) | Handshake response |
 | `AWG_S3` | int | Random 8-55 (2.0) / 0 (1.5) | ≤ 64 | Cookie reply |
-| `AWG_S4` | int | Random 4-27 (2.0) / 0 (1.5) | ≤ 32 | Transport data (per-packet overhead, keep small) |
+| `AWG_S4` | int | Random 4-20 (2.0) / 12-20 (3.x) / 0 (1.5) | ≤ 32, prefer ≤ 20 | Transport data (per-packet overhead, keep small). Above 20, full-size packets fragment at the default 1420 MTU |
 
 **Critical constraint**: `S1 + 56 ≠ S2` (these values must not have this relationship)
 
 **How it works**: Each parameter specifies how many random padding bytes to add to that message type. This prevents DPI from identifying messages by their characteristic sizes.
 
-**Note**: S3 and S4 are AWG 2.0 extensions (set to 0 in AWG 1.5). S4 should be kept small (4-27) since it adds overhead to every data packet. S3 can be slightly larger (8-55) since cookie replies are rare.
+**Note**: S3 and S4 are AWG 2.0 extensions (set to 0 in AWG 1.5). S4 should be kept small (4-20) since it adds overhead to every data packet and eats MTU headroom. S3 can be slightly larger (8-55) since cookie replies are rare.
+
+**With `RandomTrailers` on, all four must be equal** (`S1 == S2 == S3 == S4`) under AWG 2.0+. Trailers turn the receiver's exact-length packet-type check into a lower bound, so the type field's offset — which is the relevant `S` value — is all that keeps the four branches apart. Unequal values cost ~3.5% of transport packets. AWG 1.5 is exempt because its `H` values are single integers rather than 50M-wide ranges. See [`docs/awg-performance.md`](../../../../docs/awg-performance.md).
 
 ### Header Obfuscation (H1, H2, H3, H4)
 
@@ -70,7 +72,7 @@ AWG_JMAX=${AWG_JMAX:-$(shuf -i 80-250 -n 1)}
 AWG_S1=${AWG_S1:-$(shuf -i 15-150 -n 1)}
 AWG_S2=${AWG_S2:-$(shuf -i 15-150 -n 1)}
 AWG_S3=${AWG_S3:-$(shuf -i 8-55 -n 1)}   # AWG 2.0
-AWG_S4=${AWG_S4:-$(shuf -i 4-27 -n 1)}   # AWG 2.0, keep small (per-packet)
+AWG_S4=${AWG_S4:-$(shuf -i 4-20 -n 1)}   # AWG 2.0; <=20 so the derived 1420 MTU does not fragment
 
 # Headers (min 5 to avoid collision with standard WireGuard values 1-4)
 AWG_H1=${AWG_H1:-$(shuf -i 5-2147483647 -n 1)}
@@ -140,10 +142,34 @@ AWG 2.0 introduces Custom Protocol Signature (CPS) packets that are sent before 
 | Tag | Description | Example | Output |
 |-----|-------------|---------|--------|
 | `<b 0xHEX>` | Static hex bytes | `<b 0x170303>` | `\x17\x03\x03` |
-| `<r N>` | N random bytes (max 1000) | `<r 32>` | 32 random bytes |
+| `<r N>` | N random bytes — no size limit in current AmneziaWG (see note below) | `<r 32>` | 32 random bytes |
 | `<rd N>` | N random digits (0-9) | `<rd 8>` | 8 random digit bytes |
 | `<rc N>` | N random characters (a-zA-Z) | `<rc 16>` | 16 random letter bytes |
 | `<t>` | 32-bit Unix timestamp | `<t>` | Current epoch time |
+
+#### `<r N>` size
+
+There is no per-tag size limit in current AmneziaWG. The 1000-byte cap that older versions of this
+document stated existed in exactly one implementation and is gone:
+
+- `amneziawg-go` ≤ v0.2.15 rejected `<r>`/`<rc>`/`<rd>` above 1000 in `newRandomGeneratorBase`
+  (`device/awg/tag_generator.go:73`, `if size > 1000`). Removed 2025-12-01 by `0361c54`
+  ("fix: refactor processing of junk packets", PR #103); every release since v0.2.16, including
+  the pinned v3.1.20260828, parses the size with a bare `strconv.Atoi` (`device/obf_rand.go:8-17`).
+- `amneziawg-tools` (`config.c:533`, `strdup`) and the kernel module (`junk.c:108-124`,
+  `kstrtoint`; `netlink.c:58`, unbounded `NLA_NUL_STRING`) never had one.
+
+docs.amnezia.org still lists `<r length>` as "length ≤ 1000" (and `<rc>`/`<rd>` "N ≤ 1000"), so
+third-party parsers written to the published text may enforce it. Observed: Keenetic NDMS ASC
+rejects a peer conf carrying this container's default I1 with `invalid I1 value`, while a
+KeeneticOS 5.1 user reports `…<r 1000><r 184>` working (forum.keenetic.ru topic 27738). The exact
+threshold is not confirmed, and `invalid I1 value` is not size-specific (forum.keenetic.com topic
+26532 shows it from an unrelated cause). For such a parser, split only the oversized tag into consecutive tags of the same kind and
+leave the rest of the value untouched — the default's `<r 1178>` becomes `<r 1000><r 178>`, so the
+full value reads `<b 0xc3><b 0x00000001><b 0x08><r 8><b 0x00><b 0x00><b 0x449e><r 4><r 1000><r 178>`. That is
+byte-identical on the wire: both stacks fill one buffer tag by tag
+(`junk.c` `jp_spec_setup`, `amneziawg-go` `obfChain`), and I1-I5 are send-only, so peers holding
+either spelling interoperate. The container deliberately keeps the single-tag form.
 
 **Maximum packet size**: 5KB per signature packet.
 
@@ -214,7 +240,7 @@ AWG_I1="<b 0xc3><b 0x00000001><b 0x08><r 8><b 0x00><b 0x00><b 0x449e><r 4><r 117
 - `<b 0x00><b 0x00>` — SCID length=0, token length=0
 - `<b 0x449e>` — 2-byte QUIC length varint = 1182 (packet_number + payload)
 - `<r 4>` — random packet number
-- `<r 1178>` — random encrypted payload (AEAD ciphertext looks random)
+- `<r 1178>` — random encrypted payload (AEAD ciphertext looks random). One tag on purpose: current AmneziaWG has no per-tag size limit (see `<r N>` size above); split it as `<r 1000><r 178>` only for a third-party parser that still enforces the old 1000 cap
 - **Total: 1200 bytes** — meets RFC 9000 §14.1 minimum
 
 **Why QUIC, not TLS ClientHello (0x160301)?** TLS runs over TCP. Sending a TLS record header over UDP
@@ -268,6 +294,15 @@ Reduce `Jc` value. More junk packets = more processing overhead.
 
 ### Handshake timeout
 Ensure `JMAX` isn't too large. Very large junk packets may be dropped by some networks.
+
+### Slow throughput, handshake fine
+Check these three, in order. Full analysis and measurements: [`docs/awg-performance.md`](../../../../docs/awg-performance.md).
+
+1. **Upload far worse than download, `RandomTrailers` on.** Trailers relax the receiver's packet-type check from an exact length match to `>=` (`receive.c:51,62,73`), leaving the `H` ranges as the only discriminator. Each type's branch reads the type field at its own `S` offset, so unequal `S1`-`S4` make three branches read garbage, which lands in a 50M-wide `H` range ~1.16% of the time each — **~3.5% of transport packets dropped**, upload ~100 → ~2 Mbit/s. Fix with `S1 == S2 == S3 == S4` (or `H1..H4 = 1,2,3,4`, or trailers off). The container's generator now draws one shared value for all four when trailers resolve to on (`init-amneziawg-confs/run`) and warns if a user pins them unequal — but configs generated by image versions before that fix, and `awg_params` saved by them, carry unequal `S` values and hit this until the values are pinned equal and peers re-issued.
+2. **Download ~22% low.** `ContentPaddingAddition` gives every datagram a different length, defeating `UDP_GRO` coalescing on userspace clients (`conn/gso_linux.go` batches only consecutive equal-sized datagrams). Set `AWG_CONTENT_PADDING=0`. Setting it alongside `RandomTrailers` is strictly worse than either alone: it suppresses trailers on send (`send.c:254`) but not the loose receive matching (`receive.c:47`).
+3. **MTU.** `awg-quick` derives 1420 without accounting for `S4`, so full-size datagrams exceed 1500 when `S4 > 20` (IPv4) or on any IPv6 endpoint, and fragment. Use `MTU = 1280` on mobile/PPPoE/unknown paths, `1500 − 60 − S4` on a clean IPv4 path — and `path − 60 − S4` (IPv4) / `path − 80 − S4` (IPv6) when the path is itself constrained: a true 1280-byte path needs 1208/1188, since 1280 there still fragments. Details: README "MTU", CONTEXT.md "MTU and per-packet overhead".
+
+`RandomTrailers` does not pad full-size transport packets (it short-circuits, `peer.h:105`) so transport fragmentation is off the table — though kernel modules built before `4569c4c6` (2026-09-06) appended trailers to I1-I5/junk packets, producing rare oversized handshake-burst packets. The fix left `version.h` at `3.1.20260812`, so detect it from the package version, not the module version string (`docs/awg-performance.md`). It triples small-packet wire cost — 537 bytes for a 64-byte ping versus 182. `ContentPaddingAddition` is capped at the observed UDP window rather than the MTU, so it does grow full-size packets slightly.
 
 ## References
 
