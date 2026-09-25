@@ -31,6 +31,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - amneziawg-tools updated to v3.0.20260730, the first release with AWG 3.0 config parsing
 - Updated to use GitHub Packages for pre-built images
 
+### Changed
+- Image labels, README badges, image references, the issues link and the startup banner now point to this fork (`lqflqf/docker-amneziawg`) instead of the upstream repo. The OCI `title`/`authors`/`vendor`/`url`/`documentation` labels no longer carry the LinuxServer base image's values. The README and banner credit the upstream project, [AYastrebov/docker-amneziawg](https://github.com/AYastrebov/docker-amneziawg)
+
 ### Removed
 - `ADVANCED_AWG_HUB.md` (server + client hub guide)
 - `CONTEXT.md`. It duplicated `CLAUDE.md`, `.claude/skills/docker-amneziawg/references/awg-parameters.md` and `docs/awg-performance.md`; its volume layout and troubleshooting table moved to `CLAUDE.md`

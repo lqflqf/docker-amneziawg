@@ -7,7 +7,7 @@ This is the production deploy template. Fill in `<<...>>` placeholders with the 
 ```yaml
 services:
   amneziawg:
-    image: ghcr.io/ayastrebov/docker-amneziawg:latest
+    image: ghcr.io/lqflqf/docker-amneziawg:latest
     container_name: amneziawg
     cap_add:
       - NET_ADMIN
@@ -134,7 +134,7 @@ If the user wants to deploy purely as a client (e.g., to route a Docker network 
 ```yaml
 services:
   amneziawg:
-    image: ghcr.io/ayastrebov/docker-amneziawg:latest
+    image: ghcr.io/lqflqf/docker-amneziawg:latest
     container_name: amneziawg
     cap_add:
       - NET_ADMIN

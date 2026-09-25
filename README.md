@@ -1,11 +1,13 @@
 # Docker AmneziaWG
 
-[![Docker Build](https://github.com/AYastrebov/docker-amneziawg/actions/workflows/docker-build.yml/badge.svg)](https://github.com/AYastrebov/docker-amneziawg/actions/workflows/docker-build.yml)
-[![GitHub Container Registry](https://img.shields.io/badge/ghcr.io-docker--amneziawg-blue?logo=docker)](https://github.com/AYastrebov/docker-amneziawg/pkgs/container/docker-amneziawg)
-[![GitHub release](https://img.shields.io/github/v/release/AYastrebov/docker-amneziawg)](https://github.com/AYastrebov/docker-amneziawg/releases)
+[![Docker Build](https://github.com/lqflqf/docker-amneziawg/actions/workflows/docker-build.yml/badge.svg)](https://github.com/lqflqf/docker-amneziawg/actions/workflows/docker-build.yml)
+[![GitHub Container Registry](https://img.shields.io/badge/ghcr.io-docker--amneziawg-blue?logo=docker)](https://github.com/lqflqf/docker-amneziawg/pkgs/container/docker-amneziawg)
+[![GitHub release](https://img.shields.io/github/v/release/lqflqf/docker-amneziawg)](https://github.com/lqflqf/docker-amneziawg/releases)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 [AmneziaWG](https://docs.amnezia.org/) VPN server and client in one container. It writes the server config and hands you a ready config plus QR code for every peer, and it can answer DNS for connected clients. Built on [LinuxServer.io](https://www.linuxserver.io/) base images with s6-overlay.
+
+> Forked from [AYastrebov/docker-amneziawg](https://github.com/AYastrebov/docker-amneziawg), created and maintained by [Andrey Yastrebov](https://github.com/AYastrebov). The container's design, its config generation and most of its AWG work are his. Many thanks to him for building it and releasing it under the MIT license.
 
 AmneziaWG is WireGuard with added traffic obfuscation, so deep packet inspection has a harder time recognizing the handshake. The container picks random obfuscation values on first start, including the I1-I5 protocol signatures, then saves them and reuses them on later restarts so already distributed peer configs keep working.
 
@@ -26,6 +28,7 @@ AmneziaWG is WireGuard with added traffic obfuscation, so deep packet inspection
 - [Support info](#support-info)
 - [Building locally](#building-locally)
 - [Links](#links)
+- [Credits](#credits)
 
 ## Quick start
 
@@ -34,7 +37,7 @@ Server mode, three peers, using Docker Compose:
 ```yaml
 services:
   amneziawg:
-    image: ghcr.io/ayastrebov/docker-amneziawg:latest
+    image: ghcr.io/lqflqf/docker-amneziawg:latest
     container_name: amneziawg
     cap_add:
       - NET_ADMIN
@@ -91,7 +94,7 @@ docker run -d \
   --sysctl net.ipv4.ip_forward=1 \
   --sysctl net.ipv4.conf.all.src_valid_mark=1 \
   --restart unless-stopped \
-  ghcr.io/ayastrebov/docker-amneziawg:latest
+  ghcr.io/lqflqf/docker-amneziawg:latest
 ```
 
 ## Requirements
@@ -128,7 +131,7 @@ docker run -d \
   --sysctl net.ipv4.ip_forward=1 \
   --sysctl net.ipv4.conf.all.src_valid_mark=1 \
   --restart unless-stopped \
-  ghcr.io/ayastrebov/docker-amneziawg:latest
+  ghcr.io/lqflqf/docker-amneziawg:latest
 ```
 
 ## Parameters
@@ -417,6 +420,10 @@ docker buildx build --platform linux/amd64,linux/arm64 -t amneziawg .
 
 See [CONTRIBUTING.md](CONTRIBUTING.md). Security issues go through [SECURITY.md](SECURITY.md).
 
+## Credits
+
+This project is a fork of [AYastrebov/docker-amneziawg](https://github.com/AYastrebov/docker-amneziawg) by [Andrey Yastrebov](https://github.com/AYastrebov), who created it and wrote the bulk of its history. It builds on [LinuxServer docker-wireguard](https://github.com/linuxserver/docker-wireguard) and the [AmneziaVPN](https://github.com/amnezia-vpn) team's `amneziawg-go`, `amneziawg-tools` and kernel module.
+
 ## License
 
-MIT, see [LICENSE](LICENSE).
+MIT, see [LICENSE](LICENSE). The original copyright notice is kept as the license requires.

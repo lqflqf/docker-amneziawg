@@ -48,8 +48,16 @@ ARG VERSION
 ARG AMNEZIAWG_GO_VERSION
 ARG AMNEZIAWG_TOOLS_VERSION
 LABEL build_version="AmneziaWG version:- ${VERSION} Build-date:- ${BUILD_DATE}"
-LABEL maintainer="AYastrebov"
-LABEL org.opencontainers.image.source="https://github.com/AYastrebov/docker-amneziawg"
+# Override the labels inherited from the LinuxServer base image (maintainer
+# included, or it reads as a LinuxServer maintainer). CI's
+# metadata-action also sets source/title/url/revision; these cover local builds.
+LABEL org.opencontainers.image.title="docker-amneziawg"
+LABEL maintainer="lqflqf"
+LABEL org.opencontainers.image.authors="lqflqf"
+LABEL org.opencontainers.image.vendor="lqflqf"
+LABEL org.opencontainers.image.source="https://github.com/lqflqf/docker-amneziawg"
+LABEL org.opencontainers.image.url="https://github.com/lqflqf/docker-amneziawg"
+LABEL org.opencontainers.image.documentation="https://github.com/lqflqf/docker-amneziawg#readme"
 LABEL org.opencontainers.image.description="AmneziaWG VPN container (amneziawg-tools ${AMNEZIAWG_TOOLS_VERSION}, amneziawg-go ${AMNEZIAWG_GO_VERSION})"
 LABEL org.opencontainers.image.licenses="MIT"
 LABEL org.opencontainers.image.version="${AMNEZIAWG_TOOLS_VERSION}"
