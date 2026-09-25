@@ -84,7 +84,7 @@ Ask the user for these settings. Group related questions to minimize back-and-fo
 | Setting | Env var | Default | When to override |
 |---|---|---|---|
 | VPN subnet | `INTERNAL_SUBNET` | `10.13.13.0` | Change if `10.13.13.0/24` conflicts with the user's LAN. |
-| Peer DNS | `PEERDNS` | `auto` (container's CoreDNS) | Override to `1.1.1.1, 8.8.8.8` if the user wants public resolvers. |
+| Peer DNS | `PEERDNS` | `auto` (container's unbound resolver) | Override to `1.1.1.1, 8.8.8.8` if the user wants public resolvers. |
 | Allowed IPs | `ALLOWEDIPS` | `0.0.0.0/0, ::/0` | Restrict to specific subnets for split-tunnel. |
 | Persistent keepalive | `PERSISTENTKEEPALIVE_PEERS` | unset | Set to `all` for mobile peers behind NAT. |
 | Per-peer site-to-site routes | `SERVER_ALLOWEDIPS_PEER_X` | unset | For routing back to a peer's LAN subnet. |

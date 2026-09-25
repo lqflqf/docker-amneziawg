@@ -1,8 +1,17 @@
 name: Check Upstream Releases
 
-# Check for new amneziawg-tools and amneziawg-go releases daily.
-# If a new version is found, update the pinned versions in the Dockerfile
-# and open a pull request. The docker-build workflow runs on merge.
+# Check for new amneziawg-tools and amneziawg-go releases daily. If a newer
+# version is found, build the image with the new pins, smoke-test it, and only
+# then open (or update) a pull request. The docker-build workflow publishes on
+# merge.
+#
+# A PR opened with GITHUB_TOKEN does not trigger pull_request workflows, which
+# is why the smoke test runs here. To also get the regular PR checks, add a
+# repository secret UPSTREAM_PR_TOKEN (a GitHub App token or fine-grained PAT
+# with contents + pull-requests write); it is used instead of GITHUB_TOKEN.
+#
+# Upstream tag names are untrusted input: they are validated against a strict
+# version pattern and only ever reach shells through environment variables.
 
 on:
   schedule:
@@ -13,9 +22,9 @@ concurrency:
   group: upstream-check
   cancel-in-progress: false
 
+# Jobs that need more ask for it themselves.
 permissions:
-  contents: write
-  pull-requests: write
+  contents: read
 
 env:
   TOOLS_REPO: amnezia-vpn/amneziawg-tools
@@ -25,111 +34,156 @@ jobs:
   check-upstream:
     runs-on: ubuntu-latest
     outputs:
-      tools_changed: ${{ steps.compare.outputs.tools_changed }}
-      go_changed: ${{ steps.compare.outputs.go_changed }}
-      new_tools_version: ${{ steps.upstream.outputs.tools_version }}
-      new_go_version: ${{ steps.upstream.outputs.go_version }}
+      changed: ${{ steps.compare.outputs.changed }}
+      current_tools: ${{ steps.compare.outputs.current_tools }}
+      current_go: ${{ steps.compare.outputs.current_go }}
+      # empty when that pin stays as it is
+      new_tools: ${{ steps.compare.outputs.new_tools }}
+      new_go: ${{ steps.compare.outputs.new_go }}
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
 
       - name: Get latest upstream versions
         id: upstream
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          echo "## Upstream version check" >> "$GITHUB_STEP_SUMMARY"
+          # Only plain vX.Y.Z tags: prereleases (-beta-...), hotfix suffixes and
+          # anything else are skipped, and nothing unvalidated is passed on.
+          newest() { grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n1 || true; }
 
-          # Get latest amneziawg-tools release
-          TOOLS_VERSION=$(gh release list --repo "$TOOLS_REPO" --limit 1 --json tagName --jq '.[0].tagName')
-          if [[ -z "$TOOLS_VERSION" || ! "$TOOLS_VERSION" =~ ^v?[0-9]+\.[0-9]+ ]]; then
-            echo "::error::Failed to fetch valid amneziawg-tools version (got: '${TOOLS_VERSION}')"
+          # amneziawg-tools: highest published (non-draft, non-prerelease) release
+          TOOLS=$(gh api --paginate "repos/${TOOLS_REPO}/releases?per_page=100" \
+            --jq '.[] | select((.draft or .prerelease) | not) | .tag_name' | newest)
+          # amneziawg-go: highest tag (it does not publish releases). The tags
+          # API is not sorted by version, so sort ourselves.
+          GO=$(gh api --paginate "repos/${GO_REPO}/tags?per_page=100" --jq '.[].name' | newest)
+
+          if [[ -z "$TOOLS" || -z "$GO" ]]; then
+            echo "::error::Could not find a valid upstream version (amneziawg-tools: '${TOOLS}', amneziawg-go: '${GO}')"
             exit 1
           fi
-          echo "Latest amneziawg-tools: ${TOOLS_VERSION}" >> "$GITHUB_STEP_SUMMARY"
-          echo "tools_version=${TOOLS_VERSION}" >> "$GITHUB_OUTPUT"
-
-          # Get latest amneziawg-go tag (no releases, uses tags)
-          GO_VERSION=$(gh api "repos/${GO_REPO}/tags" --jq '.[0].name')
-          if [[ -z "$GO_VERSION" || ! "$GO_VERSION" =~ ^v?[0-9]+\.[0-9]+ ]]; then
-            echo "::error::Failed to fetch valid amneziawg-go version (got: '${GO_VERSION}')"
-            exit 1
-          fi
-          echo "Latest amneziawg-go: ${GO_VERSION}" >> "$GITHUB_STEP_SUMMARY"
-          echo "go_version=${GO_VERSION}" >> "$GITHUB_OUTPUT"
+          {
+            echo "## Upstream version check"
+            echo "- latest amneziawg-tools: \`${TOOLS}\`"
+            echo "- latest amneziawg-go: \`${GO}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "tools=${TOOLS}" >> "$GITHUB_OUTPUT"
+          echo "go=${GO}" >> "$GITHUB_OUTPUT"
 
       - name: Compare with current pinned versions
         id: compare
+        env:
+          LATEST_TOOLS: ${{ steps.upstream.outputs.tools }}
+          LATEST_GO: ${{ steps.upstream.outputs.go }}
         run: |
-          # Extract current pinned versions from Dockerfile
-          CURRENT_TOOLS=$(grep "^ARG AMNEZIAWG_TOOLS_VERSION=" Dockerfile | cut -d= -f2)
-          CURRENT_GO=$(grep "^ARG AMNEZIAWG_GO_VERSION=" Dockerfile | cut -d= -f2)
+          CURRENT_TOOLS=$(grep '^ARG AMNEZIAWG_TOOLS_VERSION=' Dockerfile | cut -d= -f2)
+          CURRENT_GO=$(grep '^ARG AMNEZIAWG_GO_VERSION=' Dockerfile | cut -d= -f2)
+          echo "- current amneziawg-tools: \`${CURRENT_TOOLS}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- current amneziawg-go: \`${CURRENT_GO}\`" >> "$GITHUB_STEP_SUMMARY"
 
-          echo "Current amneziawg-tools: ${CURRENT_TOOLS}" >> "$GITHUB_STEP_SUMMARY"
-          echo "Current amneziawg-go: ${CURRENT_GO}" >> "$GITHUB_STEP_SUMMARY"
+          # Sets NEWER to the upstream version if it is strictly newer than the
+          # pin, otherwise to "" (never downgrade).
+          newer() {
+            local name=$1 current=$2 latest=$3
+            NEWER=""
+            [[ "$latest" == "$current" ]] && return 0
+            if [[ "$(printf '%s\n%s\n' "$current" "$latest" | sort -V | tail -n1)" != "$latest" ]]; then
+              echo "::warning::${name}: newest upstream ${latest} is older than the pinned ${current}; not downgrading"
+              return 0
+            fi
+            echo "**${name} update available: ${current} -> ${latest}**" >> "$GITHUB_STEP_SUMMARY"
+            NEWER="$latest"
+          }
+          newer amneziawg-tools "$CURRENT_TOOLS" "$LATEST_TOOLS"; NEW_TOOLS="$NEWER"
+          newer amneziawg-go "$CURRENT_GO" "$LATEST_GO"; NEW_GO="$NEWER"
 
-          TOOLS_CHANGED="false"
-          GO_CHANGED="false"
-
-          if [[ "${CURRENT_TOOLS}" != "${{ steps.upstream.outputs.tools_version }}" ]]; then
-            echo "**amneziawg-tools update available: ${CURRENT_TOOLS} -> ${{ steps.upstream.outputs.tools_version }}**" >> "$GITHUB_STEP_SUMMARY"
-            TOOLS_CHANGED="true"
+          if [[ -n "${NEW_TOOLS}${NEW_GO}" ]]; then
+            CHANGED=true
+          else
+            CHANGED=false
+            echo "No upstream updates." >> "$GITHUB_STEP_SUMMARY"
           fi
+          {
+            echo "changed=${CHANGED}"
+            echo "current_tools=${CURRENT_TOOLS}"
+            echo "current_go=${CURRENT_GO}"
+            echo "new_tools=${NEW_TOOLS}"
+            echo "new_go=${NEW_GO}"
+          } >> "$GITHUB_OUTPUT"
 
-          if [[ "${CURRENT_GO}" != "${{ steps.upstream.outputs.go_version }}" ]]; then
-            echo "**amneziawg-go update available: ${CURRENT_GO} -> ${{ steps.upstream.outputs.go_version }}**" >> "$GITHUB_STEP_SUMMARY"
-            GO_CHANGED="true"
-          fi
+  # Build and smoke-test the bump before proposing it, with a read-only token:
+  # this job compiles upstream code.
+  smoke:
+    needs: check-upstream
+    if: needs.check-upstream.outputs.changed == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
 
-          if [[ "${TOOLS_CHANGED}" == "false" ]] && [[ "${GO_CHANGED}" == "false" ]]; then
-            echo "No upstream changes detected." >> "$GITHUB_STEP_SUMMARY"
-          fi
+      - name: Update Dockerfile version pins
+        env:
+          NEW_TOOLS: ${{ needs.check-upstream.outputs.new_tools }}
+          NEW_GO: ${{ needs.check-upstream.outputs.new_go }}
+        run: .github/scripts/update-pins.sh "$NEW_TOOLS" "$NEW_GO"
 
-          echo "tools_changed=${TOOLS_CHANGED}" >> "$GITHUB_OUTPUT"
-          echo "go_changed=${GO_CHANGED}" >> "$GITHUB_OUTPUT"
+      - name: Build test image (linux/amd64)
+        run: docker build -t test-image --build-arg VERSION=upstream-check .
+
+      - name: Smoke tests
+        run: .github/scripts/smoke-test.sh test-image
 
   open-pr:
-    needs: check-upstream
-    if: needs.check-upstream.outputs.tools_changed == 'true' || needs.check-upstream.outputs.go_changed == 'true'
+    needs: [check-upstream, smoke]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Update Dockerfile version pins
+        id: pins
+        env:
+          NEW_TOOLS: ${{ needs.check-upstream.outputs.new_tools }}
+          NEW_GO: ${{ needs.check-upstream.outputs.new_go }}
+          CURRENT_TOOLS: ${{ needs.check-upstream.outputs.current_tools }}
+          CURRENT_GO: ${{ needs.check-upstream.outputs.current_go }}
         run: |
-          if [[ "${{ needs.check-upstream.outputs.tools_changed }}" == "true" ]]; then
-            sed -i "s/^ARG AMNEZIAWG_TOOLS_VERSION=.*/ARG AMNEZIAWG_TOOLS_VERSION=${{ needs.check-upstream.outputs.new_tools_version }}/" Dockerfile
-            echo "Updated AMNEZIAWG_TOOLS_VERSION to ${{ needs.check-upstream.outputs.new_tools_version }}"
-          fi
-
-          if [[ "${{ needs.check-upstream.outputs.go_changed }}" == "true" ]]; then
-            sed -i "s/^ARG AMNEZIAWG_GO_VERSION=.*/ARG AMNEZIAWG_GO_VERSION=${{ needs.check-upstream.outputs.new_go_version }}/" Dockerfile
-            echo "Updated AMNEZIAWG_GO_VERSION to ${{ needs.check-upstream.outputs.new_go_version }}"
-          fi
+          .github/scripts/update-pins.sh "$NEW_TOOLS" "$NEW_GO"
+          {
+            echo "changes<<EOF"
+            [[ -n "$NEW_TOOLS" ]] && echo "- amneziawg-tools: ${CURRENT_TOOLS} -> ${NEW_TOOLS}"
+            [[ -n "$NEW_GO" ]] && echo "- amneziawg-go: ${CURRENT_GO} -> ${NEW_GO}"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Create Pull Request
-        id: create-pr
-        uses: peter-evans/create-pull-request@v8
+        uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8.1.1
         with:
-          token: ${{ github.token }}
+          token: ${{ secrets.UPSTREAM_PR_TOKEN || github.token }}
           commit-message: |
             chore: bump upstream versions
 
-            - amneziawg-tools: ${{ needs.check-upstream.outputs.new_tools_version }}
-            - amneziawg-go: ${{ needs.check-upstream.outputs.new_go_version }}
+            ${{ steps.pins.outputs.changes }}
           title: "chore: bump upstream versions"
           body: |
             Automated bump of pinned upstream versions.
 
-            - amneziawg-tools: ${{ needs.check-upstream.outputs.new_tools_version }}
-            - amneziawg-go: ${{ needs.check-upstream.outputs.new_go_version }}
+            ${{ steps.pins.outputs.changes }}
+
+            The image was built with these pins and passed the smoke tests in [upstream-check run ${{ github.run_id }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}).
 
             > **Note:** Merge this PR using **Squash** or **Rebase** to keep `master` linear.
           branch: chore/bump-upstream-versions
           delete-branch: true
           sign-commits: true
-
-

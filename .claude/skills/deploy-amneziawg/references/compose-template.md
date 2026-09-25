@@ -144,7 +144,7 @@ services:
       - PUID=1000
       - PGID=1000
       - TZ=Etc/UTC
-      # No PEERS = client mode. CoreDNS is auto-disabled.
+      # No PEERS = client mode. unbound stays off unless USE_DNS=true.
     volumes:
       - ./config:/config
     sysctls:

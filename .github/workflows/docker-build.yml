@@ -18,6 +18,13 @@ name: Build and Push Docker Image
 #
 # sha-<short> always means "built from this commit's own Dockerfile pins", so
 # builds with version overrides must not claim it.
+#
+# A release run that is superseded (a later run already published a release,
+# e.g. when an old failed run is re-run) still publishes its immutable
+# <tools>-r<N> and GitHub Release, but never moves the floating aliases or the
+# "latest" release back to itself.
+#
+# Actions are pinned to commit SHAs; Dependabot (.github/dependabot.yml) bumps them.
 
 on:
   workflow_dispatch:
@@ -45,6 +52,10 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || 'publish' }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
+# Jobs that need more ask for it themselves.
+permissions:
+  contents: read
+
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
@@ -64,9 +75,10 @@ jobs:
       mode: ${{ steps.filter.outputs.mode }}
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Decide mode and whether image-affecting paths changed
         id: filter
@@ -105,12 +117,19 @@ jobs:
           elif [[ "$MODE" == "release" ]]; then
             # Compare against the last release rather than the previous push,
             # so image changes from a failed or superseded run are not lost.
-            BASE=$(git describe --tags --abbrev=0 --match 'v*-r[0-9]*' HEAD 2>/dev/null) \
-              || decide true "yes (no previous release)"
-            # A re-run of the run that created this tag has to finish its
-            # release (e.g. the tag was pushed but the release step failed).
-            if git tag -l --format='%(contents)' "$BASE" | grep -qx "run-id: ${GITHUB_RUN_ID}"; then
-              decide true "yes (re-run of ${BASE})"
+            # The last release is the one `latest` serves, whether or not the
+            # branch still contains it: after a force-push back to an older
+            # tree, a diff against an older reachable tag would miss that
+            # the published image no longer matches the branch.
+            BASE=$(.github/scripts/release-tags.sh latest)
+            [[ -n "$BASE" ]] || decide true "yes (no previous release)"
+            # A re-run of a run that already created a release tag has to
+            # finish its release (e.g. the tag was pushed but the release step
+            # failed), even if a later run has released since.
+            # grep without -q: an early exit would SIGPIPE git, and the step
+            # shell's pipefail would turn a match into a failure.
+            if git tag -l --format='%(contents)' 'v*-r*' | grep -x "run-id: ${GITHUB_RUN_ID}" >/dev/null; then
+              decide true "yes (re-run of a run that already tagged a release)"
             fi
             echo "last release: ${BASE}"
           else
@@ -126,7 +145,7 @@ jobs:
 
           CHANGED=$(git diff --name-only "$BASE" "$HEAD")
           echo "changed files since ${BASE}:"; awk '{print "  " $0}' <<<"$CHANGED"
-          if echo "$CHANGED" | grep -qE "$IMAGE_PATHS"; then
+          if grep -qE "$IMAGE_PATHS" <<<"$CHANGED"; then
             decide true "yes (image-affecting paths changed since ${BASE})"
           fi
           decide false "skipped — no changes to Dockerfile, root/, .dockerignore or image CI since ${BASE}"
@@ -144,14 +163,17 @@ jobs:
       version: ${{ steps.versions.outputs.version }}
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           # the build counter is read from the release tags
           fetch-depth: 0
+          persist-credentials: false
 
-      - name: Test the version script
+      - name: Test the release scripts
         if: needs.changes.outputs.mode == 'pr'
-        run: .github/scripts/next-version.test.sh
+        run: |
+          .github/scripts/next-version.test.sh
+          .github/scripts/release-tags.test.sh
 
       - name: Resolve versions
         id: versions
@@ -203,8 +225,36 @@ jobs:
             echo "- amneziawg-tools: \`${AWG_TOOLS}\`"
           } >> "$GITHUB_STEP_SUMMARY"
 
+  # Pull requests: build one platform locally and smoke-test it. Kept apart
+  # from `build` so PR runs never hold a package-write token.
+  smoke:
+    needs: [changes, version]
+    if: needs.changes.outputs.mode == 'pr'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Build test image (linux/amd64)
+        env:
+          IMAGE_VERSION: ${{ needs.version.outputs.version }}
+          AWG_GO: ${{ needs.version.outputs.amneziawg_go }}
+          AWG_TOOLS: ${{ needs.version.outputs.amneziawg_tools }}
+        run: |
+          docker build -t test-image \
+            --build-arg VERSION="$IMAGE_VERSION" \
+            --build-arg AMNEZIAWG_GO_VERSION="$AWG_GO" \
+            --build-arg AMNEZIAWG_TOOLS_VERSION="$AWG_TOOLS" \
+            .
+
+      - name: Smoke tests
+        run: .github/scripts/smoke-test.sh test-image
+
   build:
     needs: [changes, version]
+    if: needs.changes.outputs.mode != 'pr'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -212,18 +262,35 @@ jobs:
     env:
       MODE: ${{ needs.changes.outputs.mode }}
       IMAGE_VERSION: ${{ needs.version.outputs.version }}
+      TOOLS_VERSION: ${{ needs.version.outputs.tools_version }}
     outputs:
       digest: ${{ steps.existing.outputs.digest || steps.push.outputs.digest }}
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          # release tags decide whether this run has been superseded
+          fetch-depth: 0
+          persist-credentials: false
+
+      # Evaluated here, not in `version`: "re-run failed jobs" reuses the
+      # outputs of jobs that succeeded, which may predate a newer release.
+      - name: Check whether a later run has already released
+        id: superseded
+        if: env.MODE == 'release'
+        run: |
+          SUPERSEDED=$(.github/scripts/release-tags.sh superseded "$GITHUB_RUN_ID")
+          echo "superseded=${SUPERSEDED}" >> "$GITHUB_OUTPUT"
+          if [[ "$SUPERSEDED" == "true" ]]; then
+            echo "::warning::A later run has already released $(.github/scripts/release-tags.sh latest); publishing ${IMAGE_VERSION} without moving ${TOOLS_VERSION}, latest or sha-*"
+          fi
 
       - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
+        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3.7.0
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
         with:
           platforms: linux/amd64,linux/arm64
           config-inline: |
@@ -231,15 +298,14 @@ jobs:
               max-parallelism = 2
 
       - name: Log in to the Container registry
-        if: env.MODE != 'pr'
-        uses: docker/login-action@v3
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
       # <tools>-r<N> is immutable. If it already exists it must be this run's
-      # own push (a re-run after the release step failed): reuse it instead of
+      # own push (a re-run after a later step failed): reuse it instead of
       # rebuilding. Anything else means the counter and the registry disagree,
       # and overwriting would silently change a published release.
       - name: Check the release tag is not taken
@@ -261,14 +327,21 @@ jobs:
             echo "::error::${REF} already exists (pushed by run ${OWNER:-unknown}, this is run ${GITHUB_RUN_ID}). Refusing to overwrite a published image tag. If run ${OWNER:-unknown} failed before creating its release, re-run its failed jobs to finish it (this run can then be re-run and will take the next number); otherwise delete the orphaned image tag."
             exit 1
           fi
+          # The earlier attempt may have died mid-push: only reuse a complete
+          # multi-arch index.
+          PLATFORMS=$(docker buildx imagetools inspect "$REF" --raw \
+            | jq -r '[.manifests[]?.platform | select(. != null) | "\(.os)/\(.architecture)"] | sort | join(",")')
+          if [[ "$PLATFORMS" != "linux/amd64,linux/arm64" ]]; then
+            echo "::error::${REF} was pushed by this run but has platforms '${PLATFORMS}', expected linux/amd64,linux/arm64. Delete the image tag and re-run."
+            exit 1
+          fi
           DIGEST=$(docker buildx imagetools inspect "$REF" --format '{{.Manifest.Digest}}')
           echo "digest=${DIGEST}" >> "$GITHUB_OUTPUT"
           echo "- reusing ${REF}@${DIGEST} pushed by this run's earlier attempt" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Extract metadata (tags, labels) for Docker
         id: meta
-        if: env.MODE != 'pr'
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5.10.0
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           flavor: |
@@ -277,21 +350,21 @@ jobs:
             # Immutable release tag (e.g., 3.1.20260812-r2)
             type=raw,value=${{ env.IMAGE_VERSION }},enable=${{ env.MODE == 'release' }},priority=1000
             # Floating alias: newest release of this amneziawg-tools version (e.g., 3.1.20260812)
-            type=raw,value=${{ needs.version.outputs.tools_version }},enable=${{ env.MODE == 'release' }}
+            type=raw,value=${{ env.TOOLS_VERSION }},enable=${{ env.MODE == 'release' && steps.superseded.outputs.superseded != 'true' }}
             # Floating alias: newest release
-            type=raw,value=latest,enable=${{ env.MODE == 'release' }}
+            type=raw,value=latest,enable=${{ env.MODE == 'release' && steps.superseded.outputs.superseded != 'true' }}
             # Ad-hoc manual runs (version overrides)
             type=raw,value=dispatch-${{ github.run_number }},enable=${{ env.MODE == 'adhoc' && github.event_name == 'workflow_dispatch' }}
             # Tag with short sha — only for builds that match the commit's source
-            type=sha,prefix=sha-,enable=${{ format('{0}{1}', inputs.amneziawg_go_version, inputs.amneziawg_tools_version) == '' }}
+            type=sha,prefix=sha-,enable=${{ format('{0}{1}', inputs.amneziawg_go_version, inputs.amneziawg_tools_version) == '' && steps.superseded.outputs.superseded != 'true' }}
           labels: |
             org.opencontainers.image.version=${{ env.IMAGE_VERSION }}
             io.github.actions.run-id=${{ github.run_id }}
 
       - name: Build and push
         id: push
-        if: env.MODE != 'pr' && steps.existing.outputs.digest == ''
-        uses: docker/build-push-action@v6
+        if: steps.existing.outputs.digest == ''
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
         with:
           context: .
           platforms: linux/amd64,linux/arm64
@@ -309,6 +382,29 @@ jobs:
           provenance: false
           sbom: false
 
+      # A push of several tags is not atomic: the earlier attempt may have
+      # published <tools>-r<N> but not the aliases. Point every alias at the
+      # reused digest (idempotent when they are already right).
+      - name: Repair aliases of the reused image
+        if: steps.existing.outputs.digest != ''
+        env:
+          DIGEST: ${{ steps.existing.outputs.digest }}
+          TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          IMAGE="${REGISTRY}/${IMAGE_NAME,,}"
+          ARGS=()
+          while IFS= read -r tag; do
+            [[ -n "$tag" ]] || continue
+            [[ "${tag,,}" == "${IMAGE}:${IMAGE_VERSION}" ]] && continue
+            ARGS+=(-t "$tag")
+          done <<<"$TAGS"
+          if (( ${#ARGS[@]} == 0 )); then
+            echo "No aliases to repair."
+            exit 0
+          fi
+          docker buildx imagetools create "${ARGS[@]}" "${IMAGE}@${DIGEST}"
+          awk '{print "- alias: " $0}' <<<"$TAGS" >> "$GITHUB_STEP_SUMMARY"
+
       - name: Summarize pushed image
         if: steps.push.outputs.digest != ''
         env:
@@ -320,144 +416,6 @@ jobs:
             echo "- digest: \`${DIGEST}\`"
             awk '{print "- tag: " $0}' <<<"$TAGS"
           } >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Test image (PR only)
-        if: env.MODE == 'pr'
-        run: |
-          # Build for local testing (single platform)
-          docker buildx build --platform linux/amd64 --load -t test-image \
-            --build-arg VERSION=${{ env.IMAGE_VERSION }} \
-            --build-arg AMNEZIAWG_GO_VERSION=${{ needs.version.outputs.amneziawg_go }} \
-            --build-arg AMNEZIAWG_TOOLS_VERSION=${{ needs.version.outputs.amneziawg_tools }} \
-            .
-
-          echo "## Smoke tests" >> "$GITHUB_STEP_SUMMARY"
-
-          # Check binaries exist
-          echo "### Binary check" >> "$GITHUB_STEP_SUMMARY"
-          docker run --rm test-image ls -la /usr/bin/awg /usr/bin/awg-quick /usr/bin/amneziawg-go /usr/bin/wg /usr/bin/wg-quick
-          echo "- Binaries present" >> "$GITHUB_STEP_SUMMARY"
-
-          # Check s6-overlay structure (all services + branding)
-          echo "### s6-overlay structure" >> "$GITHUB_STEP_SUMMARY"
-          docker run --rm test-image sh -c '
-            test -f /etc/s6-overlay/s6-rc.d/init-amneziawg-module/type && echo "init-amneziawg-module: OK"
-            test -f /etc/s6-overlay/s6-rc.d/init-amneziawg-confs/type && echo "init-amneziawg-confs: OK"
-            test -f /etc/s6-overlay/s6-rc.d/svc-unbound/type && echo "svc-unbound: OK"
-            test -f /etc/s6-overlay/s6-rc.d/svc-amneziawg/type && echo "svc-amneziawg: OK"
-            test -f /etc/s6-overlay/s6-rc.d/init-adduser/branding && echo "branding: OK"
-          '
-          echo "- All services registered" >> "$GITHUB_STEP_SUMMARY"
-
-          # Verify service types
-          echo "### Service types" >> "$GITHUB_STEP_SUMMARY"
-          docker run --rm test-image sh -c '
-            echo "init-amneziawg-module: $(cat /etc/s6-overlay/s6-rc.d/init-amneziawg-module/type)"
-            echo "init-amneziawg-confs: $(cat /etc/s6-overlay/s6-rc.d/init-amneziawg-confs/type)"
-            echo "svc-unbound: $(cat /etc/s6-overlay/s6-rc.d/svc-unbound/type)"
-            echo "svc-amneziawg: $(cat /etc/s6-overlay/s6-rc.d/svc-amneziawg/type)"
-          '
-          echo "- Service types verified" >> "$GITHUB_STEP_SUMMARY"
-
-          # Check dependencies
-          echo "### Dependency chain" >> "$GITHUB_STEP_SUMMARY"
-          docker run --rm test-image sh -c '
-            test -f /etc/s6-overlay/s6-rc.d/init-amneziawg-module/dependencies.d/init-config && echo "module depends on init-config: OK"
-            test -f /etc/s6-overlay/s6-rc.d/init-amneziawg-confs/dependencies.d/init-amneziawg-module && echo "confs depends on module: OK"
-            test -f /etc/s6-overlay/s6-rc.d/svc-unbound/dependencies.d/init-services && echo "unbound depends on init-services: OK"
-            test -f /etc/s6-overlay/s6-rc.d/svc-amneziawg/dependencies.d/svc-unbound && echo "amneziawg depends on unbound: OK"
-          '
-          echo "- Dependency chain correct" >> "$GITHUB_STEP_SUMMARY"
-
-          # Check show-peer script and defaults
-          echo "### Scripts and defaults" >> "$GITHUB_STEP_SUMMARY"
-          docker run --rm test-image sh -c '
-            test -x /app/show-peer && echo "show-peer: executable"
-            test -f /defaults/server.conf && echo "server.conf template: present"
-            test -f /defaults/peer.conf && echo "peer.conf template: present"
-            test -f /defaults/Corefile && echo "Corefile: present"
-            test -f /build_version && cat /build_version
-          '
-          echo "- All defaults present" >> "$GITHUB_STEP_SUMMARY"
-
-          # Check unbound installation and configuration tooling
-          echo "### Unbound" >> "$GITHUB_STEP_SUMMARY"
-          docker run --rm test-image sh -c '
-            command -v unbound
-            command -v unbound-checkconf
-            test -f /defaults/unbound.conf
-          '
-          echo "- Unbound binaries and default configuration present" >> "$GITHUB_STEP_SUMMARY"
-
-          # Generate a real AWG 3.1 config set and check the keys land in the
-          # right sections. Tunnel activation is expected to fail on a CI
-          # runner; the confs are written by init-amneziawg-confs before that,
-          # and s6 keeps the container up either way.
-          echo "### AWG 3.1 config generation" >> "$GITHUB_STEP_SUMMARY"
-          docker rm -f awgci >/dev/null 2>&1 || true
-          docker run -d --name awgci --cap-add NET_ADMIN \
-            -e PEERS=2 -e SERVERURL=ci.example.com -e INTERNAL_SUBNET=10.55.55.0 \
-            -e AWG_VERSION=3.1 -e AWG_DISABLE_COOKIES=on \
-            test-image >/dev/null
-          # Wait on the .png, not the .conf: the conf file exists from the
-          # moment the template heredoc runs, before the three awk passes that
-          # insert the signatures and the 3.x/3.1 keys. The png is the last
-          # thing generate_confs writes for a peer.
-          for _ in $(seq 1 45); do
-            docker exec awgci test -f /config/peer2/peer2.png 2>/dev/null && break
-            sleep 2
-          done
-          docker exec awgci test -f /config/peer2/peer2.png \
-            || { echo "AWG 3.1: peer confs were never generated"; docker logs awgci; exit 1; }
-
-          # Every key must sit in [Interface], i.e. above the first [Peer] line.
-          check_iface_key() {
-            conf=$1; key=$2
-            docker exec awgci awk -v k="$key" '
-              /^\[Peer\]/ { exit }
-              $1 == k { found = 1 }
-              END { exit(found ? 0 : 1) }
-            ' "$conf" || { echo "AWG 3.1: $key missing from [Interface] of $conf"; docker exec awgci cat "$conf"; exit 1; }
-          }
-          for conf in /config/wg_confs/wg0.conf /config/peer1/peer1.conf /config/peer2/peer2.conf; do
-            for key in RandomTrailers DisableCookies HeaderProtectionKey; do
-              check_iface_key "$conf" "$key"
-            done
-            echo "  $conf: 3.1 switches + header protection in [Interface]"
-          done
-
-          # HeaderProtectionKey must be identical everywhere; the switches must be on.
-          hpk_server=$(docker exec awgci awk '/^HeaderProtectionKey/ {print $3; exit}' /config/wg_confs/wg0.conf)
-          hpk_peer=$(docker exec awgci awk '/^HeaderProtectionKey/ {print $3; exit}' /config/peer1/peer1.conf)
-          test -n "$hpk_server" && test "$hpk_server" = "$hpk_peer" \
-            || { echo "AWG 3.1: HeaderProtectionKey differs between server and peer"; exit 1; }
-          docker exec awgci grep -q '^RandomTrailers = on$' /config/peer1/peer1.conf \
-            || { echo "AWG 3.1: RandomTrailers not set to on"; exit 1; }
-          docker exec awgci grep -q '^DisableCookies = on$' /config/peer1/peer1.conf \
-            || { echo "AWG 3.1: DisableCookies not set to on"; exit 1; }
-
-          # Default 2.0 must not emit the 3.x keys.
-          docker rm -f awgci >/dev/null 2>&1 || true
-          docker run -d --name awgci --cap-add NET_ADMIN \
-            -e PEERS=1 -e SERVERURL=ci.example.com -e INTERNAL_SUBNET=10.56.56.0 \
-            test-image >/dev/null
-          for _ in $(seq 1 45); do
-            docker exec awgci test -f /config/peer1/peer1.png 2>/dev/null && break
-            sleep 2
-          done
-          docker exec awgci test -f /config/peer1/peer1.png \
-            || { echo "default 2.0: peer conf was never generated"; docker logs awgci; exit 1; }
-          if docker exec awgci grep -qE '^(RandomTrailers|DisableCookies|HeaderProtectionKey)' /config/peer1/peer1.conf; then
-            echo "default AWG_VERSION=2.0 leaked 3.x keys into the peer conf"
-            docker exec awgci cat /config/peer1/peer1.conf
-            exit 1
-          fi
-          echo "  default 2.0: no 3.x keys emitted"
-          docker rm -f awgci >/dev/null 2>&1 || true
-          echo "- AWG 3.1 config generation correct" >> "$GITHUB_STEP_SUMMARY"
-
-          echo "All smoke tests passed!" >> "$GITHUB_STEP_SUMMARY"
-          echo "Smoke tests passed!"
 
   # Tag first, then release: the annotated tag is the build counter and records
   # the run id and digest, so a re-run can tell its own tag from someone else's.
@@ -479,8 +437,9 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
+          # the release tags are the build counter; credentials push the new one
           fetch-depth: 0
 
       - name: Create release tag
@@ -493,7 +452,7 @@ jobs:
           fi
 
           if git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
-            if ! git tag -l --format='%(contents)' "$TAG" | grep -qx "run-id: ${GITHUB_RUN_ID}"; then
+            if ! git tag -l --format='%(contents)' "$TAG" | grep -x "run-id: ${GITHUB_RUN_ID}" >/dev/null; then
               echo "::error::Tag ${TAG} already exists and was not created by this run"
               exit 1
             fi
@@ -518,8 +477,17 @@ jobs:
             exit 0
           fi
 
-          # The current latest release is the previous build; changelog starts there.
-          PREV=$(gh release view --json tagName --jq .tagName 2>/dev/null || true)
+          # The changelog starts at the release made by the run before this one.
+          # Normally that is the current latest release; for a re-run of an
+          # old run it is not, and this release must not become latest either.
+          PREV=$(.github/scripts/release-tags.sh previous "$GITHUB_RUN_ID")
+          SUPERSEDED=$(.github/scripts/release-tags.sh superseded "$GITHUB_RUN_ID")
+          if [[ "$SUPERSEDED" == "true" ]]; then
+            LATEST_FLAG="--latest=false"
+            echo "::warning::A later run has already released $(.github/scripts/release-tags.sh latest); ${TAG} will not be marked as the latest release"
+          else
+            LATEST_FLAG="--latest"
+          fi
           if [[ -n "$PREV" ]]; then
             CHANGES=$(gh api "repos/${GITHUB_REPOSITORY}/releases/generate-notes" \
               -f tag_name="$TAG" -f target_commitish="$GITHUB_SHA" -f previous_tag_name="$PREV" \
@@ -565,7 +533,7 @@ jobs:
           # The API can fail (e.g. HTTP 504) after the release was in fact
           # created, so check before retrying.
           for attempt in 1 2 3; do
-            if gh release create "$TAG" --verify-tag --latest --title "$TAG" --notes-file release-notes.md; then
+            if gh release create "$TAG" --verify-tag "$LATEST_FLAG" --title "$TAG" --notes-file release-notes.md; then
               break
             fi
             sleep 10

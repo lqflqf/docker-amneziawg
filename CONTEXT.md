@@ -21,12 +21,12 @@ Both upstream versions are pinned as `ARG` defaults at the top of the Dockerfile
 ### s6-Overlay Service Chain
 
 ```
-init-config (LSIO) -> init-amneziawg-module (oneshot) -> init-amneziawg-confs (oneshot) -> svc-coredns (longrun) -> svc-amneziawg (oneshot)
+init-config (LSIO) -> init-amneziawg-module (oneshot) -> init-amneziawg-confs (oneshot) -> svc-unbound (longrun) -> svc-amneziawg (oneshot)
 ```
 
 - **init-amneziawg-module**: Tests kernel support via `ip link add dev test type amneziawg` (the amnezia module's rtnl link kind — awg-quick creates `type amneziawg`, not `type wireguard`). Falls back to `amneziawg-go` userspace (exports `WG_QUICK_USERSPACE_IMPLEMENTATION`).
-- **init-amneziawg-confs**: Config generation using eval+heredoc template expansion from `/config/templates/`. Server mode generates keys, wg0.conf, peer configs, QR codes. Client mode disables CoreDNS.
-- **svc-coredns**: Longrun CoreDNS service with `notification-fd 3` health checks. Auto-disabled if port 53 already bound (and `USE_COREDNS` not explicitly set) or `USE_COREDNS=false`. In client mode, defaults to `false` unless overridden. Disabling in server mode breaks DNS for peers using `PEERDNS=auto` — set `PEERDNS` to a public resolver.
+- **init-amneziawg-confs**: Config generation using eval+heredoc template expansion from `/config/templates/`. Server mode generates keys, wg0.conf, peer configs, QR codes. Client mode defaults `USE_DNS` to `false`. Seeds `/config/unbound/unbound.conf` and `root.key` if missing.
+- **svc-unbound**: Longrun unbound resolver with `notification-fd 3` readiness checks (`nslookup health.amneziawg.`, or a UDP probe of port 53 when the config lacks the health zone). Runs `/config/unbound/unbound.conf` after `unbound-checkconf`; an invalid config is reported and unbound is not started. Auto-disabled if port 53 already bound (and `USE_DNS` not explicitly set) or `USE_DNS=false`. In client mode, defaults to `false` unless overridden. Disabling in server mode breaks DNS for peers using `PEERDNS=auto` — set `PEERDNS` to a public resolver.
 - **svc-amneziawg**: Oneshot service (up/down scripts). Validates `[Interface]` in each .conf, activates tunnels, saves active confs to `/run/activeconfs` via `declare -p`. Finish script tears down in reverse order.
 
 Dependencies are declared via empty files in `dependencies.d/`. Services are registered via empty files in `user/contents.d/`.
@@ -49,7 +49,7 @@ Peer naming: numeric peers -> `peer1`, `peer2`; named peers -> `peer_laptop`, `p
 
 ### Client Mode (no PEERS)
 
-Uses manual `.conf` files from `/config/wg_confs/`. All `.conf` files are brought up on startup. CoreDNS is auto-disabled.
+Uses manual `.conf` files from `/config/wg_confs/`. All `.conf` files are brought up on startup. unbound stays off unless `USE_DNS=true`.
 
 ## Volume Structure
 
@@ -64,8 +64,9 @@ Uses manual `.conf` files from `/config/wg_confs/`. All `.conf` files are brough
 ├── templates/            # User-customizable config templates
 │   ├── server.conf       # Server template (eval+heredoc expanded)
 │   └── peer.conf         # Peer template (eval+heredoc expanded)
-├── coredns/              # CoreDNS configuration
-│   └── Corefile
+├── unbound/              # unbound resolver configuration
+│   ├── unbound.conf
+│   └── root.key          # DNSSEC trust anchor
 ├── .donoteditthisfile    # Saved env vars for change detection
 ├── peer1/                # Numeric peer (PEERS=3)
 │   ├── peer1.conf
@@ -90,17 +91,20 @@ docker-amneziawg/
 │   ├── defaults/
 │   │   ├── server.conf                     # Server template (eval+heredoc)
 │   │   ├── peer.conf                       # Peer template (eval+heredoc)
-│   │   └── Corefile                        # CoreDNS default config
+│   │   └── unbound.conf                    # unbound default config
 │   └── etc/s6-overlay/s6-rc.d/
 │       ├── init-adduser/branding           # Custom container branding
 │       ├── init-amneziawg-module/          # Kernel module detection
 │       ├── init-amneziawg-confs/           # Config generation
-│       ├── svc-coredns/                    # CoreDNS service (longrun)
+│       ├── svc-unbound/                    # unbound resolver (longrun)
 │       └── svc-amneziawg/                  # Tunnel service (oneshot up/down)
 ├── awg0.conf.example                       # Example config
-└── .github/workflows/
-    ├── docker-build.yml                    # Main build pipeline (multi-arch)
-    └── upstream-check.yml                  # Daily upstream version check
+└── .github/
+    ├── dependabot.yml                      # Keeps SHA-pinned actions current
+    ├── scripts/                            # next-version, release-tags, smoke-test, update-pins (+ tests)
+    └── workflows/
+        ├── docker-build.yml                # Main build pipeline (multi-arch)
+        └── upstream-check.yml              # Daily upstream version check
 ```
 
 ## AmneziaWG Obfuscation — Deep Dive
@@ -205,14 +209,17 @@ Guidance (documented in README "MTU"): 1280 for mobile/PPPoE/unknown paths (clea
 
 ### docker-build.yml
 
-- Push to the default branch (or manual run on it without overrides) -> multi-arch build (`amd64`, `arm64`) -> `:<tools>-r<N>` + `:<tools>` + `:latest` + `:sha-<short>`, then git tag + GitHub Release `v<tools>-r<N>` carrying the image digest. Skipped when nothing image-affecting changed since the last release tag
-- PRs -> smoke tests only (single-platform `--load` build): binaries, s6 structure, service types, dependency chain, Unbound, branding
+- Push to the default branch (or manual run on it without overrides) -> multi-arch build (`amd64`, `arm64`) -> `:<tools>-r<N>` + `:<tools>` + `:latest` + `:sha-<short>`, then git tag + GitHub Release `v<tools>-r<N>` carrying the image digest. Skipped when nothing image-affecting changed since the last release — the tag made by the highest run id (`.github/scripts/release-tags.sh latest`), whether or not it is reachable from `HEAD`
+- A re-run of a release run reuses its own already-pushed `<tools>-r<N>` (after checking both platforms are present) and re-points the aliases at it, since a multi-tag push is not atomic
+- A release run superseded by a later run (e.g. an old failed run re-run) still publishes `<tools>-r<N>` and its GitHub Release, but does not move `:<tools>`, `:latest`, `:sha-*` or the "latest" release
+- PRs -> `smoke` job only (single-platform build, read-only token): `.github/scripts/smoke-test.sh` checks binaries, s6 services/types/dependencies, Unbound, branding, and generates AWG 3.1 and 2.0 configs; plus the `next-version`/`release-tags` script tests
 - `workflow_dispatch` with `amneziawg_go_version`/`amneziawg_tools_version` overrides -> ad-hoc build: `:dispatch-<run>` only (no `:sha-*`), no `latest`, no release
 - No `v*` tag trigger; release tags are created by the workflow and are the build counter
+- Workflow-level `permissions: contents: read`; only `build` (packages) and `release` (contents) get write. Actions are pinned to commit SHAs, bumped by Dependabot
 
 ### upstream-check.yml
 
-Daily at 06:00 UTC: compares Dockerfile `ARG` defaults against latest amneziawg-tools release and amneziawg-go tag. If new version detected: updates Dockerfile via `sed`, commits, triggers build workflow. Has concurrency control and version format validation.
+Daily at 06:00 UTC: compares Dockerfile `ARG` defaults against the highest `vX.Y.Z` amneziawg-tools release (drafts/prereleases excluded) and amneziawg-go tag, and only proposes strictly newer versions (never downgrades). Upstream tag names are validated against `^v[0-9]+\.[0-9]+\.[0-9]+$` and reach shells only via env vars. A bump is applied with `.github/scripts/update-pins.sh`, built and smoke-tested in a read-only job, and only then opened/updated as a PR on `chore/bump-upstream-versions`; the release is built on merge. PRs opened with `GITHUB_TOKEN` do not trigger `pull_request` workflows — set the optional `UPSTREAM_PR_TOKEN` secret (GitHub App token or fine-grained PAT) to get the regular PR checks too.
 
 ### Versioning
 
@@ -232,7 +239,7 @@ Releases are `<amneziawg-tools>-r<N>` (e.g. `3.1.20260812-r2`): `N` restarts at 
 | High CPU | Too many junk packets | Reduce AWG_JC value |
 | Connection fails after param change | Client/server mismatch | Redistribute updated peer configs to all clients |
 | ISP blocks VPN on high ports | Some ISPs block UDP > 9999 | Use SERVERPORT <= 9999 |
-| Peers have no DNS after `USE_COREDNS=false` | CoreDNS disabled but `PEERDNS=auto` still points peers at the container | Set `PEERDNS=1.1.1.1` (or another public resolver) when disabling CoreDNS |
+| Peers have no DNS after `USE_DNS=false` | unbound disabled but `PEERDNS=auto` still points peers at the container | Set `PEERDNS=1.1.1.1` (or another public resolver) when disabling unbound |
 | Tunnel connects but downloads are slow, pings fine | Full-size packets fragment: 1420 + 60/80 + S4 > path MTU | Set `MTU` explicitly: 1280 on ordinary paths, `path − 60 − S4` (IPv4) / `path − 80 − S4` (IPv6) when the path itself is constrained (a true 1280-byte path needs 1208/1188); see README "MTU" |
 
 ## External References
