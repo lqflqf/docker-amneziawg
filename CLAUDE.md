@@ -106,7 +106,7 @@ All clients and server must use identical values. Key constraints:
 - Push to the default branch (or `workflow_dispatch` on it without overrides) = **release mode**: builds multi-arch (`amd64`, `arm64`), pushes `:<tools>-r<N>` (immutable), `:<tools>` and `:latest` (floating) and `:sha-<short>`, then creates the annotated git tag `v<tools>-r<N>` and a GitHub Release with the image digest. One release == one image
 - Publishing runs are serialized (`concurrency` group `…-publish`) because they claim the next `N`
 - PRs → smoke tests only (single-platform `--load` build, no multi-arch QEMU): binaries, s6 structure, service types, dependency chain, CoreDNS, branding, plus `.github/scripts/next-version.test.sh`
-- `workflow_dispatch` with `amneziawg_go_version`/`amneziawg_tools_version` overrides = **ad-hoc mode**: pushes only `:sha-<short>` and `:dispatch-<run>`, never `latest`, a release tag, or a GitHub Release
+- `workflow_dispatch` with `amneziawg_go_version`/`amneziawg_tools_version` overrides = **ad-hoc mode**: pushes only `:dispatch-<run>` (not `:sha-*`, which always means "built from this commit's pins"), never `latest`, a release tag, or a GitHub Release
 - There is no `v*` tag trigger — do not push `v*-r*` tags by hand, they *are* the build counter
 
 **`upstream-check.yml`** — daily upstream version check (06:00 UTC):

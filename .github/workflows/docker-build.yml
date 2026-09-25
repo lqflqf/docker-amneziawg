@@ -11,8 +11,13 @@ name: Build and Push Docker Image
 #   release push to the default branch, or manual run on it without version
 #           overrides: push <tools>-r<N>, <tools>, latest, sha-* and create
 #           the tag + GitHub Release
-#   adhoc   manual run with version overrides, or push to a non-default
-#           master/main: push sha-* (and dispatch-<run>) only, no release
+#   adhoc   manual run with version overrides: push dispatch-<run> only;
+#           push to a non-default master/main, or manual run on another
+#           branch without overrides: sha-* (+ dispatch-<run> if manual).
+#           Never latest, never a release
+#
+# sha-<short> always means "built from this commit's own Dockerfile pins", so
+# builds with version overrides must not claim it.
 
 on:
   workflow_dispatch:
@@ -277,8 +282,8 @@ jobs:
             type=raw,value=latest,enable=${{ env.MODE == 'release' }}
             # Ad-hoc manual runs (version overrides)
             type=raw,value=dispatch-${{ github.run_number }},enable=${{ env.MODE == 'adhoc' && github.event_name == 'workflow_dispatch' }}
-            # Tag with short sha
-            type=sha,prefix=sha-
+            # Tag with short sha — only for builds that match the commit's source
+            type=sha,prefix=sha-,enable=${{ format('{0}{1}', inputs.amneziawg_go_version, inputs.amneziawg_tools_version) == '' }}
           labels: |
             org.opencontainers.image.version=${{ env.IMAGE_VERSION }}
             io.github.actions.run-id=${{ github.run_id }}

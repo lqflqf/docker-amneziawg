@@ -136,7 +136,7 @@ Tunnel startup fails without `--device /dev/net/tun` — expected in testing.
 ### docker-build.yml
 - Push to the default branch -> builds multi-arch, tags `<tools>-r<N>` (immutable) + `<tools>` + `latest`, creates release `v<tools>-r<N>`
 - Pull requests -> single-platform smoke test (no push)
-- `workflow_dispatch` without overrides -> new release (e.g. base-image refresh); with version overrides -> ad-hoc `sha-*`/`dispatch-<run>` tags only
+- `workflow_dispatch` without overrides -> new release (e.g. base-image refresh); with version overrides -> ad-hoc `dispatch-<run>` tag only
 
 ### upstream-check.yml
 - Daily at 06:00 UTC: compares Dockerfile ARG defaults against latest upstream releases
