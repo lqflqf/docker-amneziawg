@@ -514,7 +514,7 @@ jobs:
           if [[ -n "$PREV" ]]; then
             CHANGES=$(gh api "repos/${GITHUB_REPOSITORY}/releases/generate-notes" \
               -f tag_name="$TAG" -f target_commitish="$GITHUB_SHA" -f previous_tag_name="$PREV" \
-              --jq .body)
+              --jq .body | sed 's/^## /#### /')
             if [[ "$(git rev-list -n1 "$PREV" 2>/dev/null)" == "$GITHUB_SHA" ]]; then
               CHANGES="Rebuild of the same source as ${PREV} (for example to pick up base image updates)."$'\n\n'"${CHANGES}"
             fi
