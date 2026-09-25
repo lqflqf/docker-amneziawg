@@ -11,10 +11,10 @@ description: |
 | File | Audience | Purpose |
 |------|----------|---------|
 | `README.md` | End users | Setup, usage, parameters (LinuxServer-style) |
-| `CONTEXT.md` | AI agents | Architecture, parameter deep-dives, troubleshooting, CI/CD |
-| `CLAUDE.md` | Developers | Dev patterns, conventions, gotchas, build/test commands |
+| `CLAUDE.md` | Developers, AI agents | Architecture, dev patterns, conventions, gotchas, troubleshooting, CI/CD |
+| `docs/awg-performance.md` | Developers | Measured data-path cost of each obfuscation parameter |
 
-For architecture details, parameter constraints, or troubleshooting tables, read `CONTEXT.md`.
+For architecture details, parameter constraints, or troubleshooting tables, read `CLAUDE.md`.
 For AWG parameter implementation specifics, read [references/awg-parameters.md](references/awg-parameters.md).
 
 ## Project Overview
@@ -29,7 +29,7 @@ Two modes: **server** (set `PEERS` to auto-generate configs) and **client** (pla
 docker-amneziawg/
 ├── Dockerfile                    # Multi-stage build (go-builder, tools-builder, runtime)
 ├── docker-compose.yml            # Example configurations
-├── CONTEXT.md                    # Technical reference for AI agents
+├── CLAUDE.md                     # Technical reference for developers and AI agents
 ├── root/
 │   ├── app/
 │   │   └── show-peer             # QR code display utility
@@ -83,7 +83,7 @@ Key points:
 
 ## AmneziaWG Obfuscation — Quick Reference
 
-For detailed parameter docs, see [references/awg-parameters.md](references/awg-parameters.md) or `CONTEXT.md`.
+For detailed parameter docs, see [references/awg-parameters.md](references/awg-parameters.md).
 
 | Param | Default | Key Constraint |
 |-------|---------|----------------|

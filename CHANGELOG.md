@@ -31,6 +31,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - amneziawg-tools updated to v3.0.20260730, the first release with AWG 3.0 config parsing
 - Updated to use GitHub Packages for pre-built images
 
+### Removed
+- `ADVANCED_AWG_HUB.md` (server + client hub guide)
+- `CONTEXT.md`. It duplicated `CLAUDE.md`, `.claude/skills/docker-amneziawg/references/awg-parameters.md` and `docs/awg-performance.md`; its volume layout and troubleshooting table moved to `CLAUDE.md`
+
 ### Fixed
 - Server-mode config regeneration is now all-or-nothing. Confs and QR codes are rendered into a staging directory, validated, and only then moved into place; `save_vars` runs only on success. Before, a template error left `wg0.conf` half-rewritten (duplicated `I1` lines and `[Peer]` blocks), saved the new change-detection state anyway, and the broken config was reused on every later start even after the template was fixed
 - A peer that could not be given an address now fails generation instead of reusing the previous peer's `CLIENT_IP`
