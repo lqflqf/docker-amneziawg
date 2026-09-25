@@ -1,6 +1,6 @@
 # AWG Obfuscation Parameters — Deployment Reference
 
-This reference is specific to deployment-time decisions. For implementation/code-level details, see the project's `CONTEXT.md` and `.claude/skills/docker-amneziawg/references/awg-parameters.md`. For the throughput cost of each parameter, see [`docs/awg-performance.md`](../../../../docs/awg-performance.md).
+This reference is specific to deployment-time decisions. For implementation/code-level details, see the project's `CLAUDE.md` and `.claude/skills/docker-amneziawg/references/awg-parameters.md`. For the throughput cost of each parameter, see [`docs/awg-performance.md`](../../../../docs/awg-performance.md).
 
 > [!WARNING]
 > **`AWG_VERSION=3.1` as the container generates it today is slow.** It emits `RandomTrailers=on` together with independently-drawn `S1`-`S4`, which makes the receiver misclassify and drop ~3.5% of transport packets — measured upload falls from ~100 to ~2 Mbit/s. When deploying 3.1, pin `S1 = S2 = S3 = S4` explicitly (`scripts/gen-awg-params.sh --version 3.1` now does this). Details and measurements: [`docs/awg-performance.md`](../../../../docs/awg-performance.md).

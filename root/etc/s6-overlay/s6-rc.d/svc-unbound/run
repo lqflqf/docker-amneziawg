@@ -3,8 +3,15 @@
 
 USE_DNS="${USE_DNS,,}"
 
-if netstat -apn | grep -q ":53 " && [[ -z "${USE_DNS}" ]]; then
-    USE_DNS="false"
+# Only a local listener means port 53 is taken; `netstat -apn | grep ":53 "`
+# also matched outgoing queries to some server's port 53.
+if [[ -z "${USE_DNS}" ]]; then
+    PORT53_OWNER=$(ss -Hlntup 'sport = :53' 2>/dev/null)
+    if [[ -n "${PORT53_OWNER}" ]]; then
+        echo "**** Port 53 is already in use, unbound will not be started (set USE_DNS=true to override): ****"
+        echo "${PORT53_OWNER}"
+        USE_DNS="false"
+    fi
 fi
 
 if [[ "${USE_DNS}" == "false" ]]; then

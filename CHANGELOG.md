@@ -8,6 +8,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `README.md` "Differences from the original": the CoreDNS → Unbound switch compared to upstream, its trade-offs, and migration steps (`USE_COREDNS` → `USE_DNS`)
+- `README.md` "DNS (Unbound)" section: what the bundled resolver does by default, how to change its upstream or access control, and what happens when it is disabled
+- `HEALTHCHECK` (`/app/healthcheck`): the container reports `unhealthy` unless every tunnel in `/config/wg_confs` is up. Previously a failed tunnel left the container `running` with no signal that the VPN was down
 - `docker-build.yml` now gates the multi-arch build and release behind a `changes` job that diffs the push: only `Dockerfile`, `root/**`, `.dockerignore` and the workflow itself are image content, so docs/skills/compose-only merges to master no longer rebuild and republish `:latest`. Tag pushes, `workflow_dispatch` and diffs with no reachable base always build. Implemented as an explicit `git diff` gate rather than an `on.push.paths` filter, which shares the push block with the `v*` tag trigger and is ambiguous for tag pushes
 - `docs/awg-performance.md`: measured throughput and latency cost of every obfuscation parameter, traced to upstream kernel-module and `amneziawg-go` source, with reproduction steps
 - `README.md` "Speed and latency" section, and data-path cost notes in `CONTEXT.md` and both skill references
@@ -27,10 +30,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Multi-architecture support (amd64, arm64)
 
 ### Changed
+- Skills (`docker-amneziawg`, `deploy-amneziawg`) now describe Unbound, `USE_DNS` and `/config/unbound` instead of CoreDNS, and the deploy troubleshooting page covers each reason Unbound can be off
 - amneziawg-tools updated to v3.0.20260730, the first release with AWG 3.0 config parsing
 - Updated to use GitHub Packages for pre-built images
 
+### Changed
+- Image labels, README badges, image references, the issues link and the startup banner now point to this fork (`lqflqf/docker-amneziawg`) instead of the upstream repo. The OCI `title`/`authors`/`vendor`/`url`/`documentation` labels no longer carry the LinuxServer base image's values. The README and banner credit the upstream project, [AYastrebov/docker-amneziawg](https://github.com/AYastrebov/docker-amneziawg)
+
+### Removed
+- `ADVANCED_AWG_HUB.md` (server + client hub guide)
+- `CONTEXT.md`. It duplicated `CLAUDE.md`, `.claude/skills/docker-amneziawg/references/awg-parameters.md` and `docs/awg-performance.md`; its volume layout and troubleshooting table moved to `CLAUDE.md`
+
 ### Fixed
+- Server-mode config regeneration is now all-or-nothing. Confs and QR codes are rendered into a staging directory, validated, and only then moved into place; `save_vars` runs only on success. Before, a template error left `wg0.conf` half-rewritten (duplicated `I1` lines and `[Peer]` blocks), saved the new change-detection state anyway, and the broken config was reused on every later start even after the template was fixed
+- A peer that could not be given an address now fails generation instead of reusing the previous peer's `CLIENT_IP`
+- `svc-amneziawg` exits 1 when a tunnel fails to come up, so s6 reports it down
+- Unbound's port-53 check now looks only at listening sockets (`ss -l`). `netstat -apn | grep ":53 "` also matched outgoing DNS queries and could disable Unbound while the port was free
+- CI smoke tests (`.github/scripts/smoke-test.sh`) also check that `svc-unbound/run`, `svc-amneziawg/finish` and `/app/healthcheck` are executable, that the seeded `unbound.conf` passes `unbound-checkconf` and Unbound is running, and that the healthcheck and s6 report a tunnel that did not come up as down
 - Documentation no longer claims a 1000-byte limit on a single `<r N>` tag in I1-I5. Current AmneziaWG has no such limit: the check existed only in amneziawg-go ≤ v0.2.15 (`device/awg/tag_generator.go:73`) and was removed in `0361c54` / PR #103; amneziawg-tools and the kernel module never had one. `CONTEXT.md` and two skill references stated the cap and, ten lines later, printed the default I1 that exceeds it — the default (`<r 1178>`, a 1200-byte QUIC Initial) is correct and unchanged. The docs now record the archaeology with file/commit citations and describe the parsers that still reject larger tags (observed: Keenetic NDMS, `invalid I1 value`, threshold unconfirmed) as third-party behaviour with a wire-identical split as the router-side workaround
 - Documentation no longer tells you to check the module version string for the random-trailer fix. `docs/awg-performance.md`, `README.md`, `CONTEXT.md`, `CLAUDE.md` and both skill references said to run "module v3.1.20260906 or newer", but upstream did not bump `version.h` in `4569c4c6` — a patched module still reports `3.1.20260812`, so that check can never pass and would have sent readers chasing an upgrade they already have. They now identify the fix by package version (`…+4569c4c…`) or the `bool trailer` parameter in `socket.c`, with a new section on confirming the loaded module matches the built one via `srcversion`. `check_awg31_kernel_support()` is unaffected: it only reads the `3.1` major/minor, which upstream does maintain
 - Generated peer configs are loadable by `awg-quick` again. `append_awg_signatures_to_interface()` wrote `I2`-`I5` as empty placeholders (`I2 =`) for AWG 2.0+, on the theory that their presence signalled the protocol version to the Amnezia app. `awg` rejects an empty value outright — ``Line unrecognized: `I2='`` — so every peer conf failed to load under `awg-quick`, `awg setconf`, and this image in client mode; only GUI clients with a more forgiving parser worked. Empty values are now skipped, matching the server-side `append_awg_signatures()`. App version detection is unaffected: it keys off the H1-H4 range format, which is emitted independently
@@ -43,6 +59,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `/config/server/awg_params` was never written on a fresh install (the directory did not exist yet), so every container restart regenerated all AWG obfuscation parameters and invalidated previously distributed peer configs
 
 ### Security
+- Regenerated configs are always written `0600`. `umask 077` used to be set only when a key was missing
 - Implemented security best practices in container design
 - Added security policy and guidelines
 

@@ -579,123 +579,214 @@ append_awg31_options_to_interface() {
 # Config generation (matches LinuxServer docker-wireguard pattern)
 # ============================================================================
 
+# Regeneration is all-or-nothing. Every conf and QR png is rendered into a
+# private staging directory, checked, and only then moved over the live files,
+# so a broken template or a failed key command leaves the previous configs in
+# place. The caller skips save_vars on failure, so the next start retries
+# instead of treating a half-written set as current.
 generate_confs () {
-    mkdir -p /config/server
-    if [[ ! -f /config/server/privatekey-server ]]; then
-        umask 077
+    local stage rc
+    local -a staged_ids=() staged_labels=()
+    # Staged files replace the live ones by rename, so they keep the mode they
+    # are created with rather than inheriting the old file's. Keys, confs and
+    # pngs all carry private keys.
+    umask 077
+    mkdir -p /config/server /config/wg_confs || return 1
+    rm -rf /config/.awg-staging.*
+    stage=$(mktemp -d /config/.awg-staging.XXXXXX) || return 1
+    if render_confs "${stage}" && validate_confs "${stage}" && install_confs "${stage}"; then
+        rc=0
+    else
+        rc=1
+    fi
+    rm -rf "${stage}"
+    return "${rc}"
+}
+
+render_confs () {
+    local stage=$1 i idx PEER_ID CLIENT_IP PROPOSED_IP SERVER_ALLOWEDIPS peer_conf
+    if [[ ! -s /config/server/privatekey-server ]]; then
         awg genkey | tee /config/server/privatekey-server | awg pubkey > /config/server/publickey-server
     fi
-    eval "$(printf %s)
-    cat <<DUDE > /config/wg_confs/wg0.conf
+    if [[ ! -s /config/server/privatekey-server ]] || [[ ! -s /config/server/publickey-server ]]; then
+        echo "**** ERROR: could not create the server keys in /config/server ****"
+        return 1
+    fi
+    if ! eval "$(printf %s)
+    cat <<DUDE > ${stage}/wg0.conf
 $(cat /config/templates/server.conf)
 
-DUDE"
+DUDE"; then
+        echo "**** ERROR: /config/templates/server.conf could not be rendered, see the error above ****"
+        return 1
+    fi
     # Append I1-I5 signature packets to server conf
-    append_awg_signatures /config/wg_confs/wg0.conf
+    append_awg_signatures "${stage}/wg0.conf"
     # Append AWG 3.x params to server conf (no-op unless AWG_VERSION is 3.0/3.1)
-    append_awg3_params /config/wg_confs/wg0.conf
+    append_awg3_params "${stage}/wg0.conf"
     # Append AWG 3.1 switches to server conf (no-op unless either is set)
-    append_awg31_options /config/wg_confs/wg0.conf
+    append_awg31_options "${stage}/wg0.conf"
     for i in "${PEERS_ARRAY[@]}"; do
         if [[ ! "${i}" =~ ^[[:alnum:]]+$ ]]; then
             echo "**** Peer ${i} contains non-alphanumeric characters and thus will be skipped. No config for peer ${i} will be generated. ****"
+            continue
+        fi
+        if [[ "${i}" =~ ^[0-9]+$ ]]; then
+            PEER_ID="peer${i}"
         else
-            if [[ "${i}" =~ ^[0-9]+$ ]]; then
-                PEER_ID="peer${i}"
-            else
-                PEER_ID="peer_${i}"
+            PEER_ID="peer_${i}"
+        fi
+        peer_conf="${stage}/${PEER_ID}/${PEER_ID}.conf"
+        mkdir -p "/config/${PEER_ID}" "${stage}/${PEER_ID}" || return 1
+        if [[ ! -s "/config/${PEER_ID}/privatekey-${PEER_ID}" ]]; then
+            awg genkey | tee "/config/${PEER_ID}/privatekey-${PEER_ID}" | awg pubkey > "/config/${PEER_ID}/publickey-${PEER_ID}"
+            awg genpsk > "/config/${PEER_ID}/presharedkey-${PEER_ID}"
+            if [[ ! -s "/config/${PEER_ID}/publickey-${PEER_ID}" ]] || [[ ! -s "/config/${PEER_ID}/presharedkey-${PEER_ID}" ]]; then
+                echo "**** ERROR: could not create the keys for ${PEER_ID} ****"
+                return 1
             fi
-            mkdir -p "/config/${PEER_ID}"
-            if [[ ! -f "/config/${PEER_ID}/privatekey-${PEER_ID}" ]]; then
-                umask 077
-                awg genkey | tee "/config/${PEER_ID}/privatekey-${PEER_ID}" | awg pubkey > "/config/${PEER_ID}/publickey-${PEER_ID}"
-                awg genpsk > "/config/${PEER_ID}/presharedkey-${PEER_ID}"
+        fi
+        CLIENT_IP=""
+        if [[ -f "/config/${PEER_ID}/${PEER_ID}.conf" ]]; then
+            CLIENT_IP=$(grep "Address" "/config/${PEER_ID}/${PEER_ID}.conf" | awk '{print $NF}')
+            if [[ -n "${ORIG_INTERFACE}" ]] && [[ "${INTERFACE}" != "${ORIG_INTERFACE}" ]]; then
+                CLIENT_IP="${CLIENT_IP//${ORIG_INTERFACE}/${INTERFACE}}"
             fi
-            if [[ -f "/config/${PEER_ID}/${PEER_ID}.conf" ]]; then
-                CLIENT_IP=$(grep "Address" "/config/${PEER_ID}/${PEER_ID}.conf" | awk '{print $NF}')
-                if [[ -n "${ORIG_INTERFACE}" ]] && [[ "${INTERFACE}" != "${ORIG_INTERFACE}" ]]; then
-                    CLIENT_IP="${CLIENT_IP//${ORIG_INTERFACE}/${INTERFACE}}"
+        else
+            # Include the staged confs: peers created earlier in this run are
+            # not in /config yet.
+            for idx in {2..254}; do
+                PROPOSED_IP="${INTERFACE}.${idx}"
+                if ! grep -q -R "${PROPOSED_IP}" /config/peer*/*.conf "${stage}"/peer*/*.conf 2>/dev/null && ([[ -z "${ORIG_INTERFACE}" ]] || ! grep -q -R "${ORIG_INTERFACE}.${idx}" /config/peer*/*.conf 2>/dev/null); then
+                    CLIENT_IP="${PROPOSED_IP}"
+                    break
                 fi
-            else
-                for idx in {2..254}; do
-                    PROPOSED_IP="${INTERFACE}.${idx}"
-                    if ! grep -q -R "${PROPOSED_IP}" /config/peer*/*.conf 2>/dev/null && ([[ -z "${ORIG_INTERFACE}" ]] || ! grep -q -R "${ORIG_INTERFACE}.${idx}" /config/peer*/*.conf 2>/dev/null); then
-                        CLIENT_IP="${PROPOSED_IP}"
-                        break
-                    fi
-                done
-            fi
-            if [[ -f "/config/${PEER_ID}/presharedkey-${PEER_ID}" ]]; then
-                # create peer conf with presharedkey
-                eval "$(printf %s)
-                cat <<DUDE > /config/${PEER_ID}/${PEER_ID}.conf
+            done
+        fi
+        if [[ -z "${CLIENT_IP}" ]]; then
+            echo "**** ERROR: no address could be found for ${PEER_ID} in ${INTERFACE}.0/24 ****"
+            return 1
+        fi
+        if [[ -f "/config/${PEER_ID}/presharedkey-${PEER_ID}" ]]; then
+            # create peer conf with presharedkey
+            if ! eval "$(printf %s)
+            cat <<DUDE > ${peer_conf}
 $(cat /config/templates/peer.conf)
-DUDE"
-                # Insert I1-I5 into [Interface] section of peer conf
-                append_awg_signatures_to_interface "/config/${PEER_ID}/${PEER_ID}.conf"
-                # Insert AWG 3.x params into [Interface] section (no-op unless AWG_VERSION is 3.0/3.1)
-                append_awg3_params_to_interface "/config/${PEER_ID}/${PEER_ID}.conf"
-                # Insert AWG 3.1 switches into [Interface] section (no-op unless either is set)
-                append_awg31_options_to_interface "/config/${PEER_ID}/${PEER_ID}.conf"
-                # add peer info to server conf with presharedkey
-                cat <<DUDE >> /config/wg_confs/wg0.conf
+DUDE"; then
+                echo "**** ERROR: /config/templates/peer.conf could not be rendered for ${PEER_ID}, see the error above ****"
+                return 1
+            fi
+        else
+            echo "**** Existing keys with no preshared key found for ${PEER_ID}, creating confs without preshared key for backwards compatibility ****"
+            # create peer conf without presharedkey
+            if ! eval "$(printf %s)
+            cat <<DUDE > ${peer_conf}
+$(sed '/PresharedKey/d' "/config/templates/peer.conf")
+DUDE"; then
+                echo "**** ERROR: /config/templates/peer.conf could not be rendered for ${PEER_ID}, see the error above ****"
+                return 1
+            fi
+        fi
+        # Insert I1-I5 into [Interface] section of peer conf
+        append_awg_signatures_to_interface "${peer_conf}"
+        # Insert AWG 3.x params into [Interface] section (no-op unless AWG_VERSION is 3.0/3.1)
+        append_awg3_params_to_interface "${peer_conf}"
+        # Insert AWG 3.1 switches into [Interface] section (no-op unless either is set)
+        append_awg31_options_to_interface "${peer_conf}"
+        # add peer info to server conf, with presharedkey if the peer has one
+        cat <<DUDE >> "${stage}/wg0.conf"
 [Peer]
 # ${PEER_ID}
 PublicKey = $(cat "/config/${PEER_ID}/publickey-${PEER_ID}")
+DUDE
+        if [[ -f "/config/${PEER_ID}/presharedkey-${PEER_ID}" ]]; then
+            cat <<DUDE >> "${stage}/wg0.conf"
 PresharedKey = $(cat "/config/${PEER_ID}/presharedkey-${PEER_ID}")
 DUDE
-            else
-                echo "**** Existing keys with no preshared key found for ${PEER_ID}, creating confs without preshared key for backwards compatibility ****"
-                # create peer conf without presharedkey
-                eval "$(printf %s)
-                cat <<DUDE > /config/${PEER_ID}/${PEER_ID}.conf
-$(sed '/PresharedKey/d' "/config/templates/peer.conf")
-DUDE"
-                # Insert I1-I5 into [Interface] section of peer conf
-                append_awg_signatures_to_interface "/config/${PEER_ID}/${PEER_ID}.conf"
-                # Insert AWG 3.x params into [Interface] section (no-op unless AWG_VERSION is 3.0/3.1)
-                append_awg3_params_to_interface "/config/${PEER_ID}/${PEER_ID}.conf"
-                # Insert AWG 3.1 switches into [Interface] section (no-op unless either is set)
-                append_awg31_options_to_interface "/config/${PEER_ID}/${PEER_ID}.conf"
-                # add peer info to server conf without presharedkey
-                cat <<DUDE >> /config/wg_confs/wg0.conf
-[Peer]
-# ${PEER_ID}
-PublicKey = $(cat "/config/${PEER_ID}/publickey-${PEER_ID}")
-DUDE
-            fi
-            SERVER_ALLOWEDIPS=SERVER_ALLOWEDIPS_PEER_${i}
-            # add peer's allowedips to server conf
-            if [[ -n "${!SERVER_ALLOWEDIPS}" ]]; then
-                echo "Adding ${!SERVER_ALLOWEDIPS} to wg0.conf's AllowedIPs for peer ${i}"
-                cat <<DUDE >> /config/wg_confs/wg0.conf
+        fi
+        SERVER_ALLOWEDIPS=SERVER_ALLOWEDIPS_PEER_${i}
+        # add peer's allowedips to server conf
+        if [[ -n "${!SERVER_ALLOWEDIPS}" ]]; then
+            echo "Adding ${!SERVER_ALLOWEDIPS} to wg0.conf's AllowedIPs for peer ${i}"
+            cat <<DUDE >> "${stage}/wg0.conf"
 AllowedIPs = ${CLIENT_IP}/32,${!SERVER_ALLOWEDIPS}
 DUDE
-            else
-                cat <<DUDE >> /config/wg_confs/wg0.conf
+        else
+            cat <<DUDE >> "${stage}/wg0.conf"
 AllowedIPs = ${CLIENT_IP}/32
 DUDE
-            fi
-            # add PersistentKeepalive if the peer is specified
-            if [[ -n "${PERSISTENTKEEPALIVE_PEERS_ARRAY}" ]] && ([[ "${PERSISTENTKEEPALIVE_PEERS_ARRAY[0]}" = "all" ]] || printf '%s\0' "${PERSISTENTKEEPALIVE_PEERS_ARRAY[@]}" | grep -Fxqz -- "${i}"); then
-                cat <<DUDE >> /config/wg_confs/wg0.conf
+        fi
+        # add PersistentKeepalive if the peer is specified
+        if [[ -n "${PERSISTENTKEEPALIVE_PEERS_ARRAY}" ]] && ([[ "${PERSISTENTKEEPALIVE_PEERS_ARRAY[0]}" = "all" ]] || printf '%s\0' "${PERSISTENTKEEPALIVE_PEERS_ARRAY[@]}" | grep -Fxqz -- "${i}"); then
+            cat <<DUDE >> "${stage}/wg0.conf"
 PersistentKeepalive = 25
 
 DUDE
-            else
-                cat <<DUDE >> /config/wg_confs/wg0.conf
+        else
+            cat <<DUDE >> "${stage}/wg0.conf"
 
 DUDE
-            fi
-            if [[ -z "${LOG_CONFS}" ]] || [[ "${LOG_CONFS}" = "true" ]]; then
-                echo "PEER ${i} QR code (conf file is saved under /config/${PEER_ID}):"
-                qrencode -t ansiutf8 < "/config/${PEER_ID}/${PEER_ID}.conf"
-            else
-                echo "PEER ${i} conf and QR code png saved in /config/${PEER_ID}"
-            fi
-            qrencode -o "/config/${PEER_ID}/${PEER_ID}.png" < "/config/${PEER_ID}/${PEER_ID}.conf"
+        fi
+        if ! qrencode -o "${stage}/${PEER_ID}/${PEER_ID}.png" < "${peer_conf}"; then
+            echo "**** ERROR: could not create the QR code for ${PEER_ID} ****"
+            return 1
+        fi
+        staged_ids+=("${PEER_ID}")
+        staged_labels+=("${i}")
+    done
+}
+
+# Structural checks on one staged conf. They catch what a failed $(...) in a
+# template leaves behind (an empty "PrivateKey =" or "PublicKey =") and a
+# missing section; awg does the full parse when the tunnel comes up. Extra
+# [Peer] blocks are allowed, since a custom server template may add its own.
+validate_conf () {
+    local conf=$1 min_peers=$2
+    awk -v min="${min_peers}" -v name="${conf##*/}" '
+        /^\[Interface\]/ { iface++ }
+        /^\[Peer\]/ { peers++ }
+        /^PrivateKey *= *[^ ]/ { key++ }
+        /^[A-Za-z0-9]+ *= *$/ { printf "**** ERROR: %s: empty value on line %d: %s ****\n", name, NR, $0; bad = 1 }
+        END {
+            if (iface != 1) { printf "**** ERROR: %s: expected one [Interface] section, found %d ****\n", name, iface; bad = 1 }
+            if (key != 1) { printf "**** ERROR: %s: expected one PrivateKey, found %d ****\n", name, key; bad = 1 }
+            if (peers < min) { printf "**** ERROR: %s: expected at least %d [Peer] section(s), found %d ****\n", name, min, peers; bad = 1 }
+            exit bad
+        }' "${conf}"
+}
+
+validate_confs () {
+    local stage=$1 id ok=0
+    validate_conf "${stage}/wg0.conf" "${#staged_ids[@]}" || ok=1
+    for id in "${staged_ids[@]}"; do
+        validate_conf "${stage}/${id}/${id}.conf" 1 || ok=1
+    done
+    return "${ok}"
+}
+
+# Move the staged set over the live files. wg0.conf goes first and the pngs
+# last, so a png existing means its conf is final (the CI smoke test waits on it).
+install_confs () {
+    local stage=$1 n id
+    mv -f "${stage}/wg0.conf" /config/wg_confs/wg0.conf || return 1
+    for id in "${staged_ids[@]}"; do
+        mv -f "${stage}/${id}/${id}.conf" "/config/${id}/${id}.conf" || return 1
+    done
+    for n in "${!staged_ids[@]}"; do
+        id=${staged_ids[$n]}
+        mv -f "${stage}/${id}/${id}.png" "/config/${id}/${id}.png" || return 1
+        if [[ -z "${LOG_CONFS}" ]] || [[ "${LOG_CONFS}" = "true" ]]; then
+            echo "PEER ${staged_labels[$n]} QR code (conf file is saved under /config/${id}):"
+            qrencode -t ansiutf8 < "/config/${id}/${id}.conf"
+        else
+            echo "PEER ${staged_labels[$n]} conf and QR code png saved in /config/${id}"
         fi
     done
+}
+
+config_generation_failed () {
+    echo "**** ERROR: Config generation failed. No config file was changed, and the previous configs (if any) will be used. ****"
+    echo "****        Fix the error above and restart the container to try again.                                              ****"
 }
 
 warn_if_subnet_outside_dns_acl () {
@@ -797,8 +888,11 @@ if [[ -n "$PEERS" ]]; then
 
     if [[ ! -f /config/wg_confs/wg0.conf ]]; then
         echo "**** No wg0.conf found (maybe an initial install), generating 1 server and ${PEERS} peer/client confs ****"
-        generate_confs
-        save_vars
+        if generate_confs; then
+            save_vars
+        else
+            config_generation_failed
+        fi
     else
         echo "**** Server mode is selected ****"
         if [[ -f /config/.donoteditthisfile ]]; then
@@ -838,8 +932,11 @@ if [[ -n "$PEERS" ]]; then
            [[ "$AWG_RANDOM_TRAILERS" != "$ORIG_AWG_RANDOM_TRAILERS" ]] || \
            [[ "$AWG_DISABLE_COOKIES" != "$ORIG_AWG_DISABLE_COOKIES" ]]; then
             echo "**** Server related environment variables changed, regenerating 1 server and ${PEERS} peer/client confs ****"
-            generate_confs
-            save_vars
+            if generate_confs; then
+                save_vars
+            else
+                config_generation_failed
+            fi
         else
             echo "**** No changes to parameters. Existing configs are used. ****"
         fi

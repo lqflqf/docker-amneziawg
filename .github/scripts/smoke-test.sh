@@ -52,8 +52,9 @@ in_image "s6-overlay services and branding" \
     "test -f $s6/user/contents.d/svc-amneziawg" \
     "test -x $s6/init-amneziawg-module/run" \
     "test -x $s6/init-amneziawg-confs/run" \
-    "test -f $s6/svc-unbound/run" \
-    "test -x $s6/svc-amneziawg/run"
+    "test -x $s6/svc-unbound/run" \
+    "test -x $s6/svc-amneziawg/run" \
+    "test -x $s6/svc-amneziawg/finish"
 
 in_image "Service types" \
     "test \"\$(cat $s6/init-amneziawg-module/type)\" = oneshot" \
@@ -71,6 +72,7 @@ in_image "Dependency chain" \
 
 in_image "Scripts and defaults" \
     'test -x /app/show-peer' \
+    'test -x /app/healthcheck' \
     'test -f /defaults/server.conf' \
     'test -f /defaults/peer.conf' \
     'test -s /build_version'
@@ -85,9 +87,9 @@ in_image "Unbound" \
 # written by init-amneziawg-confs before that, and s6 keeps the container up
 # either way.
 wait_for_peer() {
-    # Wait on the .png, not the .conf: the conf file exists from the moment the
-    # template heredoc runs, before the awk passes that insert the signatures
-    # and the 3.x/3.1 keys. The png is the last thing generate_confs writes.
+    # Wait on the .png, not the .conf: generate_confs renders into a staging
+    # directory and moves the set into place with wg0.conf first and the pngs
+    # last, so once the png exists every conf is final.
     local png=$1 label=$2
     for _ in $(seq 1 45); do
         docker exec "$container" test -f "$png" 2>/dev/null && return 0
@@ -154,6 +156,42 @@ if docker exec "$container" grep -qE '^(RandomTrailers|DisableCookies|HeaderProt
 fi
 echo "  ok   - default 2.0: no 3.x keys emitted"
 echo "- Default AWG 2.0 config generation: OK" >> "$summary"
+
+# The healthcheck and s6 must agree with whether wg0 actually came up. On a
+# runner it normally does not (no kernel module, no /dev/net/tun), but check
+# both outcomes rather than assume one.
+echo "### Health check"
+echo "### Health check" >> "$summary"
+for _ in $(seq 1 30); do
+    grep -qE 'All tunnels are now (active|down)' <<<"$(docker logs "$container" 2>&1)" && break
+    sleep 2
+done
+grep -qE 'All tunnels are now (active|down)' <<<"$(docker logs "$container" 2>&1)" \
+    || { echo "svc-amneziawg never finished"; docker logs "$container"; exit 1; }
+if grep -qw wg0 <<<"$(docker exec "$container" awg show interfaces)"; then
+    docker exec "$container" /app/healthcheck \
+        || { echo "healthcheck failed although wg0 is up"; docker logs "$container"; exit 1; }
+    echo "  ok   - healthy with wg0 up"
+else
+    if docker exec "$container" /app/healthcheck; then
+        echo "healthcheck passed although wg0 is down"; docker logs "$container"; exit 1
+    fi
+    if grep -qx svc-amneziawg <<<"$(docker exec "$container" s6-rc -a list)"; then
+        echo "svc-amneziawg reported up although its tunnel failed"; docker logs "$container"; exit 1
+    fi
+    echo "  ok   - unhealthy and svc-amneziawg down without a tunnel"
+fi
+echo "- Health check: OK" >> "$summary"
+
+# Checked here rather than with in_image: the seeded config needs the
+# /config/unbound directory and root.key that init creates.
+echo "### Unbound at runtime"
+echo "### Unbound at runtime" >> "$summary"
+docker exec "$container" unbound-checkconf /config/unbound/unbound.conf
+docker exec "$container" pgrep -x unbound >/dev/null \
+    || { echo "unbound is not running"; docker logs "$container"; exit 1; }
+echo "  ok   - unbound config valid and running"
+echo "- Unbound at runtime: OK" >> "$summary"
 
 echo "All smoke tests passed!" >> "$summary"
 echo "Smoke tests passed!"

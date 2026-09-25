@@ -1,0 +1,22 @@
+#!/bin/bash
+# Docker HEALTHCHECK: healthy only while every tunnel svc-amneziawg brought up
+# still exists. svc-amneziawg writes /run/activeconfs only after all tunnels
+# came up, so a missing file covers both "no valid config" and "a tunnel failed".
+
+if [[ ! -f /run/activeconfs ]]; then
+    echo "no active tunnels"
+    exit 1
+fi
+
+. /run/activeconfs
+read -ra ACTIVE <<< "$(awg show interfaces 2>/dev/null | tr '\n' ' ')"
+
+for conf in "${AWG_CONFS[@]}"; do
+    iface=$(basename "${conf}" .conf)
+    if [[ " ${ACTIVE[*]} " != *" ${iface} "* ]]; then
+        echo "tunnel ${iface} is down"
+        exit 1
+    fi
+done
+
+echo "tunnels up: ${ACTIVE[*]}"

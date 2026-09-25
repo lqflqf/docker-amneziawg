@@ -6,7 +6,7 @@ Thank you for your interest in contributing to this project! This document provi
 
 ### Reporting Issues
 
-1. Check if the issue already exists in the [Issues](https://github.com/AYastrebov/docker-amneziawg/issues) section
+1. Check if the issue already exists in the [Issues](https://github.com/lqflqf/docker-amneziawg/issues) section
 2. If not, create a new issue with:
    - Clear description of the problem
    - Steps to reproduce

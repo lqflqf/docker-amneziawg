@@ -1,11 +1,13 @@
 # Docker AmneziaWG
 
-[![Docker Build](https://github.com/AYastrebov/docker-amneziawg/actions/workflows/docker-build.yml/badge.svg)](https://github.com/AYastrebov/docker-amneziawg/actions/workflows/docker-build.yml)
-[![GitHub Container Registry](https://img.shields.io/badge/ghcr.io-docker--amneziawg-blue?logo=docker)](https://github.com/AYastrebov/docker-amneziawg/pkgs/container/docker-amneziawg)
-[![GitHub release](https://img.shields.io/github/v/release/AYastrebov/docker-amneziawg)](https://github.com/AYastrebov/docker-amneziawg/releases)
+[![Docker Build](https://github.com/lqflqf/docker-amneziawg/actions/workflows/docker-build.yml/badge.svg)](https://github.com/lqflqf/docker-amneziawg/actions/workflows/docker-build.yml)
+[![GitHub Container Registry](https://img.shields.io/badge/ghcr.io-docker--amneziawg-blue?logo=docker)](https://github.com/lqflqf/docker-amneziawg/pkgs/container/docker-amneziawg)
+[![GitHub release](https://img.shields.io/github/v/release/lqflqf/docker-amneziawg)](https://github.com/lqflqf/docker-amneziawg/releases)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 [AmneziaWG](https://docs.amnezia.org/) VPN server and client in one container. It writes the server config and hands you a ready config plus QR code for every peer, and it can answer DNS for connected clients. Built on [LinuxServer.io](https://www.linuxserver.io/) base images with s6-overlay.
+
+> Forked from [AYastrebov/docker-amneziawg](https://github.com/AYastrebov/docker-amneziawg), created and maintained by [Andrey Yastrebov](https://github.com/AYastrebov). The container's design, its config generation and most of its AWG work are his. Many thanks to him for building it and releasing it under the MIT license. The main change here is the DNS resolver; see [Differences from the original](#differences-from-the-original).
 
 AmneziaWG is WireGuard with added traffic obfuscation, so deep packet inspection has a harder time recognizing the handshake. The container picks random obfuscation values on first start, including the I1-I5 protocol signatures, then saves them and reuses them on later restarts so already distributed peer configs keep working.
 
@@ -14,6 +16,8 @@ AmneziaWG is WireGuard with added traffic obfuscation, so deep packet inspection
 - [Quick start](#quick-start)
 - [Requirements](#requirements)
 - [Modes](#modes)
+- [Differences from the original](#differences-from-the-original)
+- [DNS (Unbound)](#dns-unbound)
 - [Parameters](#parameters)
 - [Protocol version](#protocol-version)
 - [Obfuscation parameters](#obfuscation-parameters)
@@ -22,9 +26,11 @@ AmneziaWG is WireGuard with added traffic obfuscation, so deep packet inspection
 - [Speed and latency](#speed-and-latency)
 - [MTU](#mtu)
 - [Managing peers](#managing-peers)
+- [Health check](#health-check)
 - [Support info](#support-info)
 - [Building locally](#building-locally)
 - [Links](#links)
+- [Credits](#credits)
 
 ## Quick start
 
@@ -33,7 +39,7 @@ Server mode, three peers, using Docker Compose:
 ```yaml
 services:
   amneziawg:
-    image: ghcr.io/ayastrebov/docker-amneziawg:latest
+    image: ghcr.io/lqflqf/docker-amneziawg:latest
     container_name: amneziawg
     cap_add:
       - NET_ADMIN
@@ -90,7 +96,7 @@ docker run -d \
   --sysctl net.ipv4.ip_forward=1 \
   --sysctl net.ipv4.conf.all.src_valid_mark=1 \
   --restart unless-stopped \
-  ghcr.io/ayastrebov/docker-amneziawg:latest
+  ghcr.io/lqflqf/docker-amneziawg:latest
 ```
 
 ## Requirements
@@ -127,8 +133,58 @@ docker run -d \
   --sysctl net.ipv4.ip_forward=1 \
   --sysctl net.ipv4.conf.all.src_valid_mark=1 \
   --restart unless-stopped \
-  ghcr.io/ayastrebov/docker-amneziawg:latest
+  ghcr.io/lqflqf/docker-amneziawg:latest
 ```
+
+## Differences from the original
+
+This fork's main change from [AYastrebov/docker-amneziawg](https://github.com/AYastrebov/docker-amneziawg) is the DNS resolver it runs for peers: **Unbound instead of CoreDNS**.
+
+| | Original (CoreDNS) | This fork (Unbound) |
+|---|---|---|
+| Where peer queries go | The container's `/etc/resolv.conf`, which is Docker's or the host's resolver | Cloudflare `1.1.1.1` / `1.0.0.1`, or any upstream you set |
+| Encryption to the upstream | None, plain DNS on port 53 | DNS-over-TLS on port 853 |
+| DNSSEC validation | No | Yes |
+| On/off switch | `USE_COREDNS` | `USE_DNS` |
+| Config file | `/config/coredns/Corefile` | `/config/unbound/unbound.conf` |
+
+**Why:** with CoreDNS, every peer query left the server in plain text through whatever resolver the host uses, so the VPS provider or its network could read and tamper with it. Unbound encrypts the hop from the server to the resolver and checks DNSSEC signatures on the answers.
+
+**The trade-offs:**
+- By default all peer lookups go to Cloudflare. To use another resolver, change the `forward-addr` lines (see [DNS (Unbound)](#dns-unbound)).
+- The server needs outbound TCP port 853. If its network blocks DNS-over-TLS, peers on `PEERDNS=auto` get no answers. Point `forward-addr` at a reachable resolver, or set `PEERDNS` to one directly.
+
+**Switching from the original image:**
+1. Change `image:` to `ghcr.io/lqflqf/docker-amneziawg:latest`.
+2. Rename `USE_COREDNS` to `USE_DNS` if you set it. `USE_COREDNS` is ignored, so an old `USE_COREDNS=false` no longer turns DNS off.
+3. Restart. The `/config` volume is reused as is. Peer configs don't change, because `PEERDNS=auto` still points at `<subnet>.1`, so there's nothing to redistribute. `/config/coredns/` is no longer used and can be deleted.
+
+The fork also makes smaller changes; the [changelog](CHANGELOG.md) has the full list:
+- a `HEALTHCHECK` that reports the container `unhealthy` while a tunnel is down
+- all-or-nothing config regeneration: a broken template leaves the working configs in place
+- image tags of the form `<amneziawg-tools>-r<N>` (for example `3.1.20260812-r2`), one per published build, alongside `latest`
+
+## DNS (Unbound)
+
+In server mode the container runs [Unbound](https://nlnetlabs.nl/projects/unbound/about/) as the peers' resolver. With `PEERDNS=auto` (the default) each peer conf gets `DNS = <subnet>.1`, which is the server end of the tunnel, so peer queries never leave the VPN unencrypted.
+
+The default `/config/unbound/unbound.conf`:
+
+- forwards every query to Cloudflare (`1.1.1.1` and `1.0.0.1`) over DNS-over-TLS
+- validates DNSSEC, using `/config/unbound/root.key`
+- answers only `127.0.0.0/8` and the private ranges `10.0.0.0/8`, `172.16.0.0/12` and `192.168.0.0/16`, which covers the default `INTERNAL_SUBNET`
+- listens on port 53 inside the container
+
+It doesn't need a published port 53: peers reach it through the tunnel, so don't add `53:53` to `ports`.
+
+**Customizing it.** The file is copied from the image only when it's missing, so your edits survive restarts and image updates. Delete it to get the current default back on the next start. Common changes:
+
+- **Another upstream:** replace the `forward-addr` lines, keeping the `#hostname` suffix DNS-over-TLS needs to check the certificate, for example `forward-addr: 9.9.9.9#dns.quad9.net`.
+- **A public or other non-private `INTERNAL_SUBNET`:** add `access-control: <subnet>/24 allow`. Otherwise peers get `REFUSED`; the container warns about this at startup.
+
+The config is checked with `unbound-checkconf` on start. If it's invalid, Unbound isn't started and the log says why; the tunnel still comes up. Keep the `health.amneziawg.` zone if you can: the startup readiness check queries it, and falls back to a plain port check if it's gone.
+
+**When Unbound is off.** It doesn't run when `USE_DNS=false`, in client mode (unless `USE_DNS=true`), or when `USE_DNS` is unset and something else already listens on port 53. The log then says `Disabling unbound` or `Port 53 is already in use`. Peers on `PEERDNS=auto` get no DNS in that case, so set `PEERDNS` to a resolver of your own, such as `1.1.1.1`.
 
 ## Parameters
 
@@ -147,7 +203,7 @@ docker run -d \
 | `-e PERSISTENTKEEPALIVE_PEERS=` | Which peers get keepalive: `all` or comma-separated names/numbers |
 | `-e SERVER_ALLOWEDIPS_PEER_X=` | Per-peer server AllowedIPs for site-to-site VPN |
 | `-e LOG_CONFS=true` | Show generated configs and QR codes in container logs |
-| `-e USE_DNS=true` | Enable or disable the built-in unbound resolver. Defaults to `true` in server mode and `false` in client mode. Auto-disables when port 53 is already bound, unless you set it explicitly. Setting it to `false` in server mode breaks DNS for peers on `PEERDNS=auto`, so point `PEERDNS` at a public resolver such as `1.1.1.1` if you do |
+| `-e USE_DNS=true` | Enable or disable the built-in unbound resolver. Defaults to `true` in server mode and `false` in client mode. Auto-disables when something is already listening on port 53, unless you set it explicitly. Setting it to `false` in server mode breaks DNS for peers on `PEERDNS=auto`, so point `PEERDNS` at a public resolver such as `1.1.1.1` if you do |
 | `-e AWG_VERSION=2.0` | Protocol version: `2.0` (default, full DPI evasion), `3.0` (header protection and randomized timers), `3.1` (3.0 plus `RandomTrailers`) or `1.5` (legacy) |
 | `-e AWG_RANDOM_TRAILERS=` | `on`/`off`. Pads handshake packets to a random length. Works with any `AWG_VERSION`; defaults to `on` under `3.1`. Must match on every end. `off` omits the key |
 | `-e AWG_DISABLE_COOKIES=` | `on`/`off`. Stops cookie-reply messages under load. Works with any `AWG_VERSION`; always opt-in. Does not need to match. `off` omits the key |
@@ -263,7 +319,7 @@ AWG 2.0 sends signature packets before the handshake to make VPN traffic look li
 | `<rc N>` | N random chars (a-zA-Z) | `<rc 16>` |
 | `<t>` | 32-bit Unix timestamp | |
 
-Current AmneziaWG puts no size limit on a random tag, and the default I1 uses a single `<r 1178>`. Some third-party parsers still enforce an older 1000-byte-per-tag rule (observed: Keenetic rejects the default with `invalid I1 value`); for those, replace only the trailing `<r 1178>` with `<r 1000><r 178>` and leave the rest of the value as it is — the default then reads `<b 0xc3><b 0x00000001><b 0x08><r 8><b 0x00><b 0x00><b 0x449e><r 4><r 1000><r 178>`. The two forms are identical on the wire, so peers on either interoperate. See [CONTEXT.md](CONTEXT.md).
+Current AmneziaWG puts no size limit on a random tag, and the default I1 uses a single `<r 1178>`. Some third-party parsers still enforce an older 1000-byte-per-tag rule (observed: Keenetic rejects the default with `invalid I1 value`); for those, replace only the trailing `<r 1178>` with `<r 1000><r 178>` and leave the rest of the value as it is — the default then reads `<b 0xc3><b 0x00000001><b 0x08><r 8><b 0x00><b 0x00><b 0x449e><r 4><r 1000><r 178>`. The two forms are identical on the wire, so peers on either interoperate. See the [`<r N>` size notes](.claude/skills/docker-amneziawg/references/awg-parameters.md#r-n-size).
 
 [AmneziaWG Architect](https://architect.vai-rice.space/) generates signature strings for QUIC, DNS, DTLS, SIP, HTTP/3 and others.
 
@@ -370,11 +426,21 @@ docker exec amneziawg /app/show-peer 1 2 3
 docker exec amneziawg /app/show-peer laptop phone tablet
 ```
 
+## Health check
+
+The image has a `HEALTHCHECK` that reports the container `unhealthy` unless every tunnel in `/config/wg_confs` is up. That covers a tunnel that failed to start (a broken conf, or a kernel module that rejects a key) and a client container with no valid conf. Docker does not restart an unhealthy container on its own; use the status for monitoring, or with a tool such as autoheal.
+
+If config generation fails in server mode (for example, a syntax error in a customized template in `/config/templates/`), no config file is changed and the previous configs stay in use. The log shows `Config generation failed` with the reason. Fix it and restart to try again.
+
 ## Support info
 
 ```bash
 # container logs
 docker logs amneziawg
+
+# health: healthy or unhealthy, and the reason
+docker inspect amneziawg --format '{{.State.Health.Status}}'
+docker exec amneziawg /app/healthcheck
 
 # interface status
 docker exec amneziawg awg show
@@ -400,13 +466,16 @@ docker buildx build --platform linux/amd64,linux/arm64 -t amneziawg .
 - [AmneziaWG kernel module](https://github.com/amnezia-vpn/amneziawg-linux-kernel-module)
 - [AmneziaWG Architect](https://architect.vai-rice.space/), a GUI config generator for custom I1-I5 signatures
 - [amneziawg-installer](https://github.com/bivlked/amneziawg-installer), a bash installer for AmneziaWG 2.0 on Ubuntu/Debian
-- [Advanced hub mode](ADVANCED_AWG_HUB.md), server and client in one container with upstream VPN routing
 - [LinuxServer docker-wireguard](https://github.com/linuxserver/docker-wireguard), the project this one is modeled on
 
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md). Security issues go through [SECURITY.md](SECURITY.md).
 
+## Credits
+
+This project is a fork of [AYastrebov/docker-amneziawg](https://github.com/AYastrebov/docker-amneziawg) by [Andrey Yastrebov](https://github.com/AYastrebov), who created it and wrote the bulk of its history. It builds on [LinuxServer docker-wireguard](https://github.com/linuxserver/docker-wireguard) and the [AmneziaVPN](https://github.com/amnezia-vpn) team's `amneziawg-go`, `amneziawg-tools` and kernel module.
+
 ## License
 
-MIT, see [LICENSE](LICENSE).
+MIT, see [LICENSE](LICENSE). The original copyright notice is kept as the license requires.
