@@ -16,6 +16,7 @@ AmneziaWG is WireGuard with added traffic obfuscation, so deep packet inspection
 - [Quick start](#quick-start)
 - [Requirements](#requirements)
 - [Modes](#modes)
+- [DNS (Unbound)](#dns-unbound)
 - [Parameters](#parameters)
 - [Protocol version](#protocol-version)
 - [Obfuscation parameters](#obfuscation-parameters)
@@ -133,6 +134,28 @@ docker run -d \
   --restart unless-stopped \
   ghcr.io/lqflqf/docker-amneziawg:latest
 ```
+
+## DNS (Unbound)
+
+In server mode the container runs [Unbound](https://nlnetlabs.nl/projects/unbound/about/) as the peers' resolver. With `PEERDNS=auto` (the default) each peer conf gets `DNS = <subnet>.1`, which is the server end of the tunnel, so peer queries never leave the VPN unencrypted.
+
+The default `/config/unbound/unbound.conf`:
+
+- forwards every query to Cloudflare (`1.1.1.1` and `1.0.0.1`) over DNS-over-TLS
+- validates DNSSEC, using `/config/unbound/root.key`
+- answers only `127.0.0.0/8` and the private ranges `10.0.0.0/8`, `172.16.0.0/12` and `192.168.0.0/16`, which covers the default `INTERNAL_SUBNET`
+- listens on port 53 inside the container and drops to the `abc` user (`PUID`) after binding it
+
+It doesn't need a published port 53: peers reach it through the tunnel, so don't add `53:53` to `ports`.
+
+**Customizing it.** The file is copied from the image only when it's missing, so your edits survive restarts and image updates. Delete it to get the current default back on the next start. Common changes:
+
+- **Another upstream:** replace the `forward-addr` lines, keeping the `#hostname` suffix DNS-over-TLS needs to check the certificate, for example `forward-addr: 9.9.9.9#dns.quad9.net`.
+- **A public or other non-private `INTERNAL_SUBNET`:** add `access-control: <subnet>/24 allow`. Otherwise peers get `REFUSED`; the container warns about this at startup.
+
+The config is checked with `unbound-checkconf` on start. If it's invalid, Unbound isn't started and the log says why; the tunnel still comes up. Keep the `health.amneziawg.` zone if you can: the startup readiness check queries it, and falls back to a plain port check if it's gone.
+
+**When Unbound is off.** It doesn't run when `USE_DNS=false`, in client mode (unless `USE_DNS=true`), or when `USE_DNS` is unset and something else already listens on port 53. The log then says `Disabling unbound` or `Port 53 is already in use`. Peers on `PEERDNS=auto` get no DNS in that case, so set `PEERDNS` to a resolver of your own, such as `1.1.1.1`.
 
 ## Parameters
 
