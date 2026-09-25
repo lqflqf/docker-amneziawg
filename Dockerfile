@@ -104,5 +104,10 @@ RUN \
 # add local files
 COPY /root /
 
+# Healthy only while every tunnel in /config/wg_confs is up. Docker does not
+# restart unhealthy containers by itself; this is a signal for monitoring.
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+  CMD ["/app/healthcheck"]
+
 # ports and volumes
 EXPOSE 51820/udp

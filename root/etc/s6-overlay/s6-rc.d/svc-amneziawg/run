@@ -43,4 +43,8 @@ else
     done
     ip route del default
     echo "**** All tunnels are now down. Please fix the tunnel config ${FAILED} and restart the container ****"
+    # Fail the oneshot so s6 shows svc-amneziawg as down. The container keeps
+    # running (S6_BEHAVIOUR_IF_STAGE2_FAILS is unset), and the HEALTHCHECK
+    # reports it unhealthy because /run/activeconfs was never written.
+    exit 1
 fi

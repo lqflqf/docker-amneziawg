@@ -27,13 +27,14 @@ init-config (LSIO) -> init-amneziawg-module (oneshot) -> init-amneziawg-confs (o
 - **init-amneziawg-module**: Tests kernel support via `ip link add dev test type amneziawg` (the amnezia module's rtnl link kind — awg-quick creates `type amneziawg`, not `type wireguard`). Falls back to `amneziawg-go` userspace (exports `WG_QUICK_USERSPACE_IMPLEMENTATION`).
 - **init-amneziawg-confs**: Config generation using eval+heredoc template expansion from `/config/templates/`. Server mode generates keys, wg0.conf, peer configs, QR codes. Client mode defaults `USE_DNS` to `false`. Seeds `/config/unbound/unbound.conf` and `root.key` if missing.
 - **svc-unbound**: Longrun unbound resolver with `notification-fd 3` readiness checks (`nslookup health.amneziawg.`, or a UDP probe of port 53 when the config lacks the health zone). Runs `/config/unbound/unbound.conf` after `unbound-checkconf`; an invalid config is reported and unbound is not started. Auto-disabled if port 53 already bound (and `USE_DNS` not explicitly set) or `USE_DNS=false`. In client mode, defaults to `false` unless overridden. Disabling in server mode breaks DNS for peers using `PEERDNS=auto` — set `PEERDNS` to a public resolver.
-- **svc-amneziawg**: Oneshot service (up/down scripts). Validates `[Interface]` in each .conf, activates tunnels, saves active confs to `/run/activeconfs` via `declare -p`. Finish script tears down in reverse order.
+- **svc-amneziawg**: Oneshot service (up/down scripts). Validates `[Interface]` in each .conf, activates tunnels, saves active confs to `/run/activeconfs` via `declare -p`. If a tunnel fails it tears the others down and exits 1 (the container keeps running). Finish script tears down in reverse order.
+- **HEALTHCHECK** (`/app/healthcheck`): healthy only if `/run/activeconfs` exists and every interface it lists is in `awg show interfaces`.
 
 Dependencies are declared via empty files in `dependencies.d/`. Services are registered via empty files in `user/contents.d/`.
 
 ### Config Persistence
 
-All env vars are saved to `/config/.donoteditthisfile` (LinuxServer pattern) for change detection on restart. AWG obfuscation params are additionally saved to `/config/server/awg_params` and loaded as fallback (via `grep`/`cut`, NOT `source` — to preserve env var priority). Configs only regenerate if any saved var differs from the current value.
+All env vars are saved to `/config/.donoteditthisfile` (LinuxServer pattern) for change detection on restart. AWG obfuscation params are additionally saved to `/config/server/awg_params` and loaded as fallback (via `grep`/`cut`, NOT `source` — to preserve env var priority). Configs only regenerate if any saved var differs from the current value. Regeneration renders into a staging directory, validates, and only then replaces the live files; on failure nothing changes and the saved vars are not updated, so the next start retries.
 
 ## Operating Modes
 

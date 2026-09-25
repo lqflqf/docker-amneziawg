@@ -22,6 +22,7 @@ AmneziaWG is WireGuard with added traffic obfuscation, so deep packet inspection
 - [Speed and latency](#speed-and-latency)
 - [MTU](#mtu)
 - [Managing peers](#managing-peers)
+- [Health check](#health-check)
 - [Support info](#support-info)
 - [Building locally](#building-locally)
 - [Links](#links)
@@ -147,7 +148,7 @@ docker run -d \
 | `-e PERSISTENTKEEPALIVE_PEERS=` | Which peers get keepalive: `all` or comma-separated names/numbers |
 | `-e SERVER_ALLOWEDIPS_PEER_X=` | Per-peer server AllowedIPs for site-to-site VPN |
 | `-e LOG_CONFS=true` | Show generated configs and QR codes in container logs |
-| `-e USE_DNS=true` | Enable or disable the built-in unbound resolver. Defaults to `true` in server mode and `false` in client mode. Auto-disables when port 53 is already bound, unless you set it explicitly. Setting it to `false` in server mode breaks DNS for peers on `PEERDNS=auto`, so point `PEERDNS` at a public resolver such as `1.1.1.1` if you do |
+| `-e USE_DNS=true` | Enable or disable the built-in unbound resolver. Defaults to `true` in server mode and `false` in client mode. Auto-disables when something is already listening on port 53, unless you set it explicitly. Unbound drops privileges to the `abc` user (`PUID`) after binding the port. Setting it to `false` in server mode breaks DNS for peers on `PEERDNS=auto`, so point `PEERDNS` at a public resolver such as `1.1.1.1` if you do |
 | `-e AWG_VERSION=2.0` | Protocol version: `2.0` (default, full DPI evasion), `3.0` (header protection and randomized timers), `3.1` (3.0 plus `RandomTrailers`) or `1.5` (legacy) |
 | `-e AWG_RANDOM_TRAILERS=` | `on`/`off`. Pads handshake packets to a random length. Works with any `AWG_VERSION`; defaults to `on` under `3.1`. Must match on every end. `off` omits the key |
 | `-e AWG_DISABLE_COOKIES=` | `on`/`off`. Stops cookie-reply messages under load. Works with any `AWG_VERSION`; always opt-in. Does not need to match. `off` omits the key |
@@ -370,11 +371,21 @@ docker exec amneziawg /app/show-peer 1 2 3
 docker exec amneziawg /app/show-peer laptop phone tablet
 ```
 
+## Health check
+
+The image has a `HEALTHCHECK` that reports the container `unhealthy` unless every tunnel in `/config/wg_confs` is up. That covers a tunnel that failed to start (a broken conf, or a kernel module that rejects a key) and a client container with no valid conf. Docker does not restart an unhealthy container on its own; use the status for monitoring, or with a tool such as autoheal.
+
+If config generation fails in server mode (for example, a syntax error in a customized template in `/config/templates/`), no config file is changed and the previous configs stay in use. The log shows `Config generation failed` with the reason. Fix it and restart to try again.
+
 ## Support info
 
 ```bash
 # container logs
 docker logs amneziawg
+
+# health: healthy or unhealthy, and the reason
+docker inspect amneziawg --format '{{.State.Health.Status}}'
+docker exec amneziawg /app/healthcheck
 
 # interface status
 docker exec amneziawg awg show
