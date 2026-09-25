@@ -211,7 +211,7 @@ Guidance (documented in README "MTU"): 1280 for mobile/PPPoE/unknown paths (clea
 
 - Push to the default branch (or manual run on it without overrides) -> multi-arch build (`amd64`, `arm64`) -> `:<tools>-r<N>` + `:<tools>` + `:latest` + `:sha-<short>`, then git tag + GitHub Release `v<tools>-r<N>` carrying the image digest. Skipped when nothing image-affecting changed since the last release — the tag made by the highest run id (`.github/scripts/release-tags.sh latest`), whether or not it is reachable from `HEAD`
 - A re-run of a release run reuses its own already-pushed `<tools>-r<N>` (after checking both platforms are present) and re-points the aliases at it, since a multi-tag push is not atomic
-- A release run superseded by a later run (e.g. an old failed run re-run) still publishes `<tools>-r<N>` and its GitHub Release, but does not move `:<tools>`, `:latest`, `:sha-*` or the "latest" release
+- A release run superseded by a later run (e.g. an old failed run re-run) still publishes `<tools>-r<N>` and its GitHub Release, but does not move `:<tools>`, `:latest` or the "latest" release. It still creates or repairs `:sha-*` when the build matches that commit's own pins
 - PRs -> `smoke` job only (single-platform build, read-only token): `.github/scripts/smoke-test.sh` checks binaries, s6 services/types/dependencies, Unbound, branding, and generates AWG 3.1 and 2.0 configs; plus the `next-version`/`release-tags` script tests
 - `workflow_dispatch` with `amneziawg_go_version`/`amneziawg_tools_version` overrides -> ad-hoc build: `:dispatch-<run>` only (no `:sha-*`), no `latest`, no release
 - No `v*` tag trigger; release tags are created by the workflow and are the build counter

@@ -22,7 +22,8 @@ name: Build and Push Docker Image
 # A release run that is superseded (a later run already published a release,
 # e.g. when an old failed run is re-run) still publishes its immutable
 # <tools>-r<N> and GitHub Release, but never moves the floating aliases or the
-# "latest" release back to itself.
+# "latest" release back to itself. The commit-specific sha-* alias still
+# points at the image built from that commit's own pins.
 #
 # Actions are pinned to commit SHAs; Dependabot (.github/dependabot.yml) bumps them.
 
@@ -283,7 +284,7 @@ jobs:
           SUPERSEDED=$(.github/scripts/release-tags.sh superseded "$GITHUB_RUN_ID")
           echo "superseded=${SUPERSEDED}" >> "$GITHUB_OUTPUT"
           if [[ "$SUPERSEDED" == "true" ]]; then
-            echo "::warning::A later run has already released $(.github/scripts/release-tags.sh latest); publishing ${IMAGE_VERSION} without moving ${TOOLS_VERSION}, latest or sha-*"
+            echo "::warning::A later run has already released $(.github/scripts/release-tags.sh latest); publishing ${IMAGE_VERSION} without moving ${TOOLS_VERSION} or latest"
           fi
 
       - name: Set up QEMU
@@ -356,7 +357,7 @@ jobs:
             # Ad-hoc manual runs (version overrides)
             type=raw,value=dispatch-${{ github.run_number }},enable=${{ env.MODE == 'adhoc' && github.event_name == 'workflow_dispatch' }}
             # Tag with short sha — only for builds that match the commit's source
-            type=sha,prefix=sha-,enable=${{ format('{0}{1}', inputs.amneziawg_go_version, inputs.amneziawg_tools_version) == '' && steps.superseded.outputs.superseded != 'true' }}
+            type=sha,prefix=sha-,enable=${{ format('{0}{1}', inputs.amneziawg_go_version, inputs.amneziawg_tools_version) == '' }}
           labels: |
             org.opencontainers.image.version=${{ env.IMAGE_VERSION }}
             io.github.actions.run-id=${{ github.run_id }}
