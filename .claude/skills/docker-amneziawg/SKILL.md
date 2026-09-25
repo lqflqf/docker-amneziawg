@@ -36,28 +36,30 @@ docker-amneziawg/
 │   ├── defaults/
 │   │   ├── server.conf           # Server config template (eval+heredoc)
 │   │   ├── peer.conf             # Peer config template (eval+heredoc)
-│   │   └── Corefile              # CoreDNS default config
+│   │   └── unbound.conf          # unbound default config
 │   └── etc/s6-overlay/s6-rc.d/
 │       ├── init-amneziawg-module/    # Kernel module detection (oneshot)
 │       ├── init-amneziawg-confs/     # Config generation (oneshot)
-│       ├── svc-coredns/              # CoreDNS service (longrun)
+│       ├── svc-unbound/              # unbound resolver (longrun)
 │       ├── svc-amneziawg/            # Tunnel service (oneshot up/down)
 │       └── user/contents.d/          # Service registration (empty files)
-└── .github/workflows/
-    ├── docker-build.yml              # Main build pipeline (multi-arch)
-    └── upstream-check.yml            # Daily upstream version check
+└── .github/
+    ├── scripts/                      # next-version, release-tags, smoke-test, update-pins (+ tests)
+    └── workflows/
+        ├── docker-build.yml          # Main build pipeline (multi-arch)
+        └── upstream-check.yml        # Daily upstream version check
 ```
 
 ## S6-Overlay Architecture
 
 ### Service Dependency Chain
 ```
-init-amneziawg-module (oneshot) -> init-amneziawg-confs (oneshot) -> svc-coredns (longrun) -> svc-amneziawg (oneshot)
+init-amneziawg-module (oneshot) -> init-amneziawg-confs (oneshot) -> svc-unbound (longrun) -> svc-amneziawg (oneshot)
 ```
 
 Key points:
 - `svc-amneziawg` is a **oneshot** — tunnels stay up without a running process
-- `svc-coredns` is a **longrun** — continuously serves DNS for peers
+- `svc-unbound` is a **longrun** — continuously serves DNS for peers (`USE_DNS=false` disables it)
 - Dependencies: empty files in `dependencies.d/`. Registration: empty files in `user/contents.d/`
 
 ### Script Requirements
@@ -73,7 +75,7 @@ Key points:
 | `SERVERURL` | auto | Server URL/IP for peer configs |
 | `SERVERPORT` | 51820 | Port advertised to peers. Use <= 9999 if ISP blocks high UDP |
 | `INTERNAL_SUBNET` | 10.13.13.0 | VPN subnet (.1 = server, .2+ = peers) |
-| `PEERDNS` | auto | DNS for peers (auto = container's CoreDNS at subnet.1) |
+| `PEERDNS` | auto | DNS for peers (auto = container's unbound resolver at subnet.1) |
 | `LOG_CONFS` | true | Show QR codes in container logs |
 | `AWG_VERSION` | 2.0 | Protocol version: 2.0 (full DPI evasion), 3.0 (header protection + randomized timers), 3.1 (3.0 + RandomTrailers) or 1.5 (legacy, AmneziaVPN < 4.8.12.9) |
 | `AWG_RANDOM_TRAILERS` | - | `on`/`off`. Random-length handshake packets. Any AWG_VERSION; defaults to `on` under 3.1. Must match on every end. **Requires `S1 == S2 == S3 == S4`** under AWG 2.0+ or ~3.5% of transport packets are dropped — see [awg-performance.md](../../../docs/awg-performance.md) |
@@ -136,14 +138,14 @@ Tunnel startup fails without `--device /dev/net/tun` — expected in testing.
 ## GitHub Actions Workflows
 
 ### docker-build.yml
-- A `changes` gate skips build+release when nothing image-affecting (`Dockerfile`, `root/**`, `.dockerignore`, image CI) changed since the last release tag
-- Push to the default branch -> builds multi-arch, tags `<tools>-r<N>` (immutable) + `<tools>` + `latest`, creates release `v<tools>-r<N>`
-- Pull requests -> single-platform smoke test (no push)
+- A `changes` gate skips build+release when nothing image-affecting (`Dockerfile`, `root/**`, `.dockerignore`, image CI) changed since the last release (highest run id, via `.github/scripts/release-tags.sh latest`)
+- Push to the default branch -> builds multi-arch, tags `<tools>-r<N>` (immutable) + `<tools>` + `latest`, creates release `v<tools>-r<N>`. A superseded re-run of an old run publishes only its immutable tag and a non-latest release
+- Pull requests -> `smoke` job: single-platform build + `.github/scripts/smoke-test.sh` (no push, read-only token)
 - `workflow_dispatch` without overrides -> new release (e.g. base-image refresh); with version overrides -> ad-hoc `dispatch-<run>` tag only
 
 ### upstream-check.yml
-- Daily at 06:00 UTC: compares Dockerfile ARG defaults against latest upstream releases
-- Auto-updates Dockerfile and triggers build if new version found
-- Has concurrency control and version format validation
+- Daily at 06:00 UTC: compares Dockerfile ARG defaults against the highest strict `vX.Y.Z` upstream versions (no prereleases, no downgrades)
+- Builds and smoke-tests the bump, then opens/updates a PR; the image is released when the PR is merged
+- Set the optional `UPSTREAM_PR_TOKEN` secret so the bot PR also triggers the regular PR checks (`GITHUB_TOKEN` PRs do not)
 
 Multi-arch: `linux/amd64`, `linux/arm64`

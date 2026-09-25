@@ -27,7 +27,7 @@ docker exec awg-test /app/show-peer 1
 docker rm -f awg-test && rm -rf /tmp/awg-test
 ```
 
-There is no automated test suite. CI runs smoke tests on PRs: binary presence, s6 structure, show-peer executable check.
+There is no unit test suite. CI runs `.github/scripts/smoke-test.sh <image>` on PRs (binaries, s6 services/types/dependencies, Unbound, branding, AWG 3.1/2.0 config generation); run it locally against `amneziawg-test` the same way. Each check must fail on its own — never `test ... && echo` (errexit ignores the left side of `&&`). CI also runs `.github/scripts/next-version.test.sh` and `.github/scripts/release-tags.test.sh`.
 
 ## Architecture
 
@@ -44,12 +44,12 @@ Runtime creates compatibility symlinks: `wg → awg`, `wg-quick → awg-quick`, 
 ### s6-overlay service chain
 
 ```
-init-config (LSIO) → init-amneziawg-module (oneshot) → init-amneziawg-confs (oneshot) → svc-coredns (longrun) → svc-amneziawg (oneshot)
+init-config (LSIO) → init-amneziawg-module (oneshot) → init-amneziawg-confs (oneshot) → svc-unbound (longrun) → svc-amneziawg (oneshot)
 ```
 
 - **init-amneziawg-module**: Tests kernel support via `ip link add dev test type amneziawg` (the amnezia module's rtnl link kind — awg-quick creates `type amneziawg`, not `type wireguard`). Falls back to `amneziawg-go` userspace (exports `WG_QUICK_USERSPACE_IMPLEMENTATION`).
-- **init-amneziawg-confs**: Config generation using eval+heredoc template expansion from `/config/templates/`. Server mode generates keys, wg0.conf, peer configs, QR codes. Client mode disables CoreDNS.
-- **svc-coredns**: Longrun CoreDNS service with `notification-fd 3` health checks. Auto-disabled if port 53 already bound (and `USE_COREDNS` not explicitly set) or `USE_COREDNS=false`. In client mode, defaults to `false` unless overridden. Disabling in server mode breaks DNS for peers using `PEERDNS=auto` — set `PEERDNS` to a public resolver.
+- **init-amneziawg-confs**: Config generation using eval+heredoc template expansion from `/config/templates/`. Server mode generates keys, wg0.conf, peer configs, QR codes. Client mode defaults `USE_DNS` to `false`. Seeds `/config/unbound/unbound.conf` and `root.key` if missing.
+- **svc-unbound**: Longrun unbound resolver with `notification-fd 3` readiness checks. Runs `/config/unbound/unbound.conf` only if `unbound-checkconf` accepts it. Auto-disabled if port 53 already bound (and `USE_DNS` not explicitly set) or `USE_DNS=false`. In client mode, defaults to `false` unless overridden. Disabling in server mode breaks DNS for peers using `PEERDNS=auto` — set `PEERDNS` to a public resolver.
 - **svc-amneziawg**: Oneshot service (up/down scripts). Validates `[Interface]` in each .conf, activates tunnels, saves active confs to `/run/activeconfs` via `declare -p`. Finish script tears down in reverse order.
 
 Dependencies are declared via empty files in `dependencies.d/`. Services are registered via empty files in `user/contents.d/`.
@@ -105,16 +105,20 @@ All clients and server must use identical values. Key constraints:
 ### Workflows
 
 **`docker-build.yml`** — main build pipeline:
-- Jobs: `changes` (mode + image-path gate) → `version` → `build` → `release`. Only `Dockerfile`, `root/**`, `.dockerignore`, the workflow and `.github/scripts/` are image content; on the default branch the gate diffs against the **last release tag**, not the previous push, so an image change from a failed or superseded run is never lost. Manual runs always build
+- Jobs: `changes` (mode + image-path gate) → `version` → `smoke` (PRs) or `build` (everything else) → `release`. Only `Dockerfile`, `root/**`, `.dockerignore`, the workflow and `.github/scripts/` are image content; on the default branch the gate diffs against the **last release** — the tag made by the highest run id (`.github/scripts/release-tags.sh latest`), *not* `git describe`, so it still works after a force-push drops that release's commit — not the previous push, so an image change from a failed or superseded run is never lost. Manual runs always build
 - Push to the default branch (or `workflow_dispatch` on it without overrides) = **release mode**: builds multi-arch (`amd64`, `arm64`), pushes `:<tools>-r<N>` (immutable), `:<tools>` and `:latest` (floating) and `:sha-<short>`, then creates the annotated git tag `v<tools>-r<N>` and a GitHub Release with the image digest. One release == one image
 - Publishing runs are serialized (`concurrency` group `…-publish`) because they claim the next `N`
-- PRs → smoke tests only (single-platform `--load` build, no multi-arch QEMU): binaries, s6 structure, service types, dependency chain, Unbound, branding, plus `.github/scripts/next-version.test.sh`
+- A run is **superseded** when a release tag with a higher run id exists (e.g. an old failed run re-run). It still publishes `<tools>-r<N>` and its release, but never moves `:<tools>`, `:latest`, `:sha-*` or the "latest" GitHub Release. This is evaluated inside `build`/`release`, not `version`: "re-run failed jobs" reuses outputs of jobs that succeeded
+- A re-run that reuses its own `<tools>-r<N>` checks both platforms are in the index and re-points the aliases with `imagetools create` — a multi-tag push is not atomic
+- PRs → `smoke` job only (single-platform build, no QEMU, read-only token — `packages: write` lives only on `build`): `.github/scripts/smoke-test.sh`, plus the `next-version`/`release-tags` script tests
 - `workflow_dispatch` with `amneziawg_go_version`/`amneziawg_tools_version` overrides = **ad-hoc mode**: pushes only `:dispatch-<run>` (not `:sha-*`, which always means "built from this commit's pins"), never `latest`, a release tag, or a GitHub Release
 - There is no `v*` tag trigger — do not push `v*-r*` tags by hand, they *are* the build counter
+- Workflow-level `permissions: contents: read`; jobs request more individually. Actions are pinned to commit SHAs (`# vX.Y.Z` comment), bumped by Dependabot (`.github/dependabot.yml`). Pass `${{ }}` values to `run:` via `env:`, never inline — Dockerfile ARGs and upstream tag names are untrusted
 
 **`upstream-check.yml`** — daily upstream version check (06:00 UTC):
-- Compares `ARG` defaults in Dockerfile against latest amneziawg-tools and amneziawg-go releases
-- If new version detected: updates Dockerfile and opens a pull request; the build workflow runs on merge
+- Compares `ARG` defaults in Dockerfile against the highest strict `vX.Y.Z` amneziawg-tools release (no drafts/prereleases) and amneziawg-go tag; only strictly newer versions are proposed (no downgrades). Suffixed tags such as `v1.0.20260618-2` are skipped — `next-version.sh` does not accept `-` in the tools version
+- Applies the bump with `.github/scripts/update-pins.sh`, builds and smoke-tests it in a read-only job, then opens/updates a PR on `chore/bump-upstream-versions`; the build workflow releases on merge
+- PRs opened with `GITHUB_TOKEN` do not trigger `pull_request` workflows. The optional `UPSTREAM_PR_TOKEN` secret (GitHub App token or fine-grained PAT) is used instead when set, so the regular PR checks run too
 
 ### Versioning
 

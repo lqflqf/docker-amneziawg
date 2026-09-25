@@ -31,7 +31,8 @@ while IFS= read -r tag; do
     [[ "$tag" =~ $tag_re ]] || continue
     n=$((10#${BASH_REMATCH[1]}))
     (( n > max )) && max=$n
-    if git tag -l --format='%(contents)' "$tag" | grep -qx "run-id: ${run_id}"; then
+    # no grep -q: exiting early would SIGPIPE git and fail under pipefail
+    if git tag -l --format='%(contents)' "$tag" | grep -x "run-id: ${run_id}" >/dev/null; then
         reuse=$n
     fi
 done < <(git tag -l "v${tools}-r*")

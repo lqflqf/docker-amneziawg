@@ -66,14 +66,14 @@ sudo iptables -t nat -A POSTROUTING -s 10.13.13.0/24 -o eth0 -j MASQUERADE
 
 ### Client sees the tunnel as connected but can't resolve DNS
 
-The peer is trying to resolve via `PEERDNS`. If `PEERDNS=auto`, the container's CoreDNS at `10.13.13.1` should answer. Check:
+The peer is trying to resolve via `PEERDNS`. If `PEERDNS=auto`, the container's unbound resolver at `10.13.13.1` should answer. Check:
 
 ```bash
-docker exec amneziawg netstat -ulnp | grep :53   # CoreDNS should be listening
-docker exec amneziawg cat /config/coredns/Corefile
+docker exec amneziawg netstat -ulnp | grep :53   # unbound should be listening
+docker exec amneziawg unbound-checkconf /config/unbound/unbound.conf
 ```
 
-If CoreDNS is not running (port 53 was already bound at startup), set `USE_COREDNS=true` explicitly or change `PEERDNS` to a public resolver like `1.1.1.1`.
+If unbound is not running (port 53 was already bound at startup, or `unbound.conf` failed `unbound-checkconf` — see `docker logs amneziawg`), set `USE_DNS=true` explicitly, fix the config, or change `PEERDNS` to a public resolver like `1.1.1.1`.
 
 ## Amnezia app reports "AWG 1.5" but we deployed 2.0
 
