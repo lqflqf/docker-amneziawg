@@ -950,13 +950,6 @@ fi
 # set up unbound
 if [[ ! -f /config/unbound/unbound.conf ]]; then
     cp /defaults/unbound.conf /config/unbound/unbound.conf
-elif grep -qxE '[[:space:]]*username: ""[[:space:]]*' /config/unbound/unbound.conf; then
-    # Earlier defaults shipped `username: ""`, which keeps unbound root after it
-    # binds port 53. Only that exact line is rewritten; any other value is the
-    # user's choice. /config/unbound is chowned to abc below, which unbound
-    # needs to update root.key.
-    echo "**** Migrating /config/unbound/unbound.conf to drop privileges to abc (set username: \"root\" to opt out) ****"
-    sed -i -E 's/^([[:space:]]*)username: ""[[:space:]]*$/\1username: "abc"/' /config/unbound/unbound.conf
 fi
 
 if [[ ! -f /config/unbound/root.key ]]; then

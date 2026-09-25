@@ -145,7 +145,6 @@ This fork's main change from [AYastrebov/docker-amneziawg](https://github.com/AY
 | Where peer queries go | The container's `/etc/resolv.conf`, which is Docker's or the host's resolver | Cloudflare `1.1.1.1` / `1.0.0.1`, or any upstream you set |
 | Encryption to the upstream | None, plain DNS on port 53 | DNS-over-TLS on port 853 |
 | DNSSEC validation | No | Yes |
-| Runs as | root | `abc` (`PUID`), after binding port 53 |
 | On/off switch | `USE_COREDNS` | `USE_DNS` |
 | Config file | `/config/coredns/Corefile` | `/config/unbound/unbound.conf` |
 
@@ -174,7 +173,7 @@ The default `/config/unbound/unbound.conf`:
 - forwards every query to Cloudflare (`1.1.1.1` and `1.0.0.1`) over DNS-over-TLS
 - validates DNSSEC, using `/config/unbound/root.key`
 - answers only `127.0.0.0/8` and the private ranges `10.0.0.0/8`, `172.16.0.0/12` and `192.168.0.0/16`, which covers the default `INTERNAL_SUBNET`
-- listens on port 53 inside the container and drops to the `abc` user (`PUID`) after binding it
+- listens on port 53 inside the container
 
 It doesn't need a published port 53: peers reach it through the tunnel, so don't add `53:53` to `ports`.
 
@@ -204,7 +203,7 @@ The config is checked with `unbound-checkconf` on start. If it's invalid, Unboun
 | `-e PERSISTENTKEEPALIVE_PEERS=` | Which peers get keepalive: `all` or comma-separated names/numbers |
 | `-e SERVER_ALLOWEDIPS_PEER_X=` | Per-peer server AllowedIPs for site-to-site VPN |
 | `-e LOG_CONFS=true` | Show generated configs and QR codes in container logs |
-| `-e USE_DNS=true` | Enable or disable the built-in unbound resolver. Defaults to `true` in server mode and `false` in client mode. Auto-disables when something is already listening on port 53, unless you set it explicitly. Unbound drops privileges to the `abc` user (`PUID`) after binding the port. Setting it to `false` in server mode breaks DNS for peers on `PEERDNS=auto`, so point `PEERDNS` at a public resolver such as `1.1.1.1` if you do |
+| `-e USE_DNS=true` | Enable or disable the built-in unbound resolver. Defaults to `true` in server mode and `false` in client mode. Auto-disables when something is already listening on port 53, unless you set it explicitly. Setting it to `false` in server mode breaks DNS for peers on `PEERDNS=auto`, so point `PEERDNS` at a public resolver such as `1.1.1.1` if you do |
 | `-e AWG_VERSION=2.0` | Protocol version: `2.0` (default, full DPI evasion), `3.0` (header protection and randomized timers), `3.1` (3.0 plus `RandomTrailers`) or `1.5` (legacy) |
 | `-e AWG_RANDOM_TRAILERS=` | `on`/`off`. Pads handshake packets to a random length. Works with any `AWG_VERSION`; defaults to `on` under `3.1`. Must match on every end. `off` omits the key |
 | `-e AWG_DISABLE_COOKIES=` | `on`/`off`. Stops cookie-reply messages under load. Works with any `AWG_VERSION`; always opt-in. Does not need to match. `off` omits the key |

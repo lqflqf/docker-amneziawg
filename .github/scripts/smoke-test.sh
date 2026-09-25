@@ -188,14 +188,9 @@ echo "- Health check: OK" >> "$summary"
 echo "### Unbound at runtime"
 echo "### Unbound at runtime" >> "$summary"
 docker exec "$container" unbound-checkconf /config/unbound/unbound.conf
-unbound_pid=$(docker exec "$container" pgrep -x unbound) \
+docker exec "$container" pgrep -x unbound >/dev/null \
     || { echo "unbound is not running"; docker logs "$container"; exit 1; }
-unbound_uid=$(docker exec "$container" awk '/^Uid:/ {print $2}' "/proc/${unbound_pid}/status")
-abc_uid=$(docker exec "$container" id -u abc)
-if [[ "$unbound_uid" != "$abc_uid" ]]; then
-    echo "unbound runs as uid ${unbound_uid}, expected abc (${abc_uid})"; exit 1
-fi
-echo "  ok   - unbound config valid, running as abc (uid ${abc_uid})"
+echo "  ok   - unbound config valid and running"
 echo "- Unbound at runtime: OK" >> "$summary"
 
 echo "All smoke tests passed!" >> "$summary"

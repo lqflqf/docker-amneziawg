@@ -60,7 +60,7 @@ init-amneziawg-module (oneshot) -> init-amneziawg-confs (oneshot) -> svc-unbound
 
 Key points:
 - `svc-amneziawg` is a **oneshot** — tunnels stay up without a running process
-- `svc-unbound` is a **longrun** — Unbound serves DNS for peers, as `abc` after binding port 53. Off when `USE_DNS=false`, in client mode by default, or when something already listens on port 53
+- `svc-unbound` is a **longrun** — Unbound serves DNS for peers. Off when `USE_DNS=false`, in client mode by default, or when something already listens on port 53
 - A failed tunnel makes `svc-amneziawg` exit 1; the `HEALTHCHECK` (`/app/healthcheck`) reports the container unhealthy
 - Dependencies: empty files in `dependencies.d/`. Registration: empty files in `user/contents.d/`
 
