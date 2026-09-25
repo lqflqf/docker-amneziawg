@@ -1,126 +1,223 @@
 name: Build and Push Docker Image
 
+# Versioning: every image published from the default branch is a release
+# v<amneziawg-tools>-r<N> (e.g. v3.1.20260812-r2). N counts builds of that tools
+# version and is stored in git as an annotated tag, which also records the run
+# id that produced it. One release == one immutable image tag <tools>-r<N>;
+# <tools> and latest are floating aliases to the newest release.
+#
+# Modes (decided in the `changes` job):
+#   pr      pull requests: smoke tests only, nothing pushed
+#   release push to the default branch, or manual run on it without version
+#           overrides: push <tools>-r<N>, <tools>, latest, sha-* and create
+#           the tag + GitHub Release
+#   adhoc   manual run with version overrides: push dispatch-<run> only;
+#           push to a non-default master/main, or manual run on another
+#           branch without overrides: sha-* (+ dispatch-<run> if manual).
+#           Never latest, never a release
+#
+# sha-<short> always means "built from this commit's own Dockerfile pins", so
+# builds with version overrides must not claim it.
+
 on:
   workflow_dispatch:
     inputs:
       amneziawg_go_version:
-        description: 'amneziawg-go version (e.g., v0.2.16)'
+        description: 'amneziawg-go version (e.g., v0.2.16) — overrides make an ad-hoc build, not a release'
         required: false
       amneziawg_tools_version:
-        description: 'amneziawg-tools version (e.g., v1.0.20260223)'
+        description: 'amneziawg-tools version (e.g., v1.0.20260223) — overrides make an ad-hoc build, not a release'
         required: false
   push:
     branches:
       - master
       - main
-    tags:
-      - 'v*'
   pull_request:
     branches:
       - master
       - main
+
+# Publishing runs claim the next build number from git tags, so they must not
+# overlap: two merges racing would compute the same -rN. A queued publishing
+# run that GitHub replaces with a newer one loses nothing, because the image
+# diff below is taken against the last release, not against the previous push.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || 'publish' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
   DOCKER_BUILDKIT: 1
   # Upstream versions are read from the Dockerfile ARG pins (single source of truth).
-  # workflow_dispatch inputs override them for one-off builds.
+  # workflow_dispatch inputs override them for one-off (ad-hoc) builds.
 
 jobs:
-  # Decide whether this event touches the image at all. Only Dockerfile, root/,
-  # .dockerignore and this workflow end up in (or shape) the published image —
-  # docs, skills and compose examples do not, so a push that changes only those
-  # must not rebuild and republish :latest / the tools-version tag.
-  #
-  # This is a diff gate rather than an `on.push.paths` filter on purpose: the
-  # push block also carries the v* tag trigger, and path filters behave
-  # ambiguously for tag pushes (no reliable before/after diff), which could
-  # silently break semver releases. An explicit gate fails open instead.
+  # Decide the mode, and whether this event touches the image at all. Only
+  # Dockerfile, root/, .dockerignore and the CI that versions the image end up
+  # in (or shape) the published image — docs, skills and compose examples do
+  # not, so a push that changes only those must not publish a new release.
   changes:
     runs-on: ubuntu-latest
     outputs:
       image: ${{ steps.filter.outputs.image }}
+      mode: ${{ steps.filter.outputs.mode }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Check whether image-affecting paths changed
+      - name: Decide mode and whether image-affecting paths changed
         id: filter
+        env:
+          EVENT: ${{ github.event_name }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          GO_INPUT: ${{ inputs.amneziawg_go_version }}
+          TOOLS_INPUT: ${{ inputs.amneziawg_tools_version }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+          PUSH_BEFORE: ${{ github.event.before }}
         run: |
-          IMAGE_PATHS='^(Dockerfile$|root/|\.dockerignore$|\.github/workflows/docker-build\.yml$)'
+          IMAGE_PATHS='^(Dockerfile$|root/|\.dockerignore$|\.github/workflows/docker-build\.yml$|\.github/scripts/)'
 
-          # Anything that is not a plain branch push builds unconditionally:
-          # tag pushes (semver releases), manual dispatch (version overrides).
-          if [[ "${{ github.event_name }}" == "workflow_dispatch" || "${{ github.ref_type }}" == "tag" ]]; then
-            echo "image=true" >> "$GITHUB_OUTPUT"
-            echo "build: yes (${{ github.event_name }}/${{ github.ref_type }})" >> "$GITHUB_STEP_SUMMARY"
-            exit 0
-          fi
-
-          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
-            BASE="${{ github.event.pull_request.base.sha }}"
-            HEAD="${{ github.event.pull_request.head.sha }}"
+          if [[ "$EVENT" == "pull_request" ]]; then
+            MODE="pr"
+          elif [[ "$GITHUB_REF_TYPE" == "branch" && "$GITHUB_REF_NAME" == "$DEFAULT_BRANCH" && -z "${GO_INPUT}${TOOLS_INPUT}" ]]; then
+            MODE="release"
           else
-            BASE="${{ github.event.before }}"
-            HEAD="${{ github.sha }}"
+            MODE="adhoc"
           fi
+          echo "mode=${MODE}" >> "$GITHUB_OUTPUT"
+
+          decide() {
+            echo "image=$1" >> "$GITHUB_OUTPUT"
+            echo "mode: ${MODE}, build: $2" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          }
+
+          # Manual runs always build: that is how a base-image refresh of an
+          # unchanged commit gets released.
+          [[ "$EVENT" == "workflow_dispatch" ]] && decide true "yes (manual run)"
+
+          if [[ "$MODE" == "pr" ]]; then
+            BASE="$PR_BASE"
+          elif [[ "$MODE" == "release" ]]; then
+            # Compare against the last release rather than the previous push,
+            # so image changes from a failed or superseded run are not lost.
+            BASE=$(git describe --tags --abbrev=0 --match 'v*-r[0-9]*' HEAD 2>/dev/null) \
+              || decide true "yes (no previous release)"
+            # A re-run of the run that created this tag has to finish its
+            # release (e.g. the tag was pushed but the release step failed).
+            if git tag -l --format='%(contents)' "$BASE" | grep -qx "run-id: ${GITHUB_RUN_ID}"; then
+              decide true "yes (re-run of ${BASE})"
+            fi
+            echo "last release: ${BASE}"
+          else
+            BASE="$PUSH_BEFORE"
+          fi
+          HEAD="${PR_HEAD:-$GITHUB_SHA}"
 
           # New branch or force-push where the old tip is gone: no diff to
           # inspect, so fail open and build.
           if [[ "$BASE" =~ ^0+$ ]] || ! git cat-file -e "$BASE" 2>/dev/null; then
-            echo "image=true" >> "$GITHUB_OUTPUT"
-            echo "build: yes (no comparable base commit)" >> "$GITHUB_STEP_SUMMARY"
-            exit 0
+            decide true "yes (no comparable base commit)"
           fi
 
           CHANGED=$(git diff --name-only "$BASE" "$HEAD")
-          echo "changed files:"; echo "$CHANGED" | sed 's/^/  /'
+          echo "changed files since ${BASE}:"; awk '{print "  " $0}' <<<"$CHANGED"
           if echo "$CHANGED" | grep -qE "$IMAGE_PATHS"; then
-            echo "image=true" >> "$GITHUB_OUTPUT"
-            echo "build: yes (image-affecting paths changed)" >> "$GITHUB_STEP_SUMMARY"
-          else
-            echo "image=false" >> "$GITHUB_OUTPUT"
-            echo "build: skipped — no changes to Dockerfile, root/, .dockerignore or this workflow" >> "$GITHUB_STEP_SUMMARY"
+            decide true "yes (image-affecting paths changed since ${BASE})"
           fi
+          decide false "skipped — no changes to Dockerfile, root/, .dockerignore or image CI since ${BASE}"
 
-  build:
+  # Resolve upstream versions and the image version once; build and release
+  # both consume these outputs so the tag, image and release cannot disagree.
+  version:
     needs: changes
     if: needs.changes.outputs.image == 'true'
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
-
+    outputs:
+      amneziawg_go: ${{ steps.versions.outputs.amneziawg_go }}
+      amneziawg_tools: ${{ steps.versions.outputs.amneziawg_tools }}
+      tools_version: ${{ steps.versions.outputs.tools_version }}
+      version: ${{ steps.versions.outputs.version }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          # the build counter is read from the release tags
+          fetch-depth: 0
 
-      - name: Resolve upstream versions
+      - name: Test the version script
+        if: needs.changes.outputs.mode == 'pr'
+        run: .github/scripts/next-version.test.sh
+
+      - name: Resolve versions
         id: versions
+        env:
+          MODE: ${{ needs.changes.outputs.mode }}
+          EVENT: ${{ github.event_name }}
+          GO_INPUT: ${{ inputs.amneziawg_go_version }}
+          TOOLS_INPUT: ${{ inputs.amneziawg_tools_version }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
           # workflow_dispatch inputs take precedence; otherwise read the pins from the Dockerfile
-          AWG_GO="${{ github.event.inputs.amneziawg_go_version }}"
-          AWG_TOOLS="${{ github.event.inputs.amneziawg_tools_version }}"
-          if [[ -z "$AWG_GO" ]]; then
-            AWG_GO=$(grep '^ARG AMNEZIAWG_GO_VERSION=' Dockerfile | cut -d= -f2)
-          fi
-          if [[ -z "$AWG_TOOLS" ]]; then
-            AWG_TOOLS=$(grep '^ARG AMNEZIAWG_TOOLS_VERSION=' Dockerfile | cut -d= -f2)
-          fi
+          AWG_GO="${GO_INPUT:-$(grep '^ARG AMNEZIAWG_GO_VERSION=' Dockerfile | cut -d= -f2)}"
+          AWG_TOOLS="${TOOLS_INPUT:-$(grep '^ARG AMNEZIAWG_TOOLS_VERSION=' Dockerfile | cut -d= -f2)}"
           if [[ -z "$AWG_GO" || -z "$AWG_TOOLS" ]]; then
             echo "::error::Could not resolve upstream versions (go: '${AWG_GO}', tools: '${AWG_TOOLS}')"
             exit 1
           fi
-          echo "amneziawg_go=${AWG_GO}" >> "$GITHUB_OUTPUT"
-          echo "amneziawg_tools=${AWG_TOOLS}" >> "$GITHUB_OUTPUT"
-          # Strip 'v' prefix for version label (v1.0.20260223 -> 1.0.20260223)
-          echo "tools_version=${AWG_TOOLS#v}" >> "$GITHUB_OUTPUT"
-          echo "## Build versions" >> "$GITHUB_STEP_SUMMARY"
-          echo "- amneziawg-go: \`${AWG_GO}\`" >> "$GITHUB_STEP_SUMMARY"
-          echo "- amneziawg-tools: \`${AWG_TOOLS}\`" >> "$GITHUB_STEP_SUMMARY"
+          # Strip 'v' prefix for image tags (v1.0.20260223 -> 1.0.20260223)
+          TOOLS_VERSION="${AWG_TOOLS#v}"
+
+          case "$MODE" in
+            release)
+              RESULT=$(.github/scripts/next-version.sh "$AWG_TOOLS" "$GITHUB_RUN_ID")
+              VERSION=$(sed -n 's/^version=//p' <<<"$RESULT")
+              REUSED=$(sed -n 's/^reused=//p' <<<"$RESULT")
+              ;;
+            pr)
+              VERSION="${TOOLS_VERSION}-pr${PR_NUMBER}"
+              ;;
+            *)
+              if [[ "$EVENT" == "workflow_dispatch" ]]; then
+                VERSION="${TOOLS_VERSION}-dispatch${GITHUB_RUN_NUMBER}"
+              else
+                VERSION="${TOOLS_VERSION}-sha${GITHUB_SHA::7}"
+              fi
+              ;;
+          esac
+
+          {
+            echo "amneziawg_go=${AWG_GO}"
+            echo "amneziawg_tools=${AWG_TOOLS}"
+            echo "tools_version=${TOOLS_VERSION}"
+            echo "version=${VERSION}"
+          } >> "$GITHUB_OUTPUT"
+          {
+            echo "## Build versions"
+            echo "- image: \`${VERSION}\` (${MODE}${REUSED:+, reused by re-run: ${REUSED}})"
+            echo "- amneziawg-go: \`${AWG_GO}\`"
+            echo "- amneziawg-tools: \`${AWG_TOOLS}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  build:
+    needs: [changes, version]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    env:
+      MODE: ${{ needs.changes.outputs.mode }}
+      IMAGE_VERSION: ${{ needs.version.outputs.version }}
+    outputs:
+      digest: ${{ steps.existing.outputs.digest || steps.push.outputs.digest }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -134,38 +231,66 @@ jobs:
               max-parallelism = 2
 
       - name: Log in to the Container registry
-        if: github.event_name != 'pull_request'
+        if: env.MODE != 'pr'
         uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # <tools>-r<N> is immutable. If it already exists it must be this run's
+      # own push (a re-run after the release step failed): reuse it instead of
+      # rebuilding. Anything else means the counter and the registry disagree,
+      # and overwriting would silently change a published release.
+      - name: Check the release tag is not taken
+        id: existing
+        if: env.MODE == 'release'
+        run: |
+          REF="${REGISTRY}/${IMAGE_NAME,,}:${IMAGE_VERSION}"
+          if ! IMAGE_JSON=$(docker buildx imagetools inspect "$REF" --format '{{json .Image}}' 2>/tmp/inspect.err); then
+            if grep -qiE 'not found|manifest unknown' /tmp/inspect.err; then
+              echo "${REF} does not exist yet — building it."
+              exit 0
+            fi
+            cat /tmp/inspect.err
+            echo "::error::Could not check whether ${REF} already exists"
+            exit 1
+          fi
+          OWNER=$(jq -r 'if has("config") then . else first(.[]) end | .config.Labels["io.github.actions.run-id"] // empty' <<<"$IMAGE_JSON")
+          if [[ "$OWNER" != "$GITHUB_RUN_ID" ]]; then
+            echo "::error::${REF} already exists (pushed by run ${OWNER:-unknown}, this is run ${GITHUB_RUN_ID}). Refusing to overwrite a published image tag. If run ${OWNER:-unknown} failed before creating its release, re-run its failed jobs to finish it (this run can then be re-run and will take the next number); otherwise delete the orphaned image tag."
+            exit 1
+          fi
+          DIGEST=$(docker buildx imagetools inspect "$REF" --format '{{.Manifest.Digest}}')
+          echo "digest=${DIGEST}" >> "$GITHUB_OUTPUT"
+          echo "- reusing ${REF}@${DIGEST} pushed by this run's earlier attempt" >> "$GITHUB_STEP_SUMMARY"
+
       - name: Extract metadata (tags, labels) for Docker
         id: meta
+        if: env.MODE != 'pr'
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          flavor: |
+            latest=false
           tags: |
-            # Set latest tag for default branch
-            type=raw,value=latest,enable={{is_default_branch}}
-            # Tag with upstream amneziawg-tools version (e.g., 1.0.20260223)
-            type=raw,value=${{ steps.versions.outputs.tools_version }},enable={{is_default_branch}}
-            # Tag with branch name
-            type=ref,event=branch
-            # Tag with PR number
-            type=ref,event=pr
-            # Tag with git tag (v1.0.0 -> 1.0.0)
-            type=semver,pattern={{version}}
-            # Tag with major.minor (v1.0.0 -> 1.0)
-            type=semver,pattern={{major}}.{{minor}}
-            # Tag with major (v1.0.0 -> 1)
-            type=semver,pattern={{major}}
-            # Tag with short sha
-            type=sha,prefix=sha-
+            # Immutable release tag (e.g., 3.1.20260812-r2)
+            type=raw,value=${{ env.IMAGE_VERSION }},enable=${{ env.MODE == 'release' }},priority=1000
+            # Floating alias: newest release of this amneziawg-tools version (e.g., 3.1.20260812)
+            type=raw,value=${{ needs.version.outputs.tools_version }},enable=${{ env.MODE == 'release' }}
+            # Floating alias: newest release
+            type=raw,value=latest,enable=${{ env.MODE == 'release' }}
+            # Ad-hoc manual runs (version overrides)
+            type=raw,value=dispatch-${{ github.run_number }},enable=${{ env.MODE == 'adhoc' && github.event_name == 'workflow_dispatch' }}
+            # Tag with short sha — only for builds that match the commit's source
+            type=sha,prefix=sha-,enable=${{ format('{0}{1}', inputs.amneziawg_go_version, inputs.amneziawg_tools_version) == '' }}
+          labels: |
+            org.opencontainers.image.version=${{ env.IMAGE_VERSION }}
+            io.github.actions.run-id=${{ github.run_id }}
 
       - name: Build and push
-        if: github.event_name != 'pull_request'
+        id: push
+        if: env.MODE != 'pr' && steps.existing.outputs.digest == ''
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -177,20 +302,33 @@ jobs:
           cache-to: type=gha,mode=max,scope=${{ github.workflow }}
           build-args: |
             BUILD_DATE=${{ github.event.repository.updated_at }}
-            VERSION=${{ steps.versions.outputs.tools_version }}
-            AMNEZIAWG_GO_VERSION=${{ steps.versions.outputs.amneziawg_go }}
-            AMNEZIAWG_TOOLS_VERSION=${{ steps.versions.outputs.amneziawg_tools }}
+            VERSION=${{ env.IMAGE_VERSION }}
+            AMNEZIAWG_GO_VERSION=${{ needs.version.outputs.amneziawg_go }}
+            AMNEZIAWG_TOOLS_VERSION=${{ needs.version.outputs.amneziawg_tools }}
             BUILDKIT_INLINE_CACHE=1
           provenance: false
           sbom: false
 
+      - name: Summarize pushed image
+        if: steps.push.outputs.digest != ''
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+          TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          {
+            echo "## Pushed \`${IMAGE_VERSION}\`"
+            echo "- digest: \`${DIGEST}\`"
+            awk '{print "- tag: " $0}' <<<"$TAGS"
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Test image (PR only)
-        if: github.event_name == 'pull_request'
+        if: env.MODE == 'pr'
         run: |
           # Build for local testing (single platform)
           docker buildx build --platform linux/amd64 --load -t test-image \
-            --build-arg AMNEZIAWG_GO_VERSION=${{ steps.versions.outputs.amneziawg_go }} \
-            --build-arg AMNEZIAWG_TOOLS_VERSION=${{ steps.versions.outputs.amneziawg_tools }} \
+            --build-arg VERSION=${{ env.IMAGE_VERSION }} \
+            --build-arg AMNEZIAWG_GO_VERSION=${{ needs.version.outputs.amneziawg_go }} \
+            --build-arg AMNEZIAWG_TOOLS_VERSION=${{ needs.version.outputs.amneziawg_tools }} \
             .
 
           echo "## Smoke tests" >> "$GITHUB_STEP_SUMMARY"
@@ -321,47 +459,123 @@ jobs:
           echo "All smoke tests passed!" >> "$GITHUB_STEP_SUMMARY"
           echo "Smoke tests passed!"
 
+  # Tag first, then release: the annotated tag is the build counter and records
+  # the run id and digest, so a re-run can tell its own tag from someone else's.
+  # Tags created with GITHUB_TOKEN do not trigger workflows.
   release:
-    needs: build
-    # Only on merges to the default branch — not on PRs, tags, or manual dispatch
-    if: github.event_name == 'push' && github.ref_name == github.event.repository.default_branch
+    needs: [changes, version, build]
+    if: needs.changes.outputs.mode == 'release'
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    env:
+      IMAGE_VERSION: ${{ needs.version.outputs.version }}
+      DIGEST: ${{ needs.build.outputs.digest }}
+      AWG_GO: ${{ needs.version.outputs.amneziawg_go }}
+      AWG_TOOLS: ${{ needs.version.outputs.amneziawg_tools }}
+      TOOLS_VERSION: ${{ needs.version.outputs.tools_version }}
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-      - name: Create GitHub Release for new upstream version
-        env:
-          GH_TOKEN: ${{ github.token }}
+      - name: Create release tag
         run: |
-          TOOLS_VERSION=$(grep '^ARG AMNEZIAWG_TOOLS_VERSION=' Dockerfile | cut -d= -f2)
-          GO_VERSION=$(grep '^ARG AMNEZIAWG_GO_VERSION=' Dockerfile | cut -d= -f2)
-          TAG="${TOOLS_VERSION}"  # already carries the v prefix
-          IMAGE="ghcr.io/${GITHUB_REPOSITORY,,}"
+          TAG="v${IMAGE_VERSION}"
+          IMAGE="${REGISTRY}/${IMAGE_NAME,,}"
+          if [[ -z "$DIGEST" ]]; then
+            echo "::error::build job reported no image digest; not creating ${TAG}"
+            exit 1
+          fi
+
+          if git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
+            if ! git tag -l --format='%(contents)' "$TAG" | grep -qx "run-id: ${GITHUB_RUN_ID}"; then
+              echo "::error::Tag ${TAG} already exists and was not created by this run"
+              exit 1
+            fi
+            echo "Tag ${TAG} was already created by this run."
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "$TAG" "$GITHUB_SHA" -m "$TAG" \
+            -m "run-id: ${GITHUB_RUN_ID}" \
+            -m "image: ${IMAGE}@${DIGEST}"
+          git push origin "refs/tags/${TAG}"
+
+      - name: Create GitHub Release
+        run: |
+          TAG="v${IMAGE_VERSION}"
+          IMAGE="${REGISTRY}/${IMAGE_NAME,,}"
 
           if gh release view "$TAG" > /dev/null 2>&1; then
             echo "Release ${TAG} already exists — nothing to do."
             exit 0
           fi
 
+          # The current latest release is the previous build; changelog starts there.
+          PREV=$(gh release view --json tagName --jq .tagName 2>/dev/null || true)
+          if [[ -n "$PREV" ]]; then
+            CHANGES=$(gh api "repos/${GITHUB_REPOSITORY}/releases/generate-notes" \
+              -f tag_name="$TAG" -f target_commitish="$GITHUB_SHA" -f previous_tag_name="$PREV" \
+              --jq .body | sed 's/^## /#### /')
+            if [[ "$(git rev-list -n1 "$PREV" 2>/dev/null)" == "$GITHUB_SHA" ]]; then
+              CHANGES="Rebuild of the same source as ${PREV} (for example to pick up base image updates)."$'\n\n'"${CHANGES}"
+            fi
+          else
+            CHANGES="First release using \`<amneziawg-tools>-r<build>\` versioning."
+          fi
+          BASE_IMAGE=$(awk '/^FROM /{img=$2} END{print img}' Dockerfile)
+
           cat > release-notes.md <<EOF
           ## AmneziaWG Docker Container ${TAG}
 
-          ### Upstream versions
-          - **amneziawg-tools**: ${TOOLS_VERSION}
-          - **amneziawg-go**: ${GO_VERSION}
-
           ### Docker image
 
+          | | |
+          |---|---|
+          | Version | \`${IMAGE_VERSION}\` |
+          | Digest | \`${DIGEST}\` |
+          | Commit | ${GITHUB_SHA} |
+          | Platforms | linux/amd64, linux/arm64 |
+
           \`\`\`bash
+          # this exact build (never changes)
+          docker pull ${IMAGE}:${IMAGE_VERSION}
+          docker pull ${IMAGE}@${DIGEST}
+          # floating: newest build of amneziawg-tools ${TOOLS_VERSION} / newest build overall
+          docker pull ${IMAGE}:${TOOLS_VERSION}
           docker pull ${IMAGE}:latest
-          # or pin to this version:
-          docker pull ${IMAGE}:${TAG#v}
           \`\`\`
+
+          ### Upstream versions
+          - **amneziawg-tools**: ${AWG_TOOLS}
+          - **amneziawg-go**: ${AWG_GO}
+          - **base image**: \`${BASE_IMAGE}\`
+
+          ### Changes
+          ${CHANGES}
           EOF
 
-          gh release create "$TAG" --title "$TAG" --notes-file release-notes.md
-          echo "Created release ${TAG}" >> "$GITHUB_STEP_SUMMARY"
+          # The API can fail (e.g. HTTP 504) after the release was in fact
+          # created, so check before retrying.
+          for attempt in 1 2 3; do
+            if gh release create "$TAG" --verify-tag --latest --title "$TAG" --notes-file release-notes.md; then
+              break
+            fi
+            sleep 10
+            if gh release view "$TAG" > /dev/null 2>&1; then
+              echo "Release ${TAG} exists despite the error above — continuing."
+              break
+            fi
+            if (( attempt == 3 )); then
+              echo "::error::Could not create release ${TAG}; re-run the failed jobs to retry"
+              exit 1
+            fi
+          done
+          echo "Created release [${TAG}](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/releases/tag/${TAG}) for ${IMAGE}@${DIGEST}" >> "$GITHUB_STEP_SUMMARY"

@@ -205,11 +205,10 @@ Guidance (documented in README "MTU"): 1280 for mobile/PPPoE/unknown paths (clea
 
 ### docker-build.yml
 
-- A `changes` gate job runs first and skips build+release when a push/PR touches nothing image-affecting. Image content is `Dockerfile`, `root/**`, `.dockerignore` and the workflow itself; docs, skills and compose examples never reach the image. Tag pushes, `workflow_dispatch` and unreachable-base diffs fail open (always build)
-- Push to `master`/`main` touching image paths -> multi-arch build (`amd64`, `arm64`) -> `ghcr.io/ayastrebov/docker-amneziawg:latest` + tools version tag
-- `v*` tags -> semantic version tags (`1.0.0`, `1.0`, `1`)
-- PRs -> smoke tests only (single-platform `--load` build): binaries, s6 structure, service types, dependency chain, CoreDNS, branding
-- `workflow_dispatch` accepts `amneziawg_go_version` and `amneziawg_tools_version` overrides
+- Push to the default branch (or manual run on it without overrides) -> multi-arch build (`amd64`, `arm64`) -> `:<tools>-r<N>` + `:<tools>` + `:latest` + `:sha-<short>`, then git tag + GitHub Release `v<tools>-r<N>` carrying the image digest. Skipped when nothing image-affecting changed since the last release tag
+- PRs -> smoke tests only (single-platform `--load` build): binaries, s6 structure, service types, dependency chain, Unbound, branding
+- `workflow_dispatch` with `amneziawg_go_version`/`amneziawg_tools_version` overrides -> ad-hoc build: `:dispatch-<run>` only (no `:sha-*`), no `latest`, no release
+- No `v*` tag trigger; release tags are created by the workflow and are the build counter
 
 ### upstream-check.yml
 
@@ -217,7 +216,7 @@ Daily at 06:00 UTC: compares Dockerfile `ARG` defaults against latest amneziawg-
 
 ### Versioning
 
-Container images are tagged with the upstream `amneziawg-tools` version (e.g., `1.0.20260223`).
+Releases are `<amneziawg-tools>-r<N>` (e.g. `3.1.20260812-r2`): `N` restarts at 1 for each tools version and counts every published build of it. `:<tools>-r<N>` never changes; `:<tools>` and `:latest` float to the newest release. Pin `:<tools>-r<N>` or the digest from the release notes for reproducible deployments.
 
 ## Troubleshooting Reference
 
