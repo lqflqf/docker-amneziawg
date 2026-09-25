@@ -32,15 +32,16 @@ docker-amneziawg/
 ├── CLAUDE.md                     # Technical reference for developers and AI agents
 ├── root/
 │   ├── app/
-│   │   └── show-peer             # QR code display utility
+│   │   ├── show-peer             # QR code display utility
+│   │   └── healthcheck           # Docker HEALTHCHECK: every tunnel up?
 │   ├── defaults/
 │   │   ├── server.conf           # Server config template (eval+heredoc)
 │   │   ├── peer.conf             # Peer config template (eval+heredoc)
-│   │   └── unbound.conf          # unbound default config
+│   │   └── unbound.conf          # Unbound default config (DoT upstream, DNSSEC)
 │   └── etc/s6-overlay/s6-rc.d/
 │       ├── init-amneziawg-module/    # Kernel module detection (oneshot)
 │       ├── init-amneziawg-confs/     # Config generation (oneshot)
-│       ├── svc-unbound/              # unbound resolver (longrun)
+│       ├── svc-unbound/              # Unbound resolver (longrun)
 │       ├── svc-amneziawg/            # Tunnel service (oneshot up/down)
 │       └── user/contents.d/          # Service registration (empty files)
 └── .github/
@@ -59,7 +60,8 @@ init-amneziawg-module (oneshot) -> init-amneziawg-confs (oneshot) -> svc-unbound
 
 Key points:
 - `svc-amneziawg` is a **oneshot** — tunnels stay up without a running process
-- `svc-unbound` is a **longrun** — continuously serves DNS for peers (`USE_DNS=false` disables it)
+- `svc-unbound` is a **longrun** — Unbound serves DNS for peers, as `abc` after binding port 53. Off when `USE_DNS=false`, in client mode by default, or when something already listens on port 53
+- A failed tunnel makes `svc-amneziawg` exit 1; the `HEALTHCHECK` (`/app/healthcheck`) reports the container unhealthy
 - Dependencies: empty files in `dependencies.d/`. Registration: empty files in `user/contents.d/`
 
 ### Script Requirements
@@ -75,7 +77,8 @@ Key points:
 | `SERVERURL` | auto | Server URL/IP for peer configs |
 | `SERVERPORT` | 51820 | Port advertised to peers. Use <= 9999 if ISP blocks high UDP |
 | `INTERNAL_SUBNET` | 10.13.13.0 | VPN subnet (.1 = server, .2+ = peers) |
-| `PEERDNS` | auto | DNS for peers (auto = container's unbound resolver at subnet.1) |
+| `PEERDNS` | auto | DNS for peers (auto = container's Unbound at subnet.1) |
+| `USE_DNS` | true (server) / false (client) | Run the bundled Unbound resolver. Replaces upstream's `USE_COREDNS`, which is ignored |
 | `LOG_CONFS` | true | Show QR codes in container logs |
 | `AWG_VERSION` | 2.0 | Protocol version: 2.0 (full DPI evasion), 3.0 (header protection + randomized timers), 3.1 (3.0 + RandomTrailers) or 1.5 (legacy, AmneziaVPN < 4.8.12.9) |
 | `AWG_RANDOM_TRAILERS` | - | `on`/`off`. Random-length handshake packets. Any AWG_VERSION; defaults to `on` under 3.1. Must match on every end. **Requires `S1 == S2 == S3 == S4`** under AWG 2.0+ or ~3.5% of transport packets are dropped — see [awg-performance.md](../../../docs/awg-performance.md) |

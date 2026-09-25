@@ -7,7 +7,7 @@
 
 [AmneziaWG](https://docs.amnezia.org/) VPN server and client in one container. It writes the server config and hands you a ready config plus QR code for every peer, and it can answer DNS for connected clients. Built on [LinuxServer.io](https://www.linuxserver.io/) base images with s6-overlay.
 
-> Forked from [AYastrebov/docker-amneziawg](https://github.com/AYastrebov/docker-amneziawg), created and maintained by [Andrey Yastrebov](https://github.com/AYastrebov). The container's design, its config generation and most of its AWG work are his. Many thanks to him for building it and releasing it under the MIT license.
+> Forked from [AYastrebov/docker-amneziawg](https://github.com/AYastrebov/docker-amneziawg), created and maintained by [Andrey Yastrebov](https://github.com/AYastrebov). The container's design, its config generation and most of its AWG work are his. Many thanks to him for building it and releasing it under the MIT license. The main change here is the DNS resolver; see [Differences from the original](#differences-from-the-original).
 
 AmneziaWG is WireGuard with added traffic obfuscation, so deep packet inspection has a harder time recognizing the handshake. The container picks random obfuscation values on first start, including the I1-I5 protocol signatures, then saves them and reuses them on later restarts so already distributed peer configs keep working.
 
@@ -16,6 +16,7 @@ AmneziaWG is WireGuard with added traffic obfuscation, so deep packet inspection
 - [Quick start](#quick-start)
 - [Requirements](#requirements)
 - [Modes](#modes)
+- [Differences from the original](#differences-from-the-original)
 - [DNS (Unbound)](#dns-unbound)
 - [Parameters](#parameters)
 - [Protocol version](#protocol-version)
@@ -134,6 +135,35 @@ docker run -d \
   --restart unless-stopped \
   ghcr.io/lqflqf/docker-amneziawg:latest
 ```
+
+## Differences from the original
+
+This fork's main change from [AYastrebov/docker-amneziawg](https://github.com/AYastrebov/docker-amneziawg) is the DNS resolver it runs for peers: **Unbound instead of CoreDNS**.
+
+| | Original (CoreDNS) | This fork (Unbound) |
+|---|---|---|
+| Where peer queries go | The container's `/etc/resolv.conf`, which is Docker's or the host's resolver | Cloudflare `1.1.1.1` / `1.0.0.1`, or any upstream you set |
+| Encryption to the upstream | None, plain DNS on port 53 | DNS-over-TLS on port 853 |
+| DNSSEC validation | No | Yes |
+| Runs as | root | `abc` (`PUID`), after binding port 53 |
+| On/off switch | `USE_COREDNS` | `USE_DNS` |
+| Config file | `/config/coredns/Corefile` | `/config/unbound/unbound.conf` |
+
+**Why:** with CoreDNS, every peer query left the server in plain text through whatever resolver the host uses, so the VPS provider or its network could read and tamper with it. Unbound encrypts the hop from the server to the resolver and checks DNSSEC signatures on the answers.
+
+**The trade-offs:**
+- By default all peer lookups go to Cloudflare. To use another resolver, change the `forward-addr` lines (see [DNS (Unbound)](#dns-unbound)).
+- The server needs outbound TCP port 853. If its network blocks DNS-over-TLS, peers on `PEERDNS=auto` get no answers. Point `forward-addr` at a reachable resolver, or set `PEERDNS` to one directly.
+
+**Switching from the original image:**
+1. Change `image:` to `ghcr.io/lqflqf/docker-amneziawg:latest`.
+2. Rename `USE_COREDNS` to `USE_DNS` if you set it. `USE_COREDNS` is ignored, so an old `USE_COREDNS=false` no longer turns DNS off.
+3. Restart. The `/config` volume is reused as is. Peer configs don't change, because `PEERDNS=auto` still points at `<subnet>.1`, so there's nothing to redistribute. `/config/coredns/` is no longer used and can be deleted.
+
+The fork also makes smaller changes; the [changelog](CHANGELOG.md) has the full list:
+- a `HEALTHCHECK` that reports the container `unhealthy` while a tunnel is down
+- all-or-nothing config regeneration: a broken template leaves the working configs in place
+- image tags of the form `<amneziawg-tools>-r<N>` (for example `3.1.20260812-r2`), one per published build, alongside `latest`
 
 ## DNS (Unbound)
 

@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `README.md` "Differences from the original": the CoreDNS → Unbound switch compared to upstream, its trade-offs, and migration steps (`USE_COREDNS` → `USE_DNS`)
 - `README.md` "DNS (Unbound)" section: what the bundled resolver does by default, how to change its upstream or access control, and what happens when it is disabled
 - `HEALTHCHECK` (`/app/healthcheck`): the container reports `unhealthy` unless every tunnel in `/config/wg_confs` is up. Previously a failed tunnel left the container `running` with no signal that the VPN was down
 - `docker-build.yml` now gates the multi-arch build and release behind a `changes` job that diffs the push: only `Dockerfile`, `root/**`, `.dockerignore` and the workflow itself are image content, so docs/skills/compose-only merges to master no longer rebuild and republish `:latest`. Tag pushes, `workflow_dispatch` and diffs with no reachable base always build. Implemented as an explicit `git diff` gate rather than an `on.push.paths` filter, which shares the push block with the `v*` tag trigger and is ambiguous for tag pushes
@@ -29,6 +30,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Multi-architecture support (amd64, arm64)
 
 ### Changed
+- Skills (`docker-amneziawg`, `deploy-amneziawg`) now describe Unbound, `USE_DNS` and `/config/unbound` instead of CoreDNS, and the deploy troubleshooting page covers each reason Unbound can be off
 - amneziawg-tools updated to v3.0.20260730, the first release with AWG 3.0 config parsing
 - Updated to use GitHub Packages for pre-built images
 

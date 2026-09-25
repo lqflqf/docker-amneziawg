@@ -66,14 +66,20 @@ sudo iptables -t nat -A POSTROUTING -s 10.13.13.0/24 -o eth0 -j MASQUERADE
 
 ### Client sees the tunnel as connected but can't resolve DNS
 
-The peer is trying to resolve via `PEERDNS`. If `PEERDNS=auto`, the container's unbound resolver at `10.13.13.1` should answer. Check:
+The peer is trying to resolve via `PEERDNS`. If `PEERDNS=auto`, the container's Unbound at `10.13.13.1` should answer. Check:
 
 ```bash
-docker exec amneziawg netstat -ulnp | grep :53   # unbound should be listening
+docker exec amneziawg ss -lnup 'sport = :53'                    # unbound should be listening
+docker exec amneziawg nslookup example.com 127.0.0.1           # resolves inside the container?
 docker exec amneziawg unbound-checkconf /config/unbound/unbound.conf
+docker logs amneziawg 2>&1 | grep -iE 'unbound|port 53'         # why it was disabled, if it was
 ```
 
-If unbound is not running (port 53 was already bound at startup, or `unbound.conf` failed `unbound-checkconf` — see `docker logs amneziawg`), set `USE_DNS=true` explicitly, fix the config, or change `PEERDNS` to a public resolver like `1.1.1.1`.
+- **`Disabling unbound`:** `USE_DNS=false` is set, or the container is in client mode. Remove it, or set `USE_DNS=true`.
+- **`Port 53 is already in use`:** another process holds port 53 (common with `network_mode: host` and systemd-resolved). The log names the socket. Free the port, or set `PEERDNS` to a public resolver like `1.1.1.1`.
+- **`unbound.conf is not valid`:** fix the reported error, or delete `/config/unbound/unbound.conf` to get the default back on the next start.
+- **Resolves in the container, but peers get `REFUSED`:** `INTERNAL_SUBNET` is outside the private ranges the default config answers. Add `access-control: <subnet>/24 allow` to `/config/unbound/unbound.conf`.
+- **Upgraded from upstream `AYastrebov/docker-amneziawg`:** rename `USE_COREDNS` to `USE_DNS`; the old variable is ignored.
 
 ## Amnezia app reports "AWG 1.5" but we deployed 2.0
 
