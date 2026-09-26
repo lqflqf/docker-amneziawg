@@ -43,7 +43,18 @@ docker exec amneziawg /app/show-peer laptop   # QR code for the Amnezia app
 
 Each peer's config is at `./config/peer_laptop/peer_laptop.conf` for named peers, or at `./config/peer1/peer1.conf` when `PEERS` is a number. [`docker-compose.yml`](docker-compose.yml) lists every option, with comments.
 
-**Requirements:** a Docker host with `/dev/net/tun` and the `NET_ADMIN` capability, on amd64 or arm64. No kernel module is needed: the container falls back to the bundled userspace `amneziawg-go`. If the [AmneziaWG kernel module](https://github.com/amnezia-vpn/amneziawg-linux-kernel-module) is loaded on the host, the container detects it and uses it. `SYS_MODULE` does not change this, because the container never calls `modprobe`. If you use `RandomTrailers` with the kernel module, use a module built from `4569c4c6` (2026-09-06) or newer ([details](docs/awg-performance.md#checking-whether-your-module-has-the-fix)).
+**Requirements:** a Docker host with `/dev/net/tun` and the `NET_ADMIN` capability, on amd64 or arm64. A kernel module is optional, see below.
+
+## Kernel module
+
+The container works without a kernel module: it falls back to the bundled userspace `amneziawg-go`. For better throughput, install the [AmneziaWG kernel module](https://github.com/amnezia-vpn/amneziawg-linux-kernel-module) on the host. At start-up the container detects the module and uses it.
+
+- **Which datapath is in use:** the log says either `AmneziaWG kernel module is active` or `using userspace amneziawg-go`.
+- **`SYS_MODULE` is not needed.** The container never calls `modprobe`; it only checks whether the module is already loaded. Keep `SYS_MODULE` only on minimal hosts that don't load the iptables NAT modules on their own.
+- **Keep the module and the image on the same feature generation.** An older module still works with a newer image, but the kernel datapath only applies the options that module knows about. A module older than 3.1 rejects `RandomTrailers` and `DisableCookies` outright: the tunnel fails with `Unable to modify interface: Invalid argument`. The container warns about this at start-up when it can read `/sys/module/amneziawg/version`.
+- **With `RandomTrailers`, use a module built from upstream `4569c4c6` (2026-09-06) or newer.** Earlier 3.1 modules also appended trailers to I1-I5 and junk packets, which produced occasional oversized handshake datagrams that fragment on narrow paths.
+  - The fixed build still reports `3.1.20260812`, so check the package version (`dpkg -l amneziawg-dkms` should show `…+4569c4c…` or newer) instead of the version string.
+  - See [docs/awg-performance.md](docs/awg-performance.md#checking-whether-your-module-has-the-fix). The bundled `amneziawg-go` never had this bug.
 
 ## Modes
 
