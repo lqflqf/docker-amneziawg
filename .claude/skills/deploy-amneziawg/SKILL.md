@@ -88,7 +88,7 @@ Ask the user for these settings. Group related questions to minimize back-and-fo
 | Allowed IPs | `ALLOWEDIPS` | `0.0.0.0/0, ::/0` | Restrict to specific subnets for split-tunnel. |
 | Persistent keepalive | `PERSISTENTKEEPALIVE_PEERS` | unset | Set to `all` for mobile peers behind NAT. |
 | Per-peer site-to-site routes | `SERVER_ALLOWEDIPS_PEER_X` | unset | For routing back to a peer's LAN subnet. |
-| Log configs | `LOG_CONFS` | `true` | Keep `true` initially to see QR codes; can disable later. |
+| Log configs | `LOG_CONFS` | `false` | QR codes contain private keys; show them with `docker exec amneziawg /app/show-peer <peer>` instead. |
 
 For the full list of env vars, see the existing `docker-compose.yml` in the repo root.
 

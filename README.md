@@ -5,36 +5,11 @@
 [![GitHub release](https://img.shields.io/github/v/release/lqflqf/docker-amneziawg)](https://github.com/lqflqf/docker-amneziawg/releases)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-[AmneziaWG](https://docs.amnezia.org/) VPN server and client in one container. It writes the server config and hands you a ready config plus QR code for every peer, and it can answer DNS for connected clients. Built on [LinuxServer.io](https://www.linuxserver.io/) base images with s6-overlay.
+[AmneziaWG](https://docs.amnezia.org/) VPN server and client in one container. AmneziaWG is WireGuard with traffic obfuscation, which makes the handshake harder for deep packet inspection to recognize. In server mode the container writes the server config, gives you a config and QR code for every peer, and answers DNS for connected clients. It is built on [LinuxServer.io](https://www.linuxserver.io/) base images with s6-overlay.
 
 > Forked from [AYastrebov/docker-amneziawg](https://github.com/AYastrebov/docker-amneziawg), created and maintained by [Andrey Yastrebov](https://github.com/AYastrebov). The container's design, its config generation and most of its AWG work are his. Many thanks to him for building it and releasing it under the MIT license. The main change here is the DNS resolver; see [Differences from the original](#differences-from-the-original).
 
-AmneziaWG is WireGuard with added traffic obfuscation, so deep packet inspection has a harder time recognizing the handshake. The container picks random obfuscation values on first start, including the I1-I5 protocol signatures, then saves them and reuses them on later restarts so already distributed peer configs keep working.
-
-## Contents
-
-- [Quick start](#quick-start)
-- [Requirements](#requirements)
-- [Modes](#modes)
-- [Differences from the original](#differences-from-the-original)
-- [DNS (Unbound)](#dns-unbound)
-- [Parameters](#parameters)
-- [Protocol version](#protocol-version)
-- [Obfuscation parameters](#obfuscation-parameters)
-- [Custom protocol signatures (I1-I5)](#custom-protocol-signatures-i1-i5)
-- [Custom SERVERPORT](#custom-serverport)
-- [Speed and latency](#speed-and-latency)
-- [MTU](#mtu)
-- [Managing peers](#managing-peers)
-- [Health check](#health-check)
-- [Support info](#support-info)
-- [Building locally](#building-locally)
-- [Links](#links)
-- [Credits](#credits)
-
 ## Quick start
-
-Server mode, three peers, using Docker Compose:
 
 ```yaml
 services:
@@ -43,24 +18,14 @@ services:
     container_name: amneziawg
     cap_add:
       - NET_ADMIN
-      # - SYS_MODULE  # rarely needed, see Parameters
     devices:
       - /dev/net/tun:/dev/net/tun
     environment:
       - PUID=1000
       - PGID=1000
       - TZ=Etc/UTC
-      - SERVERURL=vpn.example.com
-      - SERVERPORT=51820 #optional
-      - PEERS=laptop,phone,tablet
-      - PEERDNS=auto #optional
-      - INTERNAL_SUBNET=10.13.13.0 #optional
-      - ALLOWEDIPS=0.0.0.0/0, ::/0 #optional
-      - PERSISTENTKEEPALIVE_PEERS=all #optional
-      - LOG_CONFS=true #optional
-      # - AWG_VERSION=2.0 #optional
-      # - AWG_RANDOM_TRAILERS=on #optional
-      # - AWG_DISABLE_COOKIES=on #optional
+      - SERVERURL=vpn.example.com   # or auto
+      - PEERS=laptop,phone,tablet   # or a number
     volumes:
       - ./config:/config
     ports:
@@ -73,409 +38,182 @@ services:
 
 ```bash
 docker compose up -d
-docker exec amneziawg /app/show-peer laptop   # config text and QR code
+docker exec amneziawg /app/show-peer laptop   # QR code for the Amnezia app
 ```
 
-Each peer also gets a file on disk, at `./config/peer_laptop/peer_laptop.conf` for named peers or `./config/peer1/peer1.conf` when `PEERS` is a number.
+Each peer's config is at `./config/peer_laptop/peer_laptop.conf` for named peers, or at `./config/peer1/peer1.conf` when `PEERS` is a number. [`docker-compose.yml`](docker-compose.yml) lists every option, with comments.
 
-The same thing with `docker run`:
+**Requirements:** a Docker host with `/dev/net/tun` and the `NET_ADMIN` capability, on amd64 or arm64. A kernel module is optional, see below.
 
-```bash
-docker run -d \
-  --name amneziawg \
-  --cap-add NET_ADMIN \
-  `# --cap-add SYS_MODULE  rarely needed, see Parameters` \
-  --device /dev/net/tun:/dev/net/tun \
-  -e PUID=1000 \
-  -e PGID=1000 \
-  -e TZ=Etc/UTC \
-  -e SERVERURL=vpn.example.com \
-  -e PEERS=3 \
-  -p 51820:51820/udp \
-  -v ./config:/config \
-  --sysctl net.ipv4.ip_forward=1 \
-  --sysctl net.ipv4.conf.all.src_valid_mark=1 \
-  --restart unless-stopped \
-  ghcr.io/lqflqf/docker-amneziawg:latest
-```
+## Kernel module
 
-## Requirements
+The container works without a kernel module: it falls back to the bundled userspace `amneziawg-go`. For better throughput, install the [AmneziaWG kernel module](https://github.com/amnezia-vpn/amneziawg-linux-kernel-module) on the host. At start-up the container detects the module and uses it.
 
-- A Docker host with `/dev/net/tun` and the `NET_ADMIN` capability
-- amd64 (x86-64) or arm64 (aarch64)
-
-### Kernel module
-
-The container works out of the box without a kernel module: it falls back to the bundled `amneziawg-go` userspace implementation. For better throughput, install the [AmneziaWG kernel module](https://github.com/amnezia-vpn/amneziawg-linux-kernel-module) on the host and the container will detect it and use it instead.
-
-Keep the module and the image on the same feature generation. An older module still works with a newer image, but the kernel datapath only applies the options that module knows about.
-
-If you run the kernel datapath with `RandomTrailers`, use a module built from upstream **`4569c4c6`** (2026-09-06) or newer: earlier 3.1 modules appended random trailers to I1-I5 signature packets and junk packets too, producing occasional oversized handshake-burst datagrams that fragment on narrow paths. Note that `/sys/module/amneziawg/version` still reads `3.1.20260812` on the fixed build — upstream did not bump it — so check `dpkg -l amneziawg-dkms` (`…+4569c4c…` or newer) rather than the version string; see [docs/awg-performance.md](docs/awg-performance.md#checking-whether-your-module-has-the-fix). The bundled userspace `amneziawg-go` never had this bug.
-
-> [!NOTE]
-> `SYS_MODULE` is not required for the kernel datapath. The container never calls `modprobe`, it only checks whether the module is already loaded. See [Parameters](#parameters) for the one case where `SYS_MODULE` still helps.
+- **Which datapath is in use:** the log says either `AmneziaWG kernel module is active` or `using userspace amneziawg-go`.
+- **`SYS_MODULE` is not needed.** The container never calls `modprobe`; it only checks whether the module is already loaded. Keep `SYS_MODULE` only on minimal hosts that don't load the iptables NAT modules on their own.
+- **Keep the module and the image on the same feature generation.** An older module still works with a newer image, but the kernel datapath only applies the options that module knows about. A module older than 3.1 rejects `RandomTrailers` and `DisableCookies` outright: the tunnel fails with `Unable to modify interface: Invalid argument`. The container warns about this at start-up when it can read `/sys/module/amneziawg/version`.
+- **With `RandomTrailers`, use a module built from upstream `4569c4c6` (2026-09-06) or newer.** Earlier 3.1 modules also appended trailers to I1-I5 and junk packets, which produced occasional oversized handshake datagrams that fragment on narrow paths.
+  - The fixed build still reports `3.1.20260812`, so check the package version (`dpkg -l amneziawg-dkms` should show `…+4569c4c…` or newer) instead of the version string.
+  - See [docs/awg-performance.md](docs/awg-performance.md#checking-whether-your-module-has-the-fix). The bundled `amneziawg-go` never had this bug.
 
 ## Modes
 
-The container runs in one of two modes, decided by whether `PEERS` is set.
+- **Server mode (`PEERS` set):** generates keys, `wg0.conf`, and one config plus QR code per peer, and starts Unbound so that peers on `PEERDNS=auto` have a resolver.
+- **Client mode (`PEERS` unset):** brings up every `.conf` in `./config/wg_confs/`. Nothing is generated, and Unbound stays off unless `USE_DNS=true`.
 
-Set `PEERS` and you get server mode. The container generates keys, writes `wg0.conf`, writes one config and QR code per peer, and starts unbound so peers on `PEERDNS=auto` have a resolver to talk to.
-
-Leave `PEERS` unset and you get client mode. Drop your own `.conf` files into `./config/wg_confs/` and the container brings up every one of them on start. Nothing is generated, and unbound stays off unless you ask for it.
-
-```bash
-# client mode: your configs, nothing generated
-docker run -d \
-  --name amneziawg \
-  --cap-add NET_ADMIN \
-  --device /dev/net/tun:/dev/net/tun \
-  -v ./config:/config \
-  --sysctl net.ipv4.ip_forward=1 \
-  --sysctl net.ipv4.conf.all.src_valid_mark=1 \
-  --restart unless-stopped \
-  ghcr.io/lqflqf/docker-amneziawg:latest
-```
+In either mode, if no tunnel comes up the container removes every IPv4 and IPv6 default route, so nothing leaks outside the VPN, and it reports itself `unhealthy`.
 
 ## Differences from the original
 
-This fork's main change from [AYastrebov/docker-amneziawg](https://github.com/AYastrebov/docker-amneziawg) is the DNS resolver it runs for peers: **Unbound instead of CoreDNS**.
+The main change from [AYastrebov/docker-amneziawg](https://github.com/AYastrebov/docker-amneziawg) is the DNS resolver for peers: **Unbound instead of CoreDNS**.
 
 | | Original (CoreDNS) | This fork (Unbound) |
 |---|---|---|
-| Where peer queries go | The container's `/etc/resolv.conf`, which is Docker's or the host's resolver | Cloudflare `1.1.1.1` / `1.0.0.1`, or any upstream you set |
-| Encryption to the upstream | None, plain DNS on port 53 | DNS-over-TLS on port 853 |
+| Where peer queries go | The host's resolver | Cloudflare `1.1.1.1` / `1.0.0.1`, or any upstream you set |
+| Encryption to the upstream | None | DNS-over-TLS (port 853) |
 | DNSSEC validation | No | Yes |
 | On/off switch | `USE_COREDNS` | `USE_DNS` |
 | Config file | `/config/coredns/Corefile` | `/config/unbound/unbound.conf` |
 
-**Why:** with CoreDNS, every peer query left the server in plain text through whatever resolver the host uses, so the VPS provider or its network could read and tamper with it. Unbound encrypts the hop from the server to the resolver and checks DNSSEC signatures on the answers.
+With CoreDNS, peer queries left the server in plain text, so the VPS provider could read or change them. The trade-offs of Unbound: lookups go to Cloudflare by default, and the server needs outbound TCP 853.
 
-**The trade-offs:**
-- By default all peer lookups go to Cloudflare. To use another resolver, change the `forward-addr` lines (see [DNS (Unbound)](#dns-unbound)).
-- The server needs outbound TCP port 853. If its network blocks DNS-over-TLS, peers on `PEERDNS=auto` get no answers. Point `forward-addr` at a reachable resolver, or set `PEERDNS` to one directly.
+**Switching from the original image:** change `image:`, and rename `USE_COREDNS` to `USE_DNS` if you set it (`USE_COREDNS` is ignored). The `/config` volume is reused as is, and peer configs don't change. `/config/coredns/` can be deleted.
 
-**Switching from the original image:**
-1. Change `image:` to `ghcr.io/lqflqf/docker-amneziawg:latest`.
-2. Rename `USE_COREDNS` to `USE_DNS` if you set it. `USE_COREDNS` is ignored, so an old `USE_COREDNS=false` no longer turns DNS off.
-3. Restart. The `/config` volume is reused as is. Peer configs don't change, because `PEERDNS=auto` still points at `<subnet>.1`, so there's nothing to redistribute. `/config/coredns/` is no longer used and can be deleted.
+This fork also adds:
+- a health check
+- transactional config regeneration
+- protocol-version migration
+- archiving of removed peers
+- hardened secrets and DNS defaults
+- per-build image tags (`<amneziawg-tools>-r<N>`, for example `3.1.20260812-r2`)
 
-The fork also makes smaller changes; the [changelog](CHANGELOG.md) has the full list:
-- a `HEALTHCHECK` that reports the container `unhealthy` while a tunnel is down
-- all-or-nothing config regeneration: a broken template leaves the working configs in place
-- image tags of the form `<amneziawg-tools>-r<N>` (for example `3.1.20260812-r2`), one per published build, alongside `latest`
+See the [changelog](CHANGELOG.md).
 
 ## DNS (Unbound)
 
-In server mode the container runs [Unbound](https://nlnetlabs.nl/projects/unbound/about/) as the peers' resolver. With `PEERDNS=auto` (the default) each peer conf gets `DNS = <subnet>.1`, which is the server end of the tunnel, so peer queries never leave the VPN unencrypted.
+With `PEERDNS=auto` (the default), each peer config gets `DNS = <subnet>.1`, the server end of the tunnel. The default `/config/unbound/unbound.conf`:
+- forwards queries to Cloudflare over DNS-over-TLS
+- validates DNSSEC
+- drops root privileges after start-up
 
-The default `/config/unbound/unbound.conf`:
+Where it listens is generated at every start: on `127.0.0.1` and the tunnel address only, answering only the VPN subnet. Do not publish port 53.
 
-- forwards every query to Cloudflare (`1.1.1.1` and `1.0.0.1`) over DNS-over-TLS
-- validates DNSSEC, using `/config/unbound/root.key`
-- answers only `127.0.0.0/8` and the private ranges `10.0.0.0/8`, `172.16.0.0/12` and `192.168.0.0/16`, which covers the default `INTERNAL_SUBNET`
-- listens on port 53 inside the container
+The file is copied only when it is missing, so your edits survive updates. Delete it to get the current default back. Configs created by older images keep their own `interface`/`access-control` lines, and the log mentions this. To use another upstream, replace the `forward-addr` lines and keep the `#hostname` suffix, for example `forward-addr: 9.9.9.9#dns.quad9.net`.
 
-It doesn't need a published port 53: peers reach it through the tunnel, so don't add `53:53` to `ports`.
-
-**Customizing it.** The file is copied from the image only when it's missing, so your edits survive restarts and image updates. Delete it to get the current default back on the next start. Common changes:
-
-- **Another upstream:** replace the `forward-addr` lines, keeping the `#hostname` suffix DNS-over-TLS needs to check the certificate, for example `forward-addr: 9.9.9.9#dns.quad9.net`.
-- **A public or other non-private `INTERNAL_SUBNET`:** add `access-control: <subnet>/24 allow`. Otherwise peers get `REFUSED`; the container warns about this at startup.
-
-The config is checked with `unbound-checkconf` on start. If it's invalid, Unbound isn't started and the log says why; the tunnel still comes up. Keep the `health.amneziawg.` zone if you can: the startup readiness check queries it, and falls back to a plain port check if it's gone.
-
-**When Unbound is off.** It doesn't run when `USE_DNS=false`, in client mode (unless `USE_DNS=true`), or when `USE_DNS` is unset and something else already listens on port 53. The log then says `Disabling unbound` or `Port 53 is already in use`. Peers on `PEERDNS=auto` get no DNS in that case, so set `PEERDNS` to a resolver of your own, such as `1.1.1.1`.
+Unbound does not run when `USE_DNS=false`, in client mode (unless `USE_DNS=true`), or when something already listens on port 53. In those cases, set `PEERDNS` to a resolver such as `1.1.1.1`. An invalid config is not started and makes the container `unhealthy`; the tunnel still comes up.
 
 ## Parameters
 
 | Parameter | Function |
 |-----------|----------|
-| `-p 51820:51820/udp` | WireGuard port |
-| `-e PUID=1000` | User ID for file ownership |
-| `-e PGID=1000` | Group ID for file ownership |
-| `-e TZ=Etc/UTC` | Timezone ([list](https://en.wikipedia.org/wiki/List_of_tz_database_time_zones#List)) |
-| `-e SERVERURL=auto` | Server URL/IP for peer configs. `auto` detects external IP |
-| `-e SERVERPORT=51820` | Port advertised to peers. Use <= 9999 if your ISP blocks high UDP ports |
-| `-e PEERS=3` | Number or comma-separated names (`laptop,phone`). Enables server mode |
-| `-e PEERDNS=auto` | DNS for peers. `auto` = container's unbound resolver at subnet.1 |
-| `-e INTERNAL_SUBNET=10.13.13.0` | VPN subnet (.1 = server, .2+ = peers) |
-| `-e ALLOWEDIPS=0.0.0.0/0, ::/0` | Traffic peers route into the tunnel. The tunnel itself is IPv4-only, so `::/0` is included deliberately: it sinks client IPv6 instead of forwarding it, which prevents IPv6 leaks on dual-stack client networks. Drop `::/0` if you would rather peers keep using their native IPv6 outside the tunnel, or narrow the value to specific subnets for split-tunnel routing |
-| `-e PERSISTENTKEEPALIVE_PEERS=` | Which peers get keepalive: `all` or comma-separated names/numbers |
-| `-e SERVER_ALLOWEDIPS_PEER_X=` | Per-peer server AllowedIPs for site-to-site VPN |
-| `-e LOG_CONFS=true` | Show generated configs and QR codes in container logs |
-| `-e USE_DNS=true` | Enable or disable the built-in unbound resolver. Defaults to `true` in server mode and `false` in client mode. Auto-disables when something is already listening on port 53, unless you set it explicitly. Setting it to `false` in server mode breaks DNS for peers on `PEERDNS=auto`, so point `PEERDNS` at a public resolver such as `1.1.1.1` if you do |
-| `-e AWG_VERSION=2.0` | Protocol version: `2.0` (default, full DPI evasion), `3.0` (header protection and randomized timers), `3.1` (3.0 plus `RandomTrailers`) or `1.5` (legacy) |
-| `-e AWG_RANDOM_TRAILERS=` | `on`/`off`. Pads handshake packets to a random length. Works with any `AWG_VERSION`; defaults to `on` under `3.1`. Must match on every end. `off` omits the key |
-| `-e AWG_DISABLE_COOKIES=` | `on`/`off`. Stops cookie-reply messages under load. Works with any `AWG_VERSION`; always opt-in. Does not need to match. `off` omits the key |
-| `-v /config` | Persistent config volume |
-| `--cap-add NET_ADMIN` | Required for tunnel management |
-| `--cap-add SYS_MODULE` | Usually unnecessary. The container does not load kernel modules, it only checks whether `wireguard`/`amneziawg` is already loaded on the host. Keep `SYS_MODULE` only on minimal hosts that do not auto-load iptables NAT modules |
-| `--sysctl net.ipv4.ip_forward=1` | Enable IP forwarding |
-| `--device /dev/net/tun` | TUN device access |
+| `-e PUID` / `-e PGID` / `-e TZ` | File ownership and timezone (LinuxServer standard) |
+| `-e SERVERURL=auto` | Host or IP written into peer configs. `auto` detects the public IPv4 over HTTPS (and keeps the previous value if detection fails) |
+| `-e SERVERPORT=51820` | Port advertised to peers. The container always listens on 51820, so map `SERVERPORT:51820/udp` (**not** `SERVERPORT:SERVERPORT`) |
+| `-e PEERS=` | Number or comma-separated alphanumeric names. Enables server mode |
+| `-e PEERDNS=auto` | DNS for peers. `auto` means the container's Unbound at `<subnet>.1` |
+| `-e INTERNAL_SUBNET=10.13.13.0` | VPN subnet (`.1` is the server, `.2` and up are peers) |
+| `-e ALLOWEDIPS=0.0.0.0/0, ::/0` | What peers route into the tunnel. The tunnel is IPv4-only; `::/0` sinks peer IPv6 to prevent leaks. Narrow it for split tunnelling |
+| `-e PERSISTENTKEEPALIVE_PEERS=` | `all`, or comma-separated peers that get `PersistentKeepalive = 25` |
+| `-e SERVER_ALLOWEDIPS_PEER_<peer>=` | Extra server-side AllowedIPs for one peer (site-to-site) |
+| `-e LOG_CONFS=false` | `true` prints each peer's QR code to the log. QR codes contain private keys; `show-peer` is the safer way |
+| `-e USE_DNS=` | Force Unbound on or off. Defaults to on in server mode and off in client mode |
+| `-e HEALTHCHECK_DNS_NAME=` | If set, the health check also requires Unbound to resolve this name, which proves the upstream is reachable |
+| `-e AWG_VERSION=2.0` | Protocol version, see below |
+| `-e AWG_*` | Obfuscation parameters, see below. All are random by default |
 
-## Protocol version
+## Protocol versions and obfuscation
 
-| Version | When to use |
-|---------|-------------|
-| `2.0` (default) | Full DPI evasion with I1-I5 signatures. Requires AmneziaVPN app 4.8.12.9+ |
-| `3.0` | Adds header protection (`HeaderProtectionKey`), content padding and randomized protocol timers. Requires 3.0-capable clients, and `HeaderProtectionKey` must be identical on server and all clients |
-| `3.1` | Everything `3.0` generates, plus `RandomTrailers = on`. Requires 3.1-capable software on every end. `DisableCookies` stays off unless you ask for it |
-| `1.5` | Legacy compatibility with older clients. No I1-I5, S3=S4=0 |
+| `AWG_VERSION` | What you get |
+|---|---|
+| `2.0` (default) | Full DPI evasion: S1-S4 padding, H1-H4 ranges, and an I1 signature (a QUIC Initial). Needs AmneziaVPN 4.8.12.9+ |
+| `3.0` | 2.0 plus `HeaderProtectionKey`, content padding and randomized timers. Needs 3.0-capable software on every end |
+| `3.1` | 3.0 plus `RandomTrailers = on`. Needs 3.1-capable software on every end |
+| `1.5` | Legacy: integer H values, `S3 = S4 = 0`, no I1-I5 |
 
-Set this with the `AWG_VERSION` environment variable. Every obfuscation value is randomized for you, so override them only to match an existing setup.
-
-Like the obfuscation parameters, the version is saved to `/config/server/awg_params` and restored when the variable is absent, so recreating a container from a compose file that no longer sets it keeps the deployment on the version its peer confs were built for.
-
-> [!IMPORTANT]
-> `AWG_VERSION=3.0` needs 3.0-capable software at both ends. The container handles its own side either way: it runs 3.0 in userspace with the bundled `amneziawg-go`, and switches to the kernel datapath automatically when a 3.0-capable module is loaded on the host. The generated config is the same in both cases. Your peers need an AmneziaVPN app or amneziawg build that supports 3.0.
-
-> [!NOTE]
-> `AWG_VERSION=3.1` is a convenience preset, not a distinct parameter set. Upstream AWG 3.1 added two independent `[Interface]` switches on top of 3.0, and you can set either one with any `AWG_VERSION`. See [AWG 3.1 interface options](#awg-31-interface-options).
-
-## Obfuscation parameters
-
-Every value here is optional and random by default. Server and clients must agree on all of them, except the 3.0 timer ranges, where each side draws its own value.
+Every value is generated on the first start and saved to `/config/server/awg_params`, so restarts keep peers working. A value you set in the environment always wins. When `AWG_VERSION` changes, the saved version-specific values (S, H, I and the 3.x parameters) are regenerated for the new version, and every peer needs its new config. A value that `awg` would reject, such as an S value below 12 under 3.x, stops generation and leaves the previous configs in place.
 
 | Parameter | Default | Constraints |
 |-----------|---------|-------------|
-| `-e AWG_JC=` | Random 3-8 | Junk packet count (1-128) |
-| `-e AWG_JMIN=` | Random 40-80 | Min junk size in bytes. Must be < JMAX |
-| `-e AWG_JMAX=` | Random 80-250 | Max junk size in bytes (max 1280) |
-| `-e AWG_S1=` | Random 15-150 | Init padding bytes (max 1132). S1+56 must not equal S2 |
-| `-e AWG_S2=` | Random 15-150 | Response padding bytes (max 1188) |
-| `-e AWG_S3=` | Random 8-55 (2.0) / 12-55 (3.0) / 0 (1.5) | Cookie padding bytes (max 64) |
-| `-e AWG_S4=` | Random 4-20 (2.0) / 12-20 (3.x) / 0 (1.5) | Transport padding bytes (max 32). Per-packet overhead, keep it small |
-| `-e AWG_H1=` | Auto range (2.0) / int (1.5) | Header obfuscation. H1-H4 must be unique, all >= 5 |
-| `-e AWG_H2=` | Auto range (2.0) / int (1.5) | AWG 2.0 uses range format (e.g. `90666522-140666522`) |
-| `-e AWG_H3=` | Auto range (2.0) / int (1.5) | Single integers cause the Amnezia app to report AWG 1.5 |
-| `-e AWG_H4=` | Auto range (2.0) / int (1.5) | |
-| `-e AWG_I1=` | Auto QUIC Initial (2.0) / empty (1.5) | Custom protocol signature packet. See [tag reference](#custom-protocol-signatures-i1-i5) |
-| `-e AWG_I2=` | empty | Requires I1 to be set |
-| `-e AWG_I3=` | empty | |
-| `-e AWG_I4=` | empty | |
-| `-e AWG_I5=` | empty | |
+| `AWG_JC` / `AWG_JMIN` / `AWG_JMAX` | 3-8 / 40-80 / 80-250 | Junk packets. `JMIN < JMAX ≤ 1280` |
+| `AWG_S1` / `AWG_S2` | 15-150 | Handshake padding. `S1 ≤ 1132`, `S2 ≤ 1188`, `S1 + 56 ≠ S2` |
+| `AWG_S3` / `AWG_S4` | 8-55 / 4-20 (2.0); 12-55 / 12-20 (3.x); 0 (1.5) | Cookie / transport padding. `S3 ≤ 64`, `S4 ≤ 32`; keep `S4 ≤ 20` (it is paid on every packet) |
+| `AWG_H1`-`AWG_H4` | Non-overlapping ranges (2.0+), integers (1.5) | Unique, all ≥ 5. Integers make the Amnezia app report 1.5 |
+| `AWG_I1`-`AWG_I5` | I1 = QUIC Initial (2.0+) | Signature packets in [tag syntax](#signature-packets-i1-i5) |
+| `AWG_HEADER_PROTECTION_KEY` | Generated (3.x) | Must be identical everywhere; needs S1-S4 ≥ 12 |
+| `AWG_CONTENT_PADDING` | `lo-hi` within 16-128, or 0 with trailers (3.x) | `0` is recommended: padding costs about 22% of download speed |
+| `AWG_REKEY_AFTER_TIME`, `AWG_REKEY_TIMEOUT`, `AWG_REJECT_AFTER_TIME`, `AWG_KEEPALIVE_TIMEOUT`, `AWG_MAX_HANDSHAKE_ATTEMPTS` | Random `lo-hi` ranges (3.x) | Each end draws its own value, so these do not have to match |
+| `AWG_RANDOM_TRAILERS` | `on` under 3.1, otherwise unset | `on`/`off`, works with any version. Must match on every end, and needs `S1 = S2 = S3 = S4` (drawn that way automatically) |
+| `AWG_DISABLE_COOKIES` | unset | `on`/`off`, works with any version. Gives up WireGuard's DoS mitigation; does not have to match |
 
-### AWG 3.0 parameters
+The server and all clients must use the same values, except for the 3.x timers. Notes on the 3.1 switches:
+- Only `on` writes a key. `off` omits the key, and it is how you turn a switch back off. Removing the variable instead means "reuse the saved value".
+- A `RandomTrailers` that came only from the `3.1` preset is dropped when you go back to `2.0`.
+- A host kernel module older than 3.1 rejects both keys (`Unable to modify interface: Invalid argument`). The container warns about this at start-up when it can read the module version.
 
-Generated only when `AWG_VERSION=3.0`. Timer values are `lo-hi` ranges and the endpoint picks a fresh random value inside the range, so the two sides do not have to match.
+### Signature packets (I1-I5)
 
-| Parameter | Default | Constraints |
-|-----------|---------|-------------|
-| `-e AWG_HEADER_PROTECTION_KEY=` | Auto-generated shared key | Encrypts packet headers. Must be identical on server and all clients. Requires S1-S4 >= 12 |
-| `-e AWG_CONTENT_PADDING=` | Random range within 16-128 | Extra random padding per transport packet, `lo-hi` bytes. `0` disables |
-| `-e AWG_REKEY_AFTER_TIME=` | Random range within 100-145s | Time before the initiator rekeys, `lo-hi` seconds (WireGuard default 120) |
-| `-e AWG_REKEY_TIMEOUT=` | Random range within 4-10s | Handshake retransmit timeout, `lo-hi` seconds (default 5) |
-| `-e AWG_REJECT_AFTER_TIME=` | Random range, derived | Keypair lifetime, `lo-hi` seconds (default 180). Must exceed RekeyAfterTime and KeepaliveTimeout + RekeyTimeout |
-| `-e AWG_KEEPALIVE_TIMEOUT=` | Random range within 8-22s | Keepalive interval when idle, `lo-hi` seconds (default 10) |
-| `-e AWG_MAX_HANDSHAKE_ATTEMPTS=` | Random range within 12-28 | Handshake retries before giving up, `lo-hi` count (default 18) |
+Tags: `<b 0xHEX>` static bytes, `<r N>` random bytes, `<rd N>` random digits, `<rc N>` random letters, `<t>` a timestamp. Some third-party parsers, such as Keenetic, reject a single tag larger than 1000 bytes. For those, write the default's trailing `<r 1178>` as `<r 1000><r 178>`; it is identical on the wire. [AmneziaWG Architect](https://architect.vai-rice.space/) generates signatures that imitate QUIC, DNS, DTLS, SIP and other protocols.
 
-### AWG 3.1 interface options
+## Performance and MTU
 
-AWG 3.1 added two `[Interface]` booleans (`on` or `off`) rather than a new parameter set. They are independent of each other and of `AWG_VERSION`, so you can pair either one with `2.0` or `3.0`.
+Most obfuscation only affects handshakes. `S4`, `HeaderProtectionKey`, `ContentPaddingAddition` and `RandomTrailers` cost something on every packet. [docs/awg-performance.md](docs/awg-performance.md) has measurements for each.
 
-| Option | Env var | Effect | Must match on both ends |
-|--------|---------|--------|:---:|
-| `RandomTrailers` | `AWG_RANDOM_TRAILERS` | Appends a random number of random bytes to handshake initiation, response and cookie-reply packets, so those packets no longer have a fixed length. The trailer is drawn per packet to fill up to a window that starts at 500 bytes and grows to the largest datagram seen on the connection. When `ContentPaddingAddition` is `0`, the same trailer is also applied to transport packets, which can inflate every small packet (TCP ACKs, DNS) to close to full size — see [MTU](#mtu) | Yes |
-| `DisableCookies` | `AWG_DISABLE_COOKIES` | Stops the endpoint from answering with cookie-reply messages when it is under load, which removes a distinctive response to probing. You give up WireGuard's built-in DoS mitigation in exchange | No |
-
-The container writes whichever of these is `on` into the `[Interface]` block of the server conf and every peer conf, so both ends stay in step. Unset, or `off`, and the key is not written at all.
-
-`AWG_VERSION=3.1` is shorthand for the 3.0 parameter set plus `AWG_RANDOM_TRAILERS=on`. `DisableCookies` is never turned on for you: it trades away WireGuard's DoS mitigation, and since it does not have to match between ends it is a per-deployment call rather than part of a protocol mode. Set it explicitly if you want it:
-
-```yaml
-      - AWG_VERSION=3.1
-      - AWG_DISABLE_COOKIES=on
-```
-
-Setting a switch explicitly persists it like any other AWG parameter, so it survives a restart with the var removed. A switch that came only from the `3.1` preset does not: drop back to `AWG_VERSION=2.0` and `RandomTrailers` goes away with the rest of the 3.x keys, which is what you want when you are downgrading to get an older client connected again.
-
-Either switch also works on its own, with any version:
-
-```yaml
-      - AWG_VERSION=2.0
-      - AWG_RANDOM_TRAILERS=on
-```
-
-`RandomTrailers` changes the receive path as well as the send path. A peer without it expects handshake packets of exactly one length and drops the padded ones, so enable it on the server and every peer, or on none of them. Because the container writes it to every conf it generates, that holds automatically — but a peer conf you wrote by hand, or an older client, will not connect.
-
-That same receive-path change is why `RandomTrailers` needs `S1 = S2 = S3 = S4`. Once packet lengths are only a lower bound, the `H` ranges are all that separate one packet type from another, and unequal `S` values make three of the four checks read the type field at the wrong offset. Roughly 3.5% of data packets then get dropped as malformed handshakes. Set the four `S` values equal whenever you turn trailers on — see [Speed and latency](#speed-and-latency).
-
-Both options need 3.1-capable software wherever they are used: the bundled userspace `amneziawg-go`, or [kernel module](https://github.com/amnezia-vpn/amneziawg-linux-kernel-module) v3.1.x on the host for the kernel datapath. On an older host module the tunnel fails to come up with `Unable to modify interface: Invalid argument` — the bundled `awg` parses the keys, and the kernel is what refuses them. (An `awg` build older than 3.1, which you would only meet outside this container, instead reports `Line unrecognized`.) The container reads `/sys/module/amneziawg/version` at startup and warns before either happens — but only when that file exists and holds a numeric version. A missing file, or a string it cannot read as a number (`v3.1.0`, a git-describe or distro-suffixed version), is passed over rather than guessed at, so no warning is not proof the module is new enough. Check it yourself if you are unsure.
-
-To turn a switch back off, set it to `off` rather than removing it — removing the variable means "reuse the saved value", the same as every other `AWG_*` setting. `off` omits the key from the generated configs rather than writing `= off`; since off is the endpoint default anyway the two are equivalent, and omitting it keeps the config readable by an older amneziawg that does not know the key at all. That makes `AWG_RANDOM_TRAILERS=off` the way to rescue a tunnel these switches have broken, without leaving `AWG_VERSION=3.1`.
-
-> [!NOTE]
-> Earlier versions of this image did not generate these keys, so the documented workaround was to add them by hand to `/config/templates/server.conf` and `/config/templates/peer.conf`. If you did that, remove the hand-added lines and set the env vars instead — otherwise the key is written twice.
-
-## Custom protocol signatures (I1-I5)
-
-AWG 2.0 sends signature packets before the handshake to make VPN traffic look like some other UDP protocol. I1 defaults to a QUIC Initial packet (RFC 9000).
-
-| Tag | Description | Example |
-|-----|-------------|---------|
-| `<b 0xHEX>` | Static hex bytes | `<b 0x170303>` |
-| `<r N>` | N random bytes | `<r 32>` |
-| `<rd N>` | N random digits | `<rd 8>` |
-| `<rc N>` | N random chars (a-zA-Z) | `<rc 16>` |
-| `<t>` | 32-bit Unix timestamp | |
-
-Current AmneziaWG puts no size limit on a random tag, and the default I1 uses a single `<r 1178>`. Some third-party parsers still enforce an older 1000-byte-per-tag rule (observed: Keenetic rejects the default with `invalid I1 value`); for those, replace only the trailing `<r 1178>` with `<r 1000><r 178>` and leave the rest of the value as it is — the default then reads `<b 0xc3><b 0x00000001><b 0x08><r 8><b 0x00><b 0x00><b 0x449e><r 4><r 1000><r 178>`. The two forms are identical on the wire, so peers on either interoperate. See the [`<r N>` size notes](.claude/skills/docker-amneziawg/references/awg-parameters.md#r-n-size).
-
-[AmneziaWG Architect](https://architect.vai-rice.space/) generates signature strings for QUIC, DNS, DTLS, SIP, HTTP/3 and others.
-
-## Custom SERVERPORT
-
-The container always listens on 51820 inside the network namespace. `SERVERPORT` only changes what peer configs advertise, so map the external port onto 51820:
-
-```yaml
-environment:
-  - SERVERPORT=32948
-ports:
-  - 32948:51820/udp  # NOT 32948:32948/udp
-```
-
-## Speed and latency
-
-Most obfuscation is free: `Jc`/`Jmin`/`Jmax`, `S1`-`S3` and `I1`-`I5` only touch handshake packets, and `H1`-`H4` just substitute a value into a field that already exists. Four settings cost something on every data packet — `S4`, `HeaderProtectionKey`, `ContentPaddingAddition` and `RandomTrailers`.
-
-Measured over a 22ms internet path (kernel-module server, userspace client, link capable of 107↑ / 181↓ Mbit/s):
-
-| Configuration | ↑ Mbit/s | ↓ Mbit/s | wire bytes per 64-byte ping |
-|---|---:|---:|---:|
-| plain WireGuard | 100.5 | 132.4 | 170 |
-| `HeaderProtectionKey` + `S=12` | 99.7 | 131.6 | 182 |
-| ↑ plus `RandomTrailers` | 99.7 | 125.3 | 537 |
-| ↑ plus `ContentPaddingAddition` | 99.7 | 102.4 | 186 |
-| `RandomTrailers` with unequal `S1`-`S4` | **1.7** | 115.0 | 258 |
-
-> [!IMPORTANT]
-> **`RandomTrailers` requires `S1 = S2 = S3 = S4`.** Trailers relax the receiver's packet-type check from an exact length match to `>=`, leaving only the `H` range test to separate types. With `S1`-`S4` all different, three of the four checks read the type field at the wrong offset and misfire about 1.16% of the time each, so roughly **3.5% of data packets are dropped** and TCP collapses — that last row above.
->
-> The container handles this for you: with trailers on it draws a single value for all four, and warns if you pin them unequal yourself. You only need to think about it when writing configs by hand, or when adopting parameters generated elsewhere.
-
-Versions before this fix generated unequal `S` values under `AWG_VERSION=3.1`. Existing installs keep their saved parameters and are not regenerated, so if you deployed 3.1 earlier, check `/config/server/awg_params` — if `AWG_S1`-`AWG_S4` differ, set them to one value explicitly and redistribute the peer configs.
-
-`AWG_CONTENT_PADDING` defaults to `0` when trailers are on, and is worth `0` generally: content padding costs about 22% of download throughput, because giving every datagram a different length defeats the receiving client's UDP batching. It also takes precedence over `RandomTrailers` on the send path while leaving the receive path's loose matching switched on, so enabling both gives you the cost of trailers and none of their benefit.
-
-Keep `AWG_S4` at **20 or below**. Per-packet overhead is `60 + S4`, so a larger value pushes a full-size packet past 1500 bytes at the default 1420 tunnel MTU and fragments every one of them — see [MTU](#mtu).
-
-Full analysis, source references and how to reproduce the measurements: [docs/awg-performance.md](docs/awg-performance.md).
-
-## MTU
-
-The container does not write an `MTU` line, so `awg-quick` does what it does for plain WireGuard: it takes the MTU of the route to the endpoint (1500 on most links) and subtracts 80, giving a tunnel MTU of 1420. That 80 covers an IPv6 header, UDP and the 32-byte WireGuard transport framing. It does **not** cover the bytes AmneziaWG adds on top, and that is why users on AWG 3.x report that dropping the MTU to 1280 makes the tunnel faster — sometimes dramatically.
-
-### What AmneziaWG adds to every transport packet
-
-Each encrypted data packet on the wire is
-
-```
-IP (20 IPv4 / 40 IPv6) + UDP (8) + S4 + 16-byte header + payload (≤ MTU) + ContentPadding + 16-byte tag
-```
-
-compared with plain WireGuard, where `S4` and `ContentPadding` are both zero. The pieces behave differently:
-
-| Component | Size | On a full-size packet | Notes |
-|-----------|------|-----------------------|-------|
-| `S4` | random 4-20 (2.0) / 12-20 (3.x), max 32 | **Adds to the datagram** | The only part `awg-quick`'s 80-byte allowance does not know about. Also carries the header-protection nonce in 3.x, which is why it cannot go below 12 there |
-| `ContentPaddingAddition` (3.x) | random `lo-hi`, container default within 16-128 | A few bytes | Capped at the largest datagram seen so far, not at the MTU — and that high-water mark counts packets *received* as well as sent, so it drifts above the current packet size and full-size packets do grow a little. Not enough to fragment, but it costs ~22% of download by breaking the receiver's UDP batching. Set `AWG_CONTENT_PADDING=0` |
-| `RandomTrailers` (3.1) on transport | random `0 … window − packet` | Nothing — capped at the largest datagram already seen | Only active on transport packets when `ContentPaddingAddition = 0`. With it, a 52-byte TCP ACK can become a ~1400-byte datagram |
-
-So with the default 1420 tunnel MTU a full-size packet becomes `1420 + 60 + S4` bytes over IPv4, and `1420 + 80 + S4` over IPv6. Over IPv4 that exceeds 1500 as soon as `S4 > 20`; over an IPv6 endpoint it exceeds 1500 for any `S4 > 0`. The random `S4` the container picks is above 20 roughly 30 % of the time in 2.0 (7 of 24 values) and 44 % in 3.x (7 of 16) — which is why one deployment is fine and the next one is "slow for no reason".
-
-### Why an oversized packet is slow rather than broken
-
-A UDP datagram larger than the path MTU is not rejected; the kernel fragments it into two IP packets. Every full-size packet of a download now costs two packets on the wire, the far end has to reassemble them, and — the part that actually hurts — many carrier-grade NATs, mobile networks, cloud load balancers and DPI boxes drop IP fragments outright or rate-limit them. Each dropped fragment loses the whole datagram, the TCP inside the tunnel sees loss, backs off, and throughput collapses while small packets (pings, handshakes, web pages) keep working. Fragmented UDP is also a classic fingerprint for DPI, which undoes the point of the obfuscation.
-
-The client side has the same problem in the other direction, and it usually has a *smaller* path MTU than the server: PPPoE (1492), LTE/5G (often 1400 or less, and iOS enforces path MTU strictly), IPv6-over-IPv4 transitions, corporate Wi-Fi. `awg-quick` on the server has no way of knowing any of this.
-
-1280 leaves 220 bytes of headroom on a 1500-byte IPv4 path — enough for `S4`, UDP, IP and a few hops of extra encapsulation — and its wire packets (`1280 + 60 + S4`) clear PPPoE (1492), LTE (~1400) and every ordinary path. That is why it is the value people converge on, and why Amnezia's own installers and the 3.1 upgrade guides set it by default.
-
-Be precise about what the "IPv6 minimum" argument guarantees, though: the 1280-byte floor applies to the packet **on the wire**, and a tunnel MTU of 1280 produces wire packets of `1340 + S4` bytes over an IPv4 endpoint and `1360 + S4` over an IPv6 one. On a path whose own MTU really is 1280 — DS-Lite, some LTE and tunnel-in-tunnel setups — those still fragment. The truly-safe-everywhere tunnel MTU is `1280 − 60 − S4` for an IPv4 endpoint (1208 at `S4 = 12`) or `1280 − 80 − S4` for IPv6 (1188), which keeps the outer packet at or under 1280. We verified the IPv4 case on such a path: at tunnel MTU 1208, 118,559 of 118,565 full-size datagrams measured exactly 1280 on the wire (the remainder were the handshake-burst outliers documented in [docs/awg-performance.md](docs/awg-performance.md)), and tunnel MTU 1280 would have fragmented every one of them. Measure your path (`ping -M do` binary search) rather than assuming; use 1280 when the path is normal or unknown-but-probably-normal, and `path − 60 − S4` (IPv4) / `path − 80 − S4` (IPv6) when you know the path is constrained.
-
-### Which value to pick
-
-| Situation | Tunnel MTU | Why |
-|-----------|-----------:|-----|
-| Mobile clients, PPPoE, unknown paths, anything that "works but is slow" | **1280** | Clears every ordinary path (needs path MTU ≥ `1340 + S4` on the wire for an IPv4 endpoint, `1360 + S4` for IPv6); the cost is a ~10% higher header-to-payload ratio, which is nothing next to fragmentation loss |
-| Path that is itself constrained to ~1280 (DS-Lite, tunnel-in-tunnel, some LTE) | `path − 60 − S4` (IPv4) / `path − 80 − S4` (IPv6) | The outer packet must fit the *path*, not the IPv6 floor: at `S4 = 12` a 1280-byte path needs tunnel MTU **1208** (IPv4 endpoint) or **1188** (IPv6). Measure with a `ping -M do` binary search |
-| Wired clients on a clean 1500-byte path, IPv4 endpoint | 1400-1413 | `1500 − 20 − 8 − 32 − S4`. 1413 is the ceiling for the largest default `S4` (27), 1408 for the hard maximum (32); 1400 also survives one extra 8-byte encapsulation |
-| IPv6 endpoint on a 1500-byte path | 1380-1393 | `1500 − 40 − 8 − 32 − S4`: 1393 for `S4 = 27`, 1388 for `S4 = 32` |
-| You have set `AWG_S4` yourself | `path − 60 (IPv4) / 80 (IPv6) − S4` | Recompute when you change `S4` |
-
-Do not go above the derived number expecting more speed: the tunnel MTU is a ceiling, and every byte above the path limit is paid back as fragmentation. Going lower than you need only adds per-packet overhead: on a normal path there is no reason to drop under 1280, and on a constrained path no reason to drop under that path's own derived value (1208 IPv4 / 1188 IPv6 on a true 1280-byte path at `S4 = 12`). The number is derived, not magic.
-
-If you rely on `RandomTrailers` without `ContentPaddingAddition` (3.1 with `AWG_CONTENT_PADDING=0`), a lower MTU also helps in a second way: the trailer window tracks the largest datagram seen, so a smaller MTU caps how far small packets can be inflated, which matters on asymmetric links where the upload ACK stream is what limits download speed.
-
-### How to set it
-
-For an existing deployment, add an `MTU` line to the `[Interface]` section of the generated confs and restart the container. For new deployments (or before the next regeneration), put the line in `/config/templates/server.conf` and `/config/templates/peer.conf` instead — templates are only read when the configs are (re)generated, which happens on first start or when a server-side or `AWG_*` variable changes:
-
-```ini
-[Interface]
-Address = ...
-MTU = 1280
-```
-
-Set it on both the server conf (`/config/wg_confs/wg0.conf`) and every peer conf (`/config/peerN/peerN.conf`, then re-import on the device — QR codes and `.conf` files are regenerated from the templates only, so hand-edited peer confs must be re-distributed). The two sides do not have to agree — each side's MTU only limits what *it* sends — but a peer left at 1420 still fragments its uploads. The AmneziaVPN app exposes MTU in the connection settings; on Windows the WinTUN adapter ignores the config value and uses 1280 regardless.
+`awg-quick` sets the tunnel MTU to 1420 without accounting for `S4`, so full-size packets fragment when `S4 > 20` or when the endpoint is IPv6. Tunnels then connect but crawl. Add `MTU = 1280` to `[Interface]` for mobile, PPPoE and unknown paths. On a path that is itself limited to 1280 bytes, use `path − 60 − S4` (IPv4) or `path − 80 − S4` (IPv6). To apply it to future configs, put the line in `/config/templates/server.conf` and `peer.conf`. [docs/mtu.md](docs/mtu.md) explains the numbers.
 
 ## Managing peers
 
 ```bash
 docker exec amneziawg /app/show-peer 1 2 3
-docker exec amneziawg /app/show-peer laptop phone tablet
+docker exec amneziawg /app/show-peer laptop phone
 ```
 
-## Health check
+To add a peer, add it to `PEERS` and restart; existing peers keep their keys and addresses. When you remove a peer from `PEERS`, it disappears from `wg0.conf` and its directory moves to `/config/removed_peers/<peer>-<timestamp>/`, which frees its address. Adding the same name again creates a new identity.
 
-The image has a `HEALTHCHECK` that reports the container `unhealthy` unless every tunnel in `/config/wg_confs` is up. That covers a tunnel that failed to start (a broken conf, or a kernel module that rejects a key) and a client container with no valid conf. Docker does not restart an unhealthy container on its own; use the status for monitoring, or with a tool such as autoheal.
+Configs are regenerated when a server-side variable, an `AWG_*` value, a `SERVER_ALLOWEDIPS_PEER_*` value or a template changes. Every generated config is checked with `awg`'s own parser, and the new set is installed all-or-nothing. If anything fails, such as a broken template, a duplicate peer or an invalid `SERVERURL`, no file changes and the log shows `Config generation failed` with the reason.
 
-If config generation fails in server mode (for example, a syntax error in a customized template in `/config/templates/`), no config file is changed and the previous configs stay in use. The log shows `Config generation failed` with the reason. Fix it and restart to try again.
+## Health check and troubleshooting
 
-## Support info
+The container is `healthy` only while every tunnel in `/config/wg_confs` is up and, when Unbound is enabled, Unbound answers. A tunnel is retried twice before the container gives up. Docker does not restart unhealthy containers by itself, so use the status for monitoring or with a tool such as autoheal.
 
 ```bash
-# container logs
 docker logs amneziawg
-
-# health: healthy or unhealthy, and the reason
-docker inspect amneziawg --format '{{.State.Health.Status}}'
-docker exec amneziawg /app/healthcheck
-
-# interface status
+docker exec amneziawg /app/healthcheck        # healthy/unhealthy, and why
 docker exec amneziawg awg show
-
-# bundled amneziawg-go and amneziawg-tools versions
-docker exec amneziawg cat /build_version
-
-# shell access
-docker exec -it amneziawg /bin/bash
+docker exec amneziawg cat /build_version      # bundled versions and commits
 ```
+
+| Symptom | Fix |
+|---|---|
+| Custom `SERVERPORT` unreachable | Map `SERVERPORT:51820/udp` |
+| Amnezia app shows AWG 1.5 | H1-H4 are integers. Use the 2.0 default ranges |
+| Connection fails after a parameter change | Give the peers their regenerated configs |
+| Peers get no DNS | Unbound is off (`USE_DNS=false`, or port 53 is taken). Set `PEERDNS=1.1.1.1` |
+| Connects, pings fine, downloads crawl | Fragmentation. See [Performance and MTU](#performance-and-mtu) |
+
+## Security
+
+- Keys, configs, QR codes and `awg_params` are mode `600`.
+- **Treat write access to `/config` as root access.** `PostUp` lines and the templates in `/config/templates/` (shell heredocs) run as root. World-writable templates are refused.
+- See [SECURITY.md](SECURITY.md) to report a vulnerability.
 
 ## Building locally
 
 ```bash
 docker build -t amneziawg .
-# multi-arch:
 docker buildx build --platform linux/amd64,linux/arm64 -t amneziawg .
+.github/scripts/smoke-test.sh amneziawg   # the CI smoke tests
 ```
 
 ## Links
 
-- [AmneziaVPN documentation](https://docs.amnezia.org/)
-- [AmneziaWG kernel module](https://github.com/amnezia-vpn/amneziawg-linux-kernel-module)
-- [AmneziaWG Architect](https://architect.vai-rice.space/), a GUI config generator for custom I1-I5 signatures
-- [amneziawg-installer](https://github.com/bivlked/amneziawg-installer), a bash installer for AmneziaWG 2.0 on Ubuntu/Debian
+- [AmneziaVPN documentation](https://docs.amnezia.org/) · [kernel module](https://github.com/amnezia-vpn/amneziawg-linux-kernel-module) · [AmneziaWG Architect](https://architect.vai-rice.space/)
 - [LinuxServer docker-wireguard](https://github.com/linuxserver/docker-wireguard), the project this one is modeled on
-
-## Contributing
-
-See [CONTRIBUTING.md](CONTRIBUTING.md). Security issues go through [SECURITY.md](SECURITY.md).
+- [CONTRIBUTING.md](CONTRIBUTING.md) · [CHANGELOG.md](CHANGELOG.md)
 
 ## Credits
 
-This project is a fork of [AYastrebov/docker-amneziawg](https://github.com/AYastrebov/docker-amneziawg) by [Andrey Yastrebov](https://github.com/AYastrebov), who created it and wrote the bulk of its history. It builds on [LinuxServer docker-wireguard](https://github.com/linuxserver/docker-wireguard) and the [AmneziaVPN](https://github.com/amnezia-vpn) team's `amneziawg-go`, `amneziawg-tools` and kernel module.
+This project is a fork of [AYastrebov/docker-amneziawg](https://github.com/AYastrebov/docker-amneziawg) by [Andrey Yastrebov](https://github.com/AYastrebov), who created it and wrote most of its history. It builds on [LinuxServer docker-wireguard](https://github.com/linuxserver/docker-wireguard) and on the [AmneziaVPN](https://github.com/amnezia-vpn) team's `amneziawg-go`, `amneziawg-tools` and kernel module.
 
 ## License
 
-MIT, see [LICENSE](LICENSE). The original copyright notice is kept as the license requires.
+MIT, see [LICENSE](LICENSE). The original copyright notice is kept, as the license requires.

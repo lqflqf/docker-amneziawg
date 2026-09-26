@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Stateful smoke tests on a persistent volume (restarts, 2.0↔1.5, peer add/remove, duplicates, invalid inputs, file modes, unparseable templates); smoke tests and a Trivy scan now gate every publish, and release builds run the arm64 binaries under QEMU before pushing
+- Generated configs are checked with `awg`'s own parser before they are installed; installation rolls back every file if any move fails
+- `HEALTHCHECK_DNS_NAME`: optionally require Unbound to resolve a real name for the container to be healthy
+- `docs/mtu.md` (the MTU guidance moved out of the README)
 - `README.md` "Differences from the original": the CoreDNS → Unbound switch compared to upstream, its trade-offs, and migration steps (`USE_COREDNS` → `USE_DNS`)
 - `README.md` "DNS (Unbound)" section: what the bundled resolver does by default, how to change its upstream or access control, and what happens when it is disabled
 - `HEALTHCHECK` (`/app/healthcheck`): the container reports `unhealthy` unless every tunnel in `/config/wg_confs` is up. Previously a failed tunnel left the container `running` with no signal that the VPN was down
@@ -30,6 +34,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Multi-architecture support (amd64, arm64)
 
 ### Changed
+- **`LOG_CONFS` now defaults to `false`**: QR codes contain the peers' private keys. Use `/app/show-peer`
+- **Peers removed from `PEERS` are archived** to `/config/removed_peers/<peer>-<timestamp>/`, which frees their address; re-adding a name creates a new identity. Addresses are allocated from current peers only, by exact match
+- **Changing `AWG_VERSION` regenerates the version-specific parameters** (S, H, I, 3.x) that were saved for the old version, so e.g. 2.0 → 1.5 really produces 1.5 configs. Values set in the environment are kept
+- New installs: Unbound drops to `abc`, listens only on 127.0.0.1 and the tunnel address, and answers only loopback and the VPN subnet (generated `/run/unbound/listen.conf`). Existing `unbound.conf` files are not modified
+- Changes to `SERVER_ALLOWEDIPS_PEER_*` or to the templates now regenerate the configs
+- A tunnel that fails to come up is retried twice before giving up; no tunnel config at all now fails `svc-amneziawg` too
+- Unbound with an invalid config, or not answering, makes the container `unhealthy`
+- `PostUp` firewall commands are separate lines, so any failing command fails the tunnel instead of being masked by the next one
+- Base images pinned by digest, builder packages by version and upstream tags by commit; images carry SLSA provenance and an SBOM; `upstream-check` pins the commit it tested
+- README condensed
 - Skills (`docker-amneziawg`, `deploy-amneziawg`) now describe Unbound, `USE_DNS` and `/config/unbound` instead of CoreDNS, and the deploy troubleshooting page covers each reason Unbound can be off
 - amneziawg-tools updated to v3.0.20260730, the first release with AWG 3.0 config parsing
 - Updated to use GitHub Packages for pre-built images
@@ -42,6 +56,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `CONTEXT.md`. It duplicated `CLAUDE.md`, `.claude/skills/docker-amneziawg/references/awg-parameters.md` and `docs/awg-performance.md`; its volume layout and troubleshooting table moved to `CLAUDE.md`
 
 ### Fixed
+- `.donoteditthisfile` is parsed instead of sourced, and `SERVERURL=auto` uses HTTPS with validation: an attacker able to alter the plain-HTTP IP lookup could previously get code run as root on the next restart
+- `awg_params` (including `HeaderProtectionKey`) was created world-readable; all keys, confs, QR codes and saved state are now mode 600 in 700 directories, including on existing installs
+- The failure path removed only the IPv4 default route; it now removes every IPv4 and IPv6 default route
+- Config parameters were persisted before generation succeeded
+- Duplicate peer names broke installation half-way; they are now rejected up front
+- A pinned S value below 12 under AWG 3.x now stops generation instead of installing a config amneziawg-go rejects
+- The kernel module probe deleted any interface named `test`, and wrote the userspace fallback to a path `with-contenv` does not read
+- `show-peer 1` also matched `peer10`
+- The `awg-quick` patch now fails the build if it no longer applies
+- Docs: compose examples (`AWG_S4=50`, integer H values under 2.0, `SERVERPORT` described as the listen port), the S4 range in the MTU table, and the non-root claim in SECURITY.md
 - Server-mode config regeneration is now all-or-nothing. Confs and QR codes are rendered into a staging directory, validated, and only then moved into place; `save_vars` runs only on success. Before, a template error left `wg0.conf` half-rewritten (duplicated `I1` lines and `[Peer]` blocks), saved the new change-detection state anyway, and the broken config was reused on every later start even after the template was fixed
 - A peer that could not be given an address now fails generation instead of reusing the previous peer's `CLIENT_IP`
 - `svc-amneziawg` exits 1 when a tunnel fails to come up, so s6 reports it down

@@ -1,7 +1,11 @@
 #!/bin/bash
 # Docker HEALTHCHECK: healthy only while every tunnel svc-amneziawg brought up
-# still exists. svc-amneziawg writes /run/activeconfs only after all tunnels
-# came up, so a missing file covers both "no valid config" and "a tunnel failed".
+# still exists and, when unbound is meant to run, it answers. svc-amneziawg
+# writes /run/activeconfs only after all tunnels came up, so a missing file
+# covers both "no valid config" and "a tunnel failed".
+#
+# Set HEALTHCHECK_DNS_NAME (e.g. example.com) to also require that unbound can
+# resolve a real name, which proves its DNS-over-TLS upstream is reachable.
 
 if [[ ! -f /run/activeconfs ]]; then
     echo "no active tunnels"
@@ -18,5 +22,27 @@ for conf in "${AWG_CONFS[@]}"; do
         exit 1
     fi
 done
+
+case "$(cat /run/unbound-state 2>/dev/null)" in
+    invalid)
+        echo "unbound is enabled but /config/unbound/unbound.conf is invalid"
+        exit 1
+        ;;
+    running)
+        if grep -q "health.amneziawg" /config/unbound/unbound.conf 2>/dev/null; then
+            if ! nslookup health.amneziawg. 127.0.0.1 >/dev/null 2>&1; then
+                echo "unbound does not answer on 127.0.0.1"
+                exit 1
+            fi
+        elif ! pgrep -x unbound >/dev/null; then
+            echo "unbound is not running"
+            exit 1
+        fi
+        if [[ -n "${HEALTHCHECK_DNS_NAME:-}" ]] && ! nslookup "${HEALTHCHECK_DNS_NAME}" 127.0.0.1 >/dev/null 2>&1; then
+            echo "unbound cannot resolve ${HEALTHCHECK_DNS_NAME}"
+            exit 1
+        fi
+        ;;
+esac
 
 echo "tunnels up: ${ACTIVE[*]}"

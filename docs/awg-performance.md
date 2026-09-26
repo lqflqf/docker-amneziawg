@@ -109,7 +109,7 @@ with CPA:  4421 of 1232, 4416 of 1235, 4406 of 1233, ...  <- smeared over ~16 si
 
 The 22% figure is measured directly and reproduced. The GRO attribution is inference from the size distributions plus the code — it was not isolated by toggling `UDP_GRO`.
 
-> The README's per-packet table previously said `ContentPaddingAddition` adds nothing to a full-size packet because it is capped at the MTU. That is not right: the cap is `udp_window - packet_len` (`peer.h:110-124`), where `udp_window` is a high-water mark over every datagram sent *and received* (`send.c:243`, `receive.c:571`). Receiving padded packets raises it, so full-size sends do get padded — 1228 becomes 1229-1244 above.
+> The per-packet table in [mtu.md](mtu.md) (formerly in the README) previously said `ContentPaddingAddition` adds nothing to a full-size packet because it is capped at the MTU. That is not right: the cap is `udp_window - packet_len` (`peer.h:110-124`), where `udp_window` is a high-water mark over every datagram sent *and received* (`send.c:243`, `receive.c:571`). Receiving padded packets raises it, so full-size sends do get padded — 1228 becomes 1229-1244 above.
 
 ## MTU
 
@@ -175,7 +175,7 @@ switches at all, and upstream does maintain those two components.
 - `S4 ≤ 20` → 1420 fits. **Keep `S4` at or below 20 and the default MTU is safe.**
 - `S4 = 27` (a value the container picks often) → ceiling is 1413, so every full-size packet fragments. That is the 75.5 Mbit/s row above.
 
-See [MTU](../README.md#mtu) for choosing a value; nothing in this document changes that guidance.
+See [MTU](mtu.md) for choosing a value; nothing in this document changes that guidance.
 
 ## Recommended parameters
 

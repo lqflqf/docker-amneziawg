@@ -12,6 +12,10 @@ name: Check Upstream Releases
 #
 # Upstream tag names are untrusted input: they are validated against a strict
 # version pattern and only ever reach shells through environment variables.
+#
+# Each new tag is resolved to a commit once, here. The smoke-tested build and
+# the PR both pin that commit, and the Dockerfile refuses to build if the tag
+# later points elsewhere, so what gets merged is what was tested.
 
 on:
   schedule:
@@ -40,6 +44,8 @@ jobs:
       # empty when that pin stays as it is
       new_tools: ${{ steps.compare.outputs.new_tools }}
       new_go: ${{ steps.compare.outputs.new_go }}
+      new_tools_commit: ${{ steps.commits.outputs.tools_commit }}
+      new_go_commit: ${{ steps.commits.outputs.go_commit }}
 
     steps:
       - name: Checkout code
@@ -116,6 +122,33 @@ jobs:
             echo "new_go=${NEW_GO}"
           } >> "$GITHUB_OUTPUT"
 
+      - name: Resolve the new tags to commits
+        id: commits
+        if: steps.compare.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NEW_TOOLS: ${{ steps.compare.outputs.new_tools }}
+          NEW_GO: ${{ steps.compare.outputs.new_go }}
+        run: |
+          resolve() {
+            local repo=$1 tag=$2 sha
+            sha=$(gh api "repos/${repo}/commits/${tag}" --jq .sha)
+            if [[ ! "$sha" =~ ^[0-9a-f]{40}$ ]]; then
+              echo "::error::Could not resolve ${repo}@${tag} to a commit (got '${sha}')"
+              exit 1
+            fi
+            echo "- ${repo} ${tag} = \`${sha}\`" >> "$GITHUB_STEP_SUMMARY"
+            printf '%s' "$sha"
+          }
+          TOOLS_COMMIT=""
+          GO_COMMIT=""
+          [[ -n "$NEW_TOOLS" ]] && TOOLS_COMMIT=$(resolve "$TOOLS_REPO" "$NEW_TOOLS")
+          [[ -n "$NEW_GO" ]] && GO_COMMIT=$(resolve "$GO_REPO" "$NEW_GO")
+          {
+            echo "tools_commit=${TOOLS_COMMIT}"
+            echo "go_commit=${GO_COMMIT}"
+          } >> "$GITHUB_OUTPUT"
+
   # Build and smoke-test the bump before proposing it, with a read-only token:
   # this job compiles upstream code.
   smoke:
@@ -132,7 +165,9 @@ jobs:
         env:
           NEW_TOOLS: ${{ needs.check-upstream.outputs.new_tools }}
           NEW_GO: ${{ needs.check-upstream.outputs.new_go }}
-        run: .github/scripts/update-pins.sh "$NEW_TOOLS" "$NEW_GO"
+          NEW_TOOLS_COMMIT: ${{ needs.check-upstream.outputs.new_tools_commit }}
+          NEW_GO_COMMIT: ${{ needs.check-upstream.outputs.new_go_commit }}
+        run: .github/scripts/update-pins.sh "$NEW_TOOLS" "$NEW_TOOLS_COMMIT" "$NEW_GO" "$NEW_GO_COMMIT"
 
       - name: Build test image (linux/amd64)
         run: docker build -t test-image --build-arg VERSION=upstream-check .
@@ -156,14 +191,16 @@ jobs:
         env:
           NEW_TOOLS: ${{ needs.check-upstream.outputs.new_tools }}
           NEW_GO: ${{ needs.check-upstream.outputs.new_go }}
+          NEW_TOOLS_COMMIT: ${{ needs.check-upstream.outputs.new_tools_commit }}
+          NEW_GO_COMMIT: ${{ needs.check-upstream.outputs.new_go_commit }}
           CURRENT_TOOLS: ${{ needs.check-upstream.outputs.current_tools }}
           CURRENT_GO: ${{ needs.check-upstream.outputs.current_go }}
         run: |
-          .github/scripts/update-pins.sh "$NEW_TOOLS" "$NEW_GO"
+          .github/scripts/update-pins.sh "$NEW_TOOLS" "$NEW_TOOLS_COMMIT" "$NEW_GO" "$NEW_GO_COMMIT"
           {
             echo "changes<<EOF"
-            [[ -n "$NEW_TOOLS" ]] && echo "- amneziawg-tools: ${CURRENT_TOOLS} -> ${NEW_TOOLS}"
-            [[ -n "$NEW_GO" ]] && echo "- amneziawg-go: ${CURRENT_GO} -> ${NEW_GO}"
+            [[ -n "$NEW_TOOLS" ]] && echo "- amneziawg-tools: ${CURRENT_TOOLS} -> ${NEW_TOOLS} (${NEW_TOOLS_COMMIT})"
+            [[ -n "$NEW_GO" ]] && echo "- amneziawg-go: ${CURRENT_GO} -> ${NEW_GO} (${NEW_GO_COMMIT})"
             echo "EOF"
           } >> "$GITHUB_OUTPUT"
 

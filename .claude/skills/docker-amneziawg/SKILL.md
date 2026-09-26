@@ -79,7 +79,7 @@ Key points:
 | `INTERNAL_SUBNET` | 10.13.13.0 | VPN subnet (.1 = server, .2+ = peers) |
 | `PEERDNS` | auto | DNS for peers (auto = container's Unbound at subnet.1) |
 | `USE_DNS` | true (server) / false (client) | Run the bundled Unbound resolver. Replaces upstream's `USE_COREDNS`, which is ignored |
-| `LOG_CONFS` | true | Show QR codes in container logs |
+| `LOG_CONFS` | false | Show QR codes (which contain private keys) in container logs |
 | `AWG_VERSION` | 2.0 | Protocol version: 2.0 (full DPI evasion), 3.0 (header protection + randomized timers), 3.1 (3.0 + RandomTrailers) or 1.5 (legacy, AmneziaVPN < 4.8.12.9) |
 | `AWG_RANDOM_TRAILERS` | - | `on`/`off`. Random-length handshake packets. Any AWG_VERSION; defaults to `on` under 3.1. Must match on every end. **Requires `S1 == S2 == S3 == S4`** under AWG 2.0+ or ~3.5% of transport packets are dropped — see [awg-performance.md](../../../docs/awg-performance.md) |
 | `AWG_DISABLE_COOKIES` | - | `on`/`off`. No cookie-reply under load. Any AWG_VERSION; always opt-in. Need not match |

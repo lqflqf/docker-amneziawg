@@ -31,7 +31,7 @@ services:
       - INTERNAL_SUBNET=<<10.13.13.0>>
       - ALLOWEDIPS=<<0.0.0.0/0, ::/0>>
       - PERSISTENTKEEPALIVE_PEERS=<<all OR peer names OR omit>>
-      - LOG_CONFS=true
+      # - LOG_CONFS=true        # prints QR codes (private keys) to the logs; prefer /app/show-peer
 
       # AWG version (omit for default 2.0)
       # - AWG_VERSION=2.0        # 2.0 (default) | 3.0 | 3.1 | 1.5
@@ -81,7 +81,7 @@ ports:
 
 ### Kernel datapath vs userspace fallback
 
-The container picks its datapath at startup by running `ip link add dev test type amneziawg` (the amnezia kernel module's link kind — `awg-quick` brings tunnels up with `type amneziawg`, not `type wireguard`, so a plain wireguard module does not enable the kernel datapath). If that succeeds, it uses the kernel datapath via netlink. If it fails, it falls back to userspace `amneziawg-go` (works fine for almost all use cases; slightly higher CPU).
+The container picks its datapath at startup by creating a probe interface (`ip link add dev awgprobe<pid> type amneziawg`) (the amnezia kernel module's link kind — `awg-quick` brings tunnels up with `type amneziawg`, not `type wireguard`, so a plain wireguard module does not enable the kernel datapath). If that succeeds, it uses the kernel datapath via netlink. If it fails, it falls back to userspace `amneziawg-go` (works fine for almost all use cases; slightly higher CPU).
 
 The container **does not load kernel modules itself** — it only checks whether they're already loaded. So the recipe for in-kernel datapath is:
 

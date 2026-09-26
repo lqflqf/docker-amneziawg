@@ -11,7 +11,8 @@ set -euo pipefail
 image="${1:?usage: smoke-test.sh <image>}"
 summary="${GITHUB_STEP_SUMMARY:-/dev/null}"
 container="awgci-$$"
-trap 'docker rm -f "$container" >/dev/null 2>&1 || true' EXIT
+volume="awgci-vol-$$"
+trap 'docker rm -f "$container" >/dev/null 2>&1 || true; docker volume rm -f "$volume" >/dev/null 2>&1 || true' EXIT
 
 # Runs a list of checks inside the image. Each argument is one shell
 # condition; the first one that fails stops the group with a non-zero exit.
@@ -190,8 +191,120 @@ echo "### Unbound at runtime" >> "$summary"
 docker exec "$container" unbound-checkconf /config/unbound/unbound.conf
 docker exec "$container" pgrep -x unbound >/dev/null \
     || { echo "unbound is not running"; docker logs "$container"; exit 1; }
-echo "  ok   - unbound config valid and running"
+unbound_user=$(docker exec "$container" sh -c 'stat -c %U /proc/$(pgrep -x unbound | head -n1)')
+[[ "$unbound_user" == abc ]] \
+    || { echo "unbound runs as ${unbound_user}, expected abc"; exit 1; }
+listeners=$(docker exec "$container" ss -Hlnu 'sport = :53')
+if grep -q '0.0.0.0:53' <<<"$listeners" || ! grep -q '10.56.56.1:53' <<<"$listeners"; then
+    echo "unbound should listen on 127.0.0.1 and the tunnel address only:"; echo "$listeners"; exit 1
+fi
+echo "  ok   - unbound config valid, running as abc on loopback + tunnel address"
 echo "- Unbound at runtime: OK" >> "$summary"
+
+# ----------------------------------------------------------------------------
+# Stateful behavior: one persistent /config volume across restarts, the way a
+# real deployment sees it.
+# ----------------------------------------------------------------------------
+echo "### Persistent state"
+echo "### Persistent state" >> "$summary"
+
+fail() {
+    echo "FAIL - $1"
+    docker logs "$container" 2>&1 | tail -n 60
+    exit 1
+}
+# (Re)create the container on the shared volume with the given extra args and
+# wait until init-amneziawg-confs has finished.
+start() {
+    docker rm -f "$container" >/dev/null 2>&1 || true
+    docker run -d --name "$container" --cap-add NET_ADMIN -v "$volume":/config \
+        -e SERVERURL=ci.example.com -e INTERNAL_SUBNET=10.57.57.0 "$@" "$image" >/dev/null
+    for _ in $(seq 1 60); do
+        grep -q 'Config initialization finished' <<<"$(docker logs "$container" 2>&1)" && return 0
+        sleep 1
+    done
+    fail "init did not finish ($*)"
+}
+logs_have() { grep -qF -- "$1" <<<"$(docker logs "$container" 2>&1)"; }
+wg0_sum() { docker exec "$container" sha256sum /config/wg_confs/wg0.conf | cut -d' ' -f1; }
+iface_value() { docker exec "$container" awk -v k="$2" '$1 == k { print $3; exit }' "$1"; }
+ok() { echo "  ok   - $1"; }
+
+start -e PEERS=2
+for f in /config/server/awg_params /config/server/privatekey-server /config/peer1/peer1.conf \
+         /config/peer1/peer1.png /config/wg_confs/wg0.conf /config/.donoteditthisfile; do
+    mode=$(docker exec "$container" stat -c %a "$f")
+    [[ "$mode" == 600 ]] || fail "$f has mode $mode, expected 600"
+done
+ok "secrets are mode 600"
+logs_have "QR code (conf file" && fail "QR codes (private keys) were logged without LOG_CONFS=true"
+ok "no QR codes in the log by default"
+
+sum=$(wg0_sum)
+start -e PEERS=2
+logs_have "No changes to parameters" || fail "restart with the same settings regenerated"
+[[ "$(wg0_sum)" == "$sum" ]] || fail "wg0.conf changed on an unchanged restart"
+ok "unchanged restart keeps the configs"
+
+start -e PEERS=2 -e AWG_VERSION=1.5
+logs_have "AWG_VERSION changed from 2.0 to 1.5" || fail "2.0 -> 1.5 not detected"
+[[ "$(iface_value /config/peer1/peer1.conf H1)" =~ ^[0-9]+$ ]] || fail "1.5 kept an H range"
+[[ "$(iface_value /config/peer1/peer1.conf S3)" == 0 && "$(iface_value /config/peer1/peer1.conf S4)" == 0 ]] \
+    || fail "1.5 kept nonzero S3/S4"
+docker exec "$container" grep -q '^I1' /config/peer1/peer1.conf && fail "1.5 kept I1"
+ok "2.0 -> 1.5 regenerates 1.5-shaped parameters"
+
+start -e PEERS=2 -e AWG_VERSION=2.0
+[[ "$(iface_value /config/peer1/peer1.conf H1)" == *-* ]] || fail "2.0 kept an integer H"
+docker exec "$container" grep -q '^I1' /config/peer1/peer1.conf || fail "2.0 has no I1"
+ok "1.5 -> 2.0 regenerates 2.0-shaped parameters"
+
+sum=$(wg0_sum)
+start -e PEERS=2 -e AWG_VERSION=3.0 -e AWG_S1=8
+logs_have "must be >= 12" || fail "S1 < 12 under 3.0 not rejected"
+logs_have "Config generation failed" || fail "invalid 3.0 params did not stop generation"
+[[ "$(wg0_sum)" == "$sum" ]] || fail "invalid 3.0 params changed wg0.conf"
+ok "a pinned value awg would reject stops generation"
+
+start -e PEERS=2 -e SERVER_ALLOWEDIPS_PEER_1=192.168.77.0/24
+docker exec "$container" grep -qx 'AllowedIPs = 10.57.57.2/32,192.168.77.0/24' /config/wg_confs/wg0.conf \
+    || fail "SERVER_ALLOWEDIPS_PEER_1 change was not applied"
+ok "a SERVER_ALLOWEDIPS_PEER_* change regenerates"
+
+sum=$(wg0_sum)
+start -e PEERS=1,1 -e SERVER_ALLOWEDIPS_PEER_1=192.168.77.0/24
+logs_have "listed more than once" || fail "duplicate peer not rejected"
+[[ "$(wg0_sum)" == "$sum" ]] || fail "duplicate peers changed wg0.conf"
+ok "duplicate peers are rejected"
+
+start -e PEERS=1 -e SERVER_ALLOWEDIPS_PEER_1=192.168.77.0/24
+docker exec "$container" test ! -e /config/peer2 || fail "removed peer2 was not archived"
+docker exec "$container" sh -c 'ls -d /config/removed_peers/peer2-*' >/dev/null || fail "peer2 is not in removed_peers"
+docker exec "$container" grep -qx '# peer2' /config/wg_confs/wg0.conf && fail "peer2 still in wg0.conf"
+start -e PEERS=1,new -e SERVER_ALLOWEDIPS_PEER_1=192.168.77.0/24
+[[ "$(iface_value /config/peer_new/peer_new.conf Address)" == 10.57.57.3 ]] \
+    || fail "the address of the removed peer was not reused"
+ok "removed peers are archived and free their address"
+
+run_new() { start -e PEERS=1,new -e SERVER_ALLOWEDIPS_PEER_1=192.168.77.0/24 "$@"; }
+sum=$(wg0_sum)
+run_new -e 'SERVERURL=bad;host'
+logs_have 'is not a valid host name' || fail "invalid SERVERURL accepted"
+[[ "$(wg0_sum)" == "$sum" ]] || fail "invalid SERVERURL changed wg0.conf"
+ok "invalid SERVERURL is rejected"
+
+docker exec "$container" sh -c 'echo "# ci" >> /config/templates/server.conf && chmod 666 /config/templates/server.conf'
+run_new
+logs_have "is world-writable" || fail "world-writable template was used"
+[[ "$(wg0_sum)" == "$sum" ]] || fail "world-writable template changed wg0.conf"
+ok "world-writable templates are refused"
+
+docker exec "$container" sh -c 'chmod 600 /config/templates/server.conf && echo "Bogus = 1" >> /config/templates/server.conf'
+run_new
+logs_have "rejected by awg" || fail "template with an unknown key passed validation"
+[[ "$(wg0_sum)" == "$sum" ]] || fail "rejected template changed wg0.conf"
+ok "configs awg cannot parse are never installed"
+echo "- Persistent state: OK" >> "$summary"
 
 echo "All smoke tests passed!" >> "$summary"
 echo "Smoke tests passed!"

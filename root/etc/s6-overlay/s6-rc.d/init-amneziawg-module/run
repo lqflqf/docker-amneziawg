@@ -9,18 +9,24 @@ echo "Uname info: $(uname -a)"
 # "amneziawg", not "wireguard") is the only kernel datapath this image can
 # use — a plain wireguard module does not help. If it is absent we fall back
 # to userspace amneziawg-go (awg-quick does the same fallback on its own).
-ip link del dev test 2>/dev/null
-if ip link add dev test type amneziawg 2>/dev/null; then
+#
+# The probe interface gets a name nothing else uses (<= 15 chars), and an
+# existing interface of that name is never touched.
+probe="awgprobe$$"
+while ip link show dev "${probe}" >/dev/null 2>&1; do
+    probe="awgprobe${RANDOM}"
+done
+if ip link add dev "${probe}" type amneziawg 2>/dev/null; then
+    ip link del dev "${probe}"
     echo "**** AmneziaWG kernel module is active ****"
-    ip link del dev test
     if capsh --current | grep "Current:" | grep -q "cap_sys_module"; then
         echo "**** As the amneziawg module is already active you can remove the SYS_MODULE capability from your container run/compose. ****"
         echo "****     If your host does not automatically load the iptables module, you may still need the SYS_MODULE capability.     ****"
     fi
 elif [[ -x /usr/bin/amneziawg-go ]]; then
     echo "**** No amneziawg kernel module available, using userspace amneziawg-go ****"
-    mkdir -p /run/s6-overlay/container_environment
-    printf "amneziawg-go" > /run/s6-overlay/container_environment/WG_QUICK_USERSPACE_IMPLEMENTATION
+    # /run/s6/container_environment is what with-contenv reads in s6-overlay v3.
+    printf "amneziawg-go" > /run/s6/container_environment/WG_QUICK_USERSPACE_IMPLEMENTATION
 else
     echo "**** The amneziawg kernel module is not active and amneziawg-go is not available. ****"
     echo "**** If you believe that your kernel should have amneziawg support already, make sure that it is activated via modprobe! ****"

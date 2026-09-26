@@ -2,6 +2,11 @@
 # shellcheck shell=bash
 # shellcheck disable=SC2016,SC1091,SC2183
 
+# Everything this script writes under /config (keys, confs, QR pngs, the saved
+# AWG params including HeaderProtectionKey) is secret, so nothing it creates may
+# be group or world readable. harden_permissions fixes files from older images.
+umask 077
+
 mkdir -p /config/wg_confs
 
 # migration to subfolder for wg confs
@@ -54,6 +59,34 @@ fi
 # generate_awg_params, after that restore. Defaulting here would make the
 # awg_params fallback dead code and silently rewrite every peer conf as 2.0.
 AWG_VERSION=${AWG_VERSION:-}
+
+# Every AWG parameter saved to /config/server/awg_params.
+AWG_PARAM_NAMES=(
+    AWG_VERSION AWG_JC AWG_JMIN AWG_JMAX
+    AWG_S1 AWG_S2 AWG_S3 AWG_S4 AWG_H1 AWG_H2 AWG_H3 AWG_H4
+    AWG_I1 AWG_I2 AWG_I3 AWG_I4 AWG_I5
+    AWG_HEADER_PROTECTION_KEY AWG_CONTENT_PADDING AWG_REKEY_AFTER_TIME
+    AWG_REKEY_TIMEOUT AWG_REJECT_AFTER_TIME AWG_KEEPALIVE_TIMEOUT
+    AWG_MAX_HANDSHAKE_ATTEMPTS AWG_RANDOM_TRAILERS AWG_DISABLE_COOKIES
+)
+# The parameters whose shape depends on AWG_VERSION (S3/S4 zero in 1.5, the S
+# floor of 12 in 3.x, H ranges vs integers, I1-I5, the 3.x set). Saved values of
+# these are dropped when the version changes, so a switch actually produces the
+# requested protocol. Jc/Jmin/Jmax and the 3.1 switches are version-independent.
+AWG_VERSIONED_PARAMS=(
+    AWG_S1 AWG_S2 AWG_S3 AWG_S4 AWG_H1 AWG_H2 AWG_H3 AWG_H4
+    AWG_I1 AWG_I2 AWG_I3 AWG_I4 AWG_I5
+    AWG_HEADER_PROTECTION_KEY AWG_CONTENT_PADDING AWG_REKEY_AFTER_TIME
+    AWG_REKEY_TIMEOUT AWG_REJECT_AFTER_TIME AWG_KEEPALIVE_TIMEOUT
+    AWG_MAX_HANDSHAKE_ATTEMPTS
+)
+# Filled by load_awg_params: which parameters came from the environment (those
+# are never dropped or regenerated) and the version the saved set was built for.
+declare -A AWG_FROM_ENV=()
+SAVED_AWG_VERSION=""
+# Set by generate_awg_params when a value the user pinned makes the config
+# unloadable; generation is then refused and the previous configs stay.
+AWG_PARAMS_INVALID=""
 
 # True when the version carries the AWG 3.x parameter set (header protection,
 # content padding, randomized timers).
@@ -178,6 +211,15 @@ generate_awg_params() {
     AWG_VERSION=${AWG_VERSION:-2.0}
     echo "**** AmneziaWG version: ${AWG_VERSION} ****"
 
+    # A saved set built for another version has the wrong shape for this one
+    # (2.0 H ranges under 1.5, S values below the 3.x floor, ...). Drop the
+    # saved version-shaped values so they are drawn for the new version; values
+    # pinned in the environment are kept.
+    if [[ -n "${SAVED_AWG_VERSION}" ]] && [[ "${SAVED_AWG_VERSION}" != "${AWG_VERSION}" ]]; then
+        echo "**** AWG_VERSION changed from ${SAVED_AWG_VERSION} to ${AWG_VERSION}: regenerating the version-specific parameters. Every peer needs its new conf. ****"
+        drop_saved_awg_params "${AWG_VERSIONED_PARAMS[@]}"
+    fi
+
     # AWG 3.1 interface switches. Upstream treats these as independent of the
     # parameter set, so they are honoured with any AWG_VERSION; AWG_VERSION=3.1
     # is simply a preset that turns RandomTrailers on. DisableCookies stays
@@ -190,11 +232,11 @@ generate_awg_params() {
     # client cannot parse.
     # Resolved here, ahead of the S values, because RandomTrailers constrains
     # how S1-S4 may be drawn (see below).
-    local _rt_explicit _dc_explicit _s_all
-    _rt_explicit=$(normalize_awg_switch AWG_RANDOM_TRAILERS "${AWG_RANDOM_TRAILERS:-}")
-    _dc_explicit=$(normalize_awg_switch AWG_DISABLE_COOKIES "${AWG_DISABLE_COOKIES:-}")
-    AWG_RANDOM_TRAILERS="${_rt_explicit}"
-    AWG_DISABLE_COOKIES="${_dc_explicit}"
+    local _s_all _s_name
+    AWG_RT_EXPLICIT=$(normalize_awg_switch AWG_RANDOM_TRAILERS "${AWG_RANDOM_TRAILERS:-}")
+    AWG_DC_EXPLICIT=$(normalize_awg_switch AWG_DISABLE_COOKIES "${AWG_DISABLE_COOKIES:-}")
+    AWG_RANDOM_TRAILERS="${AWG_RT_EXPLICIT}"
+    AWG_DISABLE_COOKIES="${AWG_DC_EXPLICIT}"
     # "off" is a real value here, not an absence, so it survives s6 and beats
     # both the saved value and this preset.
     if [[ "${AWG_VERSION}" == "3.1" ]]; then
@@ -218,9 +260,21 @@ generate_awg_params() {
     # AWG 1.5 is exempt: its single-integer H values are 1 wide, not 50M, so a
     # wrong-offset read matches with probability 2^-32.
     if [[ "${AWG_RANDOM_TRAILERS}" == "on" ]] && awg_has_2x_features; then
+        # Saved S values drawn before trailers were turned on are usually
+        # unequal; drop those (not pinned ones) so they are redrawn equal.
+        if [[ "$AWG_S1" != "$AWG_S2" || "$AWG_S2" != "$AWG_S3" || "$AWG_S3" != "$AWG_S4" ]]; then
+            drop_saved_awg_params AWG_S1 AWG_S2 AWG_S3 AWG_S4
+        fi
         # 12 satisfies the HeaderProtection floor; <= 20 keeps a full-size packet
         # inside 1500 at awg-quick's derived 1420 MTU (overhead is 60 + S4).
+        # A pinned S value is reused for the others, so pinning one is enough.
         _s_all=$(shuf -i 12-20 -n 1)
+        for _s_name in AWG_S1 AWG_S2 AWG_S3 AWG_S4; do
+            if [[ -n "${!_s_name}" ]]; then
+                _s_all=${!_s_name}
+                break
+            fi
+        done
         AWG_S1=${AWG_S1:-$_s_all}
         AWG_S2=${AWG_S2:-$_s_all}
         AWG_S3=${AWG_S3:-$_s_all}
@@ -302,40 +356,6 @@ generate_awg_params() {
         echo "**** download throughput. Set AWG_CONTENT_PADDING=0 to fix.                  ****"
     fi
 
-    # Save params to file for persistence.
-    # generate_confs also creates this dir, but it runs *after* us — without this
-    # mkdir the write fails on a fresh install and awg_params is never created,
-    # so the next start regenerates every parameter and invalidates peer confs.
-    mkdir -p /config/server
-    cat > /config/server/awg_params <<EOF
-AWG_VERSION=$AWG_VERSION
-AWG_JC=$AWG_JC
-AWG_JMIN=$AWG_JMIN
-AWG_JMAX=$AWG_JMAX
-AWG_S1=$AWG_S1
-AWG_S2=$AWG_S2
-AWG_S3=$AWG_S3
-AWG_S4=$AWG_S4
-AWG_H1=$AWG_H1
-AWG_H2=$AWG_H2
-AWG_H3=$AWG_H3
-AWG_H4=$AWG_H4
-AWG_I1=$AWG_I1
-AWG_I2=$AWG_I2
-AWG_I3=$AWG_I3
-AWG_I4=$AWG_I4
-AWG_I5=$AWG_I5
-AWG_HEADER_PROTECTION_KEY=$AWG_HEADER_PROTECTION_KEY
-AWG_CONTENT_PADDING=$AWG_CONTENT_PADDING
-AWG_REKEY_AFTER_TIME=$AWG_REKEY_AFTER_TIME
-AWG_REKEY_TIMEOUT=$AWG_REKEY_TIMEOUT
-AWG_REJECT_AFTER_TIME=$AWG_REJECT_AFTER_TIME
-AWG_KEEPALIVE_TIMEOUT=$AWG_KEEPALIVE_TIMEOUT
-AWG_MAX_HANDSHAKE_ATTEMPTS=$AWG_MAX_HANDSHAKE_ATTEMPTS
-AWG_RANDOM_TRAILERS=$_rt_explicit
-AWG_DISABLE_COOKIES=$_dc_explicit
-EOF
-
     echo "**** AWG Obfuscation Parameters ****"
     echo "  Jc=$AWG_JC, Jmin=$AWG_JMIN, Jmax=$AWG_JMAX"
     echo "  S1=$AWG_S1, S2=$AWG_S2, S3=$AWG_S3, S4=$AWG_S4"
@@ -382,7 +402,8 @@ EOF
         if [[ -n "${AWG_HEADER_PROTECTION_KEY}" ]]; then
             for _s_name in AWG_S1 AWG_S2 AWG_S3 AWG_S4; do
                 if (( ${!_s_name} < 12 )) 2>/dev/null; then
-                    echo "**** WARNING: ${_s_name} (${!_s_name}) < 12 - all S values must be >= 12 when HeaderProtectionKey is set, amneziawg-go will reject the config ****"
+                    echo "**** ERROR: ${_s_name} (${!_s_name}) < 12 - all S values must be >= 12 when HeaderProtectionKey is set, amneziawg-go would reject the config. Raise it, or unset it to have it generated. ****"
+                    AWG_PARAMS_INVALID=1
                 fi
             done
         fi
@@ -399,36 +420,50 @@ EOF
     fi
 }
 
-# Load saved AWG params as fallback (do NOT use source - it overrides env vars)
+# Load saved AWG params as fallback. Never `source` the file: that would
+# override the environment, and it is data, not code. Values set in the
+# environment win and are recorded in AWG_FROM_ENV.
 load_awg_params() {
-    if [[ -f /config/server/awg_params ]]; then
-        AWG_VERSION=${AWG_VERSION:-$(grep "^AWG_VERSION=" /config/server/awg_params | cut -d= -f2)}
-        AWG_JC=${AWG_JC:-$(grep "^AWG_JC=" /config/server/awg_params | cut -d= -f2)}
-        AWG_JMIN=${AWG_JMIN:-$(grep "^AWG_JMIN=" /config/server/awg_params | cut -d= -f2)}
-        AWG_JMAX=${AWG_JMAX:-$(grep "^AWG_JMAX=" /config/server/awg_params | cut -d= -f2)}
-        AWG_S1=${AWG_S1:-$(grep "^AWG_S1=" /config/server/awg_params | cut -d= -f2)}
-        AWG_S2=${AWG_S2:-$(grep "^AWG_S2=" /config/server/awg_params | cut -d= -f2)}
-        AWG_S3=${AWG_S3:-$(grep "^AWG_S3=" /config/server/awg_params | cut -d= -f2)}
-        AWG_S4=${AWG_S4:-$(grep "^AWG_S4=" /config/server/awg_params | cut -d= -f2)}
-        AWG_H1=${AWG_H1:-$(grep "^AWG_H1=" /config/server/awg_params | cut -d= -f2)}
-        AWG_H2=${AWG_H2:-$(grep "^AWG_H2=" /config/server/awg_params | cut -d= -f2)}
-        AWG_H3=${AWG_H3:-$(grep "^AWG_H3=" /config/server/awg_params | cut -d= -f2)}
-        AWG_H4=${AWG_H4:-$(grep "^AWG_H4=" /config/server/awg_params | cut -d= -f2)}
-        AWG_I1=${AWG_I1:-$(grep "^AWG_I1=" /config/server/awg_params | cut -d= -f2-)}
-        AWG_I2=${AWG_I2:-$(grep "^AWG_I2=" /config/server/awg_params | cut -d= -f2-)}
-        AWG_I3=${AWG_I3:-$(grep "^AWG_I3=" /config/server/awg_params | cut -d= -f2-)}
-        AWG_I4=${AWG_I4:-$(grep "^AWG_I4=" /config/server/awg_params | cut -d= -f2-)}
-        AWG_I5=${AWG_I5:-$(grep "^AWG_I5=" /config/server/awg_params | cut -d= -f2-)}
-        AWG_HEADER_PROTECTION_KEY=${AWG_HEADER_PROTECTION_KEY:-$(grep "^AWG_HEADER_PROTECTION_KEY=" /config/server/awg_params | cut -d= -f2-)}
-        AWG_CONTENT_PADDING=${AWG_CONTENT_PADDING:-$(grep "^AWG_CONTENT_PADDING=" /config/server/awg_params | cut -d= -f2-)}
-        AWG_REKEY_AFTER_TIME=${AWG_REKEY_AFTER_TIME:-$(grep "^AWG_REKEY_AFTER_TIME=" /config/server/awg_params | cut -d= -f2-)}
-        AWG_REKEY_TIMEOUT=${AWG_REKEY_TIMEOUT:-$(grep "^AWG_REKEY_TIMEOUT=" /config/server/awg_params | cut -d= -f2-)}
-        AWG_REJECT_AFTER_TIME=${AWG_REJECT_AFTER_TIME:-$(grep "^AWG_REJECT_AFTER_TIME=" /config/server/awg_params | cut -d= -f2-)}
-        AWG_KEEPALIVE_TIMEOUT=${AWG_KEEPALIVE_TIMEOUT:-$(grep "^AWG_KEEPALIVE_TIMEOUT=" /config/server/awg_params | cut -d= -f2-)}
-        AWG_MAX_HANDSHAKE_ATTEMPTS=${AWG_MAX_HANDSHAKE_ATTEMPTS:-$(grep "^AWG_MAX_HANDSHAKE_ATTEMPTS=" /config/server/awg_params | cut -d= -f2-)}
-        AWG_RANDOM_TRAILERS=${AWG_RANDOM_TRAILERS:-$(grep "^AWG_RANDOM_TRAILERS=" /config/server/awg_params | cut -d= -f2)}
-        AWG_DISABLE_COOKIES=${AWG_DISABLE_COOKIES:-$(grep "^AWG_DISABLE_COOKIES=" /config/server/awg_params | cut -d= -f2)}
-    fi
+    local name value file=/config/server/awg_params
+    for name in "${AWG_PARAM_NAMES[@]}"; do
+        [[ -n "${!name:-}" ]] && AWG_FROM_ENV[$name]=1
+    done
+    [[ -f "${file}" ]] || return 0
+    SAVED_AWG_VERSION=$(grep -m1 "^AWG_VERSION=" "${file}" | cut -d= -f2-)
+    for name in "${AWG_PARAM_NAMES[@]}"; do
+        [[ -n "${AWG_FROM_ENV[$name]:-}" ]] && continue
+        # cut -f2-: I1-I5 tags contain "=" themselves
+        value=$(grep -m1 "^${name}=" "${file}" | cut -d= -f2-)
+        printf -v "${name}" '%s' "${value}"
+    done
+}
+
+# Clear the given parameters unless they were set in the environment, so the
+# generators below draw them afresh.
+drop_saved_awg_params() {
+    local name
+    for name in "$@"; do
+        [[ -n "${AWG_FROM_ENV[$name]:-}" ]] || printf -v "${name}" '%s' ""
+    done
+}
+
+# Persist the parameters the current confs were generated with. Called only
+# once those confs are in place (or already current), so a failed generation
+# never leaves awg_params describing configs that do not exist. Only the
+# explicitly set 3.1 switches are saved, see generate_awg_params.
+save_awg_params() {
+    local name value
+    mkdir -p /config/server || return 1
+    {
+        for name in "${AWG_PARAM_NAMES[@]}"; do
+            case "${name}" in
+                AWG_RANDOM_TRAILERS) value=${AWG_RT_EXPLICIT} ;;
+                AWG_DISABLE_COOKIES) value=${AWG_DC_EXPLICIT} ;;
+                *) value=${!name} ;;
+            esac
+            printf '%s=%s\n' "${name}" "${value//$'\n'/ }"
+        done
+    } > /config/server/awg_params.tmp && mv -f /config/server/awg_params.tmp /config/server/awg_params
 }
 
 # Append I1-I5 to a config file if set (used for server conf, which has no [Peer] section yet)
@@ -579,23 +614,24 @@ append_awg31_options_to_interface() {
 # Config generation (matches LinuxServer docker-wireguard pattern)
 # ============================================================================
 
-# Regeneration is all-or-nothing. Every conf and QR png is rendered into a
-# private staging directory, checked, and only then moved over the live files,
-# so a broken template or a failed key command leaves the previous configs in
-# place. The caller skips save_vars on failure, so the next start retries
-# instead of treating a half-written set as current.
+# Regeneration is transactional. Every conf and QR png is rendered into a
+# private staging directory and checked, including by awg's own parser; only
+# then is the set moved over the live files, and if a move fails the files
+# already moved are put back. A broken template, a failed key command or a bad
+# value therefore leaves the previous configs in place. The caller saves state
+# only on success, so the next start retries. Keys are created in place: they
+# are persistent identities, not part of the generated set.
 generate_confs () {
     local stage rc
     local -a staged_ids=() staged_labels=()
-    # Staged files replace the live ones by rename, so they keep the mode they
-    # are created with rather than inheriting the old file's. Keys, confs and
-    # pngs all carry private keys.
-    umask 077
+    local -A PEER_IP=()
     mkdir -p /config/server /config/wg_confs || return 1
     rm -rf /config/.awg-staging.*
     stage=$(mktemp -d /config/.awg-staging.XXXXXX) || return 1
     if render_confs "${stage}" && validate_confs "${stage}" && install_confs "${stage}"; then
         rc=0
+        log_peer_confs
+        archive_removed_peers
     else
         rc=1
     fi
@@ -603,8 +639,69 @@ generate_confs () {
     return "${rc}"
 }
 
+# Templates are expanded with eval, so shell syntax in them runs as root. That
+# is no wider than /config already is (PostUp lines in any conf in wg_confs run
+# as root too), which makes /config a trusted, root-equivalent input. Refuse a
+# template that anyone on the host can write.
+check_template () {
+    local file=$1 mode
+    mode=$(stat -c %a "${file}") || return 1
+    if (( 8#${mode} & 8#002 )); then
+        echo "**** ERROR: ${file} is world-writable (mode ${mode}). Templates run as root when configs are generated; run 'chmod o-w ${file}' on the host and restart. ****"
+        return 1
+    fi
+}
+
+# First IPv4 address on the Address line of a conf, without the prefix length.
+conf_address () {
+    awk -F= '
+        /^[[:space:]]*Address[[:space:]]*=/ {
+            v = $2; gsub(/[[:space:]]/, "", v); split(v, a, ","); sub(/\/.*/, "", a[1]); print a[1]; exit
+        }' "$1"
+}
+
+# An existing peer keeps the address in its conf (moved into the new subnet if
+# INTERNAL_SUBNET changed); a new peer gets the lowest address no current peer
+# holds. Only peers in PEERS count: removed peers are archived once the new set
+# is installed, which frees their addresses.
+assign_peer_addresses () {
+    local id ip idx
+    local -A used=()
+    for id in "${PEER_IDS[@]}"; do
+        ip=""
+        if [[ -f "/config/${id}/${id}.conf" ]]; then
+            ip=$(conf_address "/config/${id}/${id}.conf")
+            if [[ -n "${ORIG_INTERFACE}" ]] && [[ "${INTERFACE}" != "${ORIG_INTERFACE}" ]] && [[ "${ip}" == "${ORIG_INTERFACE}."* ]]; then
+                ip="${INTERFACE}.${ip##*.}"
+            fi
+            if [[ -n "${ip}" ]] && [[ -n "${used[${ip}]:-}" ]]; then
+                echo "**** WARNING: ${id} has the same address (${ip}) as another peer, giving it a new one ****"
+                ip=""
+            fi
+        fi
+        PEER_IP[${id}]=${ip}
+        [[ -n "${ip}" ]] && used[${ip}]=1
+    done
+    for id in "${PEER_IDS[@]}"; do
+        [[ -n "${PEER_IP[${id}]}" ]] && continue
+        for idx in {2..254}; do
+            if [[ -z "${used[${INTERFACE}.${idx}]:-}" ]]; then
+                PEER_IP[${id}]="${INTERFACE}.${idx}"
+                used[${INTERFACE}.${idx}]=1
+                break
+            fi
+        done
+        if [[ -z "${PEER_IP[${id}]}" ]]; then
+            echo "**** ERROR: no address could be found for ${id} in ${INTERFACE}.0/24 ****"
+            return 1
+        fi
+    done
+}
+
 render_confs () {
-    local stage=$1 i idx PEER_ID CLIENT_IP PROPOSED_IP SERVER_ALLOWEDIPS peer_conf
+    local stage=$1 n i PEER_ID CLIENT_IP SERVER_ALLOWEDIPS peer_conf
+    check_template /config/templates/server.conf || return 1
+    check_template /config/templates/peer.conf || return 1
     if [[ ! -s /config/server/privatekey-server ]]; then
         awg genkey | tee /config/server/privatekey-server | awg pubkey > /config/server/publickey-server
     fi
@@ -626,16 +723,11 @@ DUDE"; then
     append_awg3_params "${stage}/wg0.conf"
     # Append AWG 3.1 switches to server conf (no-op unless either is set)
     append_awg31_options "${stage}/wg0.conf"
-    for i in "${PEERS_ARRAY[@]}"; do
-        if [[ ! "${i}" =~ ^[[:alnum:]]+$ ]]; then
-            echo "**** Peer ${i} contains non-alphanumeric characters and thus will be skipped. No config for peer ${i} will be generated. ****"
-            continue
-        fi
-        if [[ "${i}" =~ ^[0-9]+$ ]]; then
-            PEER_ID="peer${i}"
-        else
-            PEER_ID="peer_${i}"
-        fi
+    assign_peer_addresses || return 1
+    for n in "${!PEER_IDS[@]}"; do
+        PEER_ID=${PEER_IDS[$n]}
+        i=${PEER_LABELS[$n]}
+        CLIENT_IP=${PEER_IP[${PEER_ID}]}
         peer_conf="${stage}/${PEER_ID}/${PEER_ID}.conf"
         mkdir -p "/config/${PEER_ID}" "${stage}/${PEER_ID}" || return 1
         if [[ ! -s "/config/${PEER_ID}/privatekey-${PEER_ID}" ]]; then
@@ -645,27 +737,6 @@ DUDE"; then
                 echo "**** ERROR: could not create the keys for ${PEER_ID} ****"
                 return 1
             fi
-        fi
-        CLIENT_IP=""
-        if [[ -f "/config/${PEER_ID}/${PEER_ID}.conf" ]]; then
-            CLIENT_IP=$(grep "Address" "/config/${PEER_ID}/${PEER_ID}.conf" | awk '{print $NF}')
-            if [[ -n "${ORIG_INTERFACE}" ]] && [[ "${INTERFACE}" != "${ORIG_INTERFACE}" ]]; then
-                CLIENT_IP="${CLIENT_IP//${ORIG_INTERFACE}/${INTERFACE}}"
-            fi
-        else
-            # Include the staged confs: peers created earlier in this run are
-            # not in /config yet.
-            for idx in {2..254}; do
-                PROPOSED_IP="${INTERFACE}.${idx}"
-                if ! grep -q -R "${PROPOSED_IP}" /config/peer*/*.conf "${stage}"/peer*/*.conf 2>/dev/null && ([[ -z "${ORIG_INTERFACE}" ]] || ! grep -q -R "${ORIG_INTERFACE}.${idx}" /config/peer*/*.conf 2>/dev/null); then
-                    CLIENT_IP="${PROPOSED_IP}"
-                    break
-                fi
-            done
-        fi
-        if [[ -z "${CLIENT_IP}" ]]; then
-            echo "**** ERROR: no address could be found for ${PEER_ID} in ${INTERFACE}.0/24 ****"
-            return 1
         fi
         if [[ -f "/config/${PEER_ID}/presharedkey-${PEER_ID}" ]]; then
             # create peer conf with presharedkey
@@ -738,8 +809,8 @@ DUDE
 
 # Structural checks on one staged conf. They catch what a failed $(...) in a
 # template leaves behind (an empty "PrivateKey =" or "PublicKey =") and a
-# missing section; awg does the full parse when the tunnel comes up. Extra
-# [Peer] blocks are allowed, since a custom server template may add its own.
+# missing section. Extra [Peer] blocks are allowed, since a custom server
+# template may add its own.
 validate_conf () {
     local conf=$1 min_peers=$2
     awk -v min="${min_peers}" -v name="${conf##*/}" '
@@ -755,31 +826,130 @@ validate_conf () {
         }' "${conf}"
 }
 
+# Parse one staged conf with awg itself, exactly as tunnel start would.
+# awg-quick strip drops the keys only awg-quick handles (Address, DNS, PostUp,
+# ...); awg setconf then parses the rest and only afterwards tries to apply it,
+# to an interface that does not exist, which fails with "Unable to modify
+# interface". Any other failure is a parse error (unknown key, bad value,
+# duplicate section, ...). Endpoint is replaced first because setconf resolves
+# hostnames, and whether SERVERURL resolves right now is not the question.
+PARSE_CHECK_IFACE=awgparsecheck
+parse_check_conf () {
+    local conf=$1 dir out
+    if ip link show dev "${PARSE_CHECK_IFACE}" >/dev/null 2>&1; then
+        echo "**** WARNING: an interface named ${PARSE_CHECK_IFACE} exists, skipping the awg parse check ****"
+        return 0
+    fi
+    dir=$(mktemp -d /tmp/awgcheck.XXXXXX) || return 1
+    cp "${conf}" "${dir}/awgcheck.conf"
+    if ! out=$(awg-quick strip "${dir}/awgcheck.conf" 2>&1 > "${dir}/stripped"); then
+        echo "**** ERROR: ${conf##*/}: ${out} ****"
+        rm -rf "${dir}"
+        return 1
+    fi
+    sed -i 's/^\([[:space:]]*Endpoint[[:space:]]*=\).*/\1 127.0.0.1:51820/' "${dir}/stripped"
+    out=$(WG_ENDPOINT_RESOLUTION_RETRIES=0 awg setconf "${PARSE_CHECK_IFACE}" "${dir}/stripped" 2>&1)
+    rm -rf "${dir}"
+    if [[ "${out}" == *"Unable to modify interface"* ]]; then
+        return 0
+    fi
+    echo "**** ERROR: ${conf##*/} is rejected by awg: ${out//$'\n'/ } ****"
+    return 1
+}
+
 validate_confs () {
     local stage=$1 id ok=0
     validate_conf "${stage}/wg0.conf" "${#staged_ids[@]}" || ok=1
+    parse_check_conf "${stage}/wg0.conf" || ok=1
     for id in "${staged_ids[@]}"; do
         validate_conf "${stage}/${id}/${id}.conf" 1 || ok=1
+        parse_check_conf "${stage}/${id}/${id}.conf" || ok=1
     done
     return "${ok}"
 }
 
-# Move the staged set over the live files. wg0.conf goes first and the pngs
-# last, so a png existing means its conf is final (the CI smoke test waits on it).
+# Move the staged set over the live files: wg0.conf first, then the peer confs,
+# the pngs last, so a png existing means its conf is final (the CI smoke test
+# waits on it). Each live file is backed up first; if any move fails, every
+# file already moved is restored (or removed, if it did not exist before).
 install_confs () {
-    local stage=$1 n id
-    mv -f "${stage}/wg0.conf" /config/wg_confs/wg0.conf || return 1
+    local stage=$1 backup=$1/.previous id n src dst
+    local -a srcs=() dsts=() moved=()
+    mkdir -p "${backup}" || return 1
+    srcs+=("${stage}/wg0.conf"); dsts+=(/config/wg_confs/wg0.conf)
     for id in "${staged_ids[@]}"; do
-        mv -f "${stage}/${id}/${id}.conf" "/config/${id}/${id}.conf" || return 1
+        srcs+=("${stage}/${id}/${id}.conf"); dsts+=("/config/${id}/${id}.conf")
     done
+    for id in "${staged_ids[@]}"; do
+        srcs+=("${stage}/${id}/${id}.png"); dsts+=("/config/${id}/${id}.png")
+    done
+    for n in "${!srcs[@]}"; do
+        src=${srcs[$n]}
+        dst=${dsts[$n]}
+        if [[ -e "${dst}" ]] && ! cp -p "${dst}" "${backup}/${n}"; then
+            rollback_install "${backup}" "${moved[@]}"
+            return 1
+        fi
+        if ! mv -f "${src}" "${dst}"; then
+            echo "**** ERROR: could not install ${dst} ****"
+            rollback_install "${backup}" "${moved[@]}"
+            return 1
+        fi
+        moved+=("${n}:${dst}")
+    done
+}
+
+rollback_install () {
+    local backup=$1 entry n dst k
+    shift
+    echo "**** Restoring the previous configs ****"
+    for (( k = $#; k >= 1; k-- )); do
+        entry=${!k}
+        n=${entry%%:*}
+        dst=${entry#*:}
+        if [[ -e "${backup}/${n}" ]]; then
+            mv -f "${backup}/${n}" "${dst}"
+        else
+            rm -f "${dst}"
+        fi
+    done
+}
+
+# QR codes carry the peer's private and preshared keys, so they go to the log
+# (and from there to wherever logs are shipped) only when asked for.
+log_peer_confs () {
+    local n id
     for n in "${!staged_ids[@]}"; do
         id=${staged_ids[$n]}
-        mv -f "${stage}/${id}/${id}.png" "/config/${id}/${id}.png" || return 1
-        if [[ -z "${LOG_CONFS}" ]] || [[ "${LOG_CONFS}" = "true" ]]; then
+        if [[ "${LOG_CONFS,,}" == "true" ]]; then
             echo "PEER ${staged_labels[$n]} QR code (conf file is saved under /config/${id}):"
             qrencode -t ansiutf8 < "/config/${id}/${id}.conf"
         else
-            echo "PEER ${staged_labels[$n]} conf and QR code png saved in /config/${id}"
+            echo "PEER ${staged_labels[$n]} conf and QR code png saved in /config/${id} (show it with: docker exec <container> /app/show-peer ${staged_labels[$n]})"
+        fi
+    done
+}
+
+# A peer dropped from PEERS is already gone from wg0.conf, so its keys no longer
+# work anywhere. Its directory is moved to /config/removed_peers/ rather than
+# deleted, which frees its address; adding the name back creates a new identity.
+archive_removed_peers () {
+    local dir id stamp
+    local -A active=()
+    for id in "${PEER_IDS[@]}"; do
+        active[${id}]=1
+    done
+    stamp=$(date +%Y%m%d-%H%M%S)
+    for dir in /config/peer*/; do
+        [[ -d "${dir}" ]] || continue
+        dir=${dir%/}
+        id=${dir##*/}
+        [[ -n "${active[${id}]:-}" ]] && continue
+        [[ -f "${dir}/privatekey-${id}" ]] || [[ -f "${dir}/${id}.conf" ]] || continue
+        if mkdir -p /config/removed_peers && mv "${dir}" "/config/removed_peers/${id}-${stamp}"; then
+            echo "**** ${id} is no longer in PEERS: moved it to /config/removed_peers/${id}-${stamp} ****"
+        else
+            echo "**** WARNING: could not move ${dir} to /config/removed_peers ****"
         fi
     done
 }
@@ -790,10 +960,9 @@ config_generation_failed () {
 }
 
 warn_if_subnet_outside_dns_acl () {
-    # The shipped unbound.conf answers 127.0.0.0/8 and the RFC1918 range only.
-    # A VPN subnet outside those is refused, so peers on PEERDNS=auto get no DNS
-    # at all with nothing in the log to explain it. Warn and nanme the line that
-    # fixes it.
+    # The unbound.conf shipped by older images answers 127.0.0.0/8 and the
+    # RFC1918 range only. A VPN subnet outside those is refused, so peers on
+    # PEERDNS=auto get no DNS at all with nothing in the log to explain it.
     local first second
     first=${1%%.*}
     second=${1#*.}; second=${second%%.*}
@@ -804,79 +973,248 @@ warn_if_subnet_outside_dns_acl () {
         { [[ "$first" == "172" ]] && (( second >= 16 && second <= 31 )); }; then
         return 0
     fi
-    echo "**** WARNING: The internal subnet ${INTERNAL_SUBNET} is outside the ranges the bundled unbound answers (127.0.0.0/8 and RFC1918), so peers using PEERDNS=auto will be REFUSED. Add \"access-control: ${1}.0/24 allow\" to /config/unbound/unbound.conf, or set PEERDNS to a resolver of your own. ****"
+    echo "**** WARNING: The internal subnet ${INTERNAL_SUBNET} is outside the ranges your unbound.conf answers (127.0.0.0/8 and RFC1918), so peers using PEERDNS=auto will be REFUSED. Add \"access-control: ${1}.0/24 allow\" to /config/unbound/unbound.conf, or set PEERDNS to a resolver of your own. ****"
+}
+
+# ============================================================================
+# Saved state (/config/.donoteditthisfile)
+# ============================================================================
+
+STATE_FILE=/config/.donoteditthisfile
+# Every input that shapes the generated confs; a change in any regenerates.
+STATE_VARS=(
+    SERVERURL SERVERPORT PEERDNS PEERS INTERFACE ALLOWEDIPS PERSISTENTKEEPALIVE_PEERS
+    "${AWG_PARAM_NAMES[@]}" SERVER_ALLOWEDIPS_ALL TEMPLATES_HASH
+)
+# Added after the file format existed. Missing from an older file means
+# "unknown", which must not force a regeneration on upgrade.
+STATE_VARS_OPTIONAL=(SERVER_ALLOWEDIPS_ALL TEMPLATES_HASH)
+declare -A ORIG=()
+
+# The state file is data. It used to be sourced, which turned any value in it,
+# an auto-detected SERVERURL included, into code run as root on the next start.
+load_state () {
+    local line name value
+    [[ -f "${STATE_FILE}" ]] || return 0
+    while IFS= read -r line || [[ -n "${line}" ]]; do
+        [[ "${line}" =~ ^ORIG_([A-Z0-9_]+)=(.*)$ ]] || continue
+        name=${BASH_REMATCH[1]}
+        value=${BASH_REMATCH[2]}
+        if (( ${#value} >= 2 )) && [[ "${value:0:1}" == '"' ]] && [[ "${value: -1}" == '"' ]]; then
+            value=${value:1:${#value}-2}
+        fi
+        ORIG[${name}]=${value}
+    done < "${STATE_FILE}"
+}
+
+# Values are stored one per line, so newlines are folded (the same way on both
+# sides of the comparison).
+state_value () {
+    printf '%s' "${1//$'\n'/ }"
 }
 
 save_vars () {
-    cat <<DUDE > /config/.donoteditthisfile
-ORIG_SERVERURL="$SERVERURL"
-ORIG_SERVERPORT="$SERVERPORT"
-ORIG_PEERDNS="$PEERDNS"
-ORIG_PEERS="$PEERS"
-ORIG_INTERFACE="$INTERFACE"
-ORIG_ALLOWEDIPS="$ALLOWEDIPS"
-ORIG_PERSISTENTKEEPALIVE_PEERS="$PERSISTENTKEEPALIVE_PEERS"
-ORIG_AWG_VERSION="$AWG_VERSION"
-ORIG_AWG_JC="$AWG_JC"
-ORIG_AWG_JMIN="$AWG_JMIN"
-ORIG_AWG_JMAX="$AWG_JMAX"
-ORIG_AWG_S1="$AWG_S1"
-ORIG_AWG_S2="$AWG_S2"
-ORIG_AWG_S3="$AWG_S3"
-ORIG_AWG_S4="$AWG_S4"
-ORIG_AWG_H1="$AWG_H1"
-ORIG_AWG_H2="$AWG_H2"
-ORIG_AWG_H3="$AWG_H3"
-ORIG_AWG_H4="$AWG_H4"
-ORIG_AWG_I1="$AWG_I1"
-ORIG_AWG_I2="$AWG_I2"
-ORIG_AWG_I3="$AWG_I3"
-ORIG_AWG_I4="$AWG_I4"
-ORIG_AWG_I5="$AWG_I5"
-ORIG_AWG_HEADER_PROTECTION_KEY="$AWG_HEADER_PROTECTION_KEY"
-ORIG_AWG_CONTENT_PADDING="$AWG_CONTENT_PADDING"
-ORIG_AWG_REKEY_AFTER_TIME="$AWG_REKEY_AFTER_TIME"
-ORIG_AWG_REKEY_TIMEOUT="$AWG_REKEY_TIMEOUT"
-ORIG_AWG_REJECT_AFTER_TIME="$AWG_REJECT_AFTER_TIME"
-ORIG_AWG_KEEPALIVE_TIMEOUT="$AWG_KEEPALIVE_TIMEOUT"
-ORIG_AWG_MAX_HANDSHAKE_ATTEMPTS="$AWG_MAX_HANDSHAKE_ATTEMPTS"
-ORIG_AWG_RANDOM_TRAILERS="$AWG_RANDOM_TRAILERS"
-ORIG_AWG_DISABLE_COOKIES="$AWG_DISABLE_COOKIES"
-DUDE
+    local name
+    {
+        for name in "${STATE_VARS[@]}"; do
+            printf 'ORIG_%s="%s"\n' "${name}" "$(state_value "${!name}")"
+        done
+    } > "${STATE_FILE}.tmp" && mv -f "${STATE_FILE}.tmp" "${STATE_FILE}"
 }
+
+# Sets CHANGED_VAR to the first input that differs from the saved state.
+state_changed () {
+    local name opt
+    CHANGED_VAR=""
+    for name in "${STATE_VARS[@]}"; do
+        if [[ -z "${ORIG[${name}]+set}" ]]; then
+            for opt in "${STATE_VARS_OPTIONAL[@]}"; do
+                [[ "${opt}" == "${name}" ]] && continue 2
+            done
+        fi
+        if [[ "$(state_value "${!name}")" != "${ORIG[${name}]:-}" ]]; then
+            CHANGED_VAR=${name}
+            return 0
+        fi
+    done
+    return 1
+}
+
+# All SERVER_ALLOWEDIPS_PEER_<peer> values, in a stable order.
+server_allowedips_all () {
+    local name out=""
+    while IFS= read -r name; do
+        [[ -n "${name}" ]] && out+="${name#SERVER_ALLOWEDIPS_PEER_}=${!name};"
+    done < <(compgen -v SERVER_ALLOWEDIPS_PEER_ | sort)
+    printf '%s' "${out}"
+}
+
+# ============================================================================
+# Input validation
+# ============================================================================
+
+is_ipv4 () {
+    local octet='(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])'
+    [[ "$1" =~ ^${octet}\.${octet}\.${octet}\.${octet}$ ]]
+}
+
+# A valid Endpoint host: a DNS name, an IPv4 address or a bracketed IPv6 address.
+valid_endpoint_host () {
+    local host=$1 label='[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?'
+    is_ipv4 "${host}" && return 0
+    [[ "${host}" =~ ^\[[0-9A-Fa-f:.]+\]$ ]] && return 0
+    (( ${#host} <= 253 )) && [[ "${host}" =~ ^(${label}\.)*${label}\.?$ ]]
+}
+
+# The server's public IPv4 over HTTPS, from the first service that returns a
+# well-formed address. A plain-HTTP answer could be rewritten on the way.
+detect_public_ipv4 () {
+    local url ip
+    for url in https://ipv4.icanhazip.com https://api.ipify.org https://ifconfig.me/ip; do
+        ip=$(curl -fsS -4 --max-time 10 "${url}" 2>/dev/null | tr -d '[:space:]')
+        if is_ipv4 "${ip}"; then
+            printf '%s' "${ip}"
+            return 0
+        fi
+    done
+    return 1
+}
+
+# ============================================================================
+# Unbound
+# ============================================================================
+
+# Written at every start and included by the default unbound.conf: listen on
+# loopback and, in server mode, the tunnel address only, and answer only those
+# networks. ip-freebind lets unbound bind the tunnel address before the tunnel
+# exists (svc-unbound starts first).
+write_unbound_listen () {
+    mkdir -p /run/unbound
+    {
+        echo "# Generated at every start by init-amneziawg-confs. Do not edit;"
+        echo "# add settings to /config/unbound/unbound.conf instead."
+        echo "interface: 127.0.0.1"
+        echo "access-control: 127.0.0.0/8 allow"
+        if [[ -n "${INTERFACE:-}" ]]; then
+            echo "interface: ${INTERFACE}.1"
+            echo "access-control: ${INTERFACE}.0/24 allow"
+            echo "ip-freebind: yes"
+        fi
+    } > /run/unbound/listen.conf
+    chmod 755 /run/unbound
+    chmod 644 /run/unbound/listen.conf
+}
+
+# Keys, confs, pngs and saved parameters are secret. Older images created some
+# of them group/world-readable (awg_params among them). Templates are left
+# alone: check_template has to see the mode the host gave them.
+harden_permissions () {
+    local dir
+    shopt -s nullglob
+    for dir in /config/server /config/wg_confs /config/peer* /config/removed_peers /config/removed_peers/*; do
+        [[ -d "${dir}" ]] || continue
+        chmod 700 "${dir}" 2>/dev/null
+        find "${dir}" -maxdepth 1 -type f -exec chmod 600 {} + 2>/dev/null
+    done
+    shopt -u nullglob
+    [[ -f "${STATE_FILE}" ]] && chmod 600 "${STATE_FILE}"
+}
+
+# ============================================================================
+# Main
+# ============================================================================
 
 if [[ -n "$PEERS" ]]; then
     echo "**** Server mode is selected ****"
+    GENERATION_BLOCKED=""
+    load_state
+    ORIG_INTERFACE=${ORIG[INTERFACE]:-}
+
     if [[ "$PEERS" =~ ^[0-9]+$ ]] && ! [[ "$PEERS" = *,* ]]; then
         mapfile -t PEERS_ARRAY < <(seq 1 "${PEERS}")
     else
         mapfile -t PEERS_ARRAY < <(echo "${PEERS}" | tr ',' '\n')
     fi
-    if [[ ${#PEERS_ARRAY[@]} -gt 253 ]]; then
-        echo "**** ERROR: Too many peers (${#PEERS_ARRAY[@]}). Maximum is 253 for a /24 subnet ****"
-        sleep infinity
+    PEER_IDS=()
+    PEER_LABELS=()
+    declare -A SEEN_PEERS=()
+    for i in "${PEERS_ARRAY[@]}"; do
+        if [[ ! "${i}" =~ ^[[:alnum:]]+$ ]]; then
+            echo "**** Peer ${i} contains non-alphanumeric characters and thus will be skipped. No config for peer ${i} will be generated. ****"
+            continue
+        fi
+        if [[ "${i}" =~ ^[0-9]+$ ]]; then
+            PEER_ID="peer${i}"
+        else
+            PEER_ID="peer_${i}"
+        fi
+        if [[ -n "${SEEN_PEERS[${PEER_ID}]:-}" ]]; then
+            echo "**** ERROR: peer ${i} is listed more than once in PEERS ****"
+            GENERATION_BLOCKED=1
+            continue
+        fi
+        SEEN_PEERS[${PEER_ID}]=1
+        PEER_IDS+=("${PEER_ID}")
+        PEER_LABELS+=("${i}")
+    done
+    if [[ ${#PEER_IDS[@]} -gt 253 ]]; then
+        echo "**** ERROR: Too many peers (${#PEER_IDS[@]}). Maximum is 253 for a /24 subnet ****"
+        GENERATION_BLOCKED=1
     fi
     if [[ -n "${PERSISTENTKEEPALIVE_PEERS}" ]]; then
         echo "**** PersistentKeepalive will be set for: ${PERSISTENTKEEPALIVE_PEERS/,/ } ****"
         mapfile -t PERSISTENTKEEPALIVE_PEERS_ARRAY < <(echo "${PERSISTENTKEEPALIVE_PEERS}" | tr ',' '\n')
     fi
+
     if [[ -z "$SERVERURL" ]] || [[ "$SERVERURL" = "auto" ]]; then
-        SERVERURL=$(curl -s -4 icanhazip.com)
-        echo "**** SERVERURL var is either not set or is set to \"auto\", setting external IP to auto detected value of $SERVERURL ****"
+        if SERVERURL=$(detect_public_ipv4); then
+            echo "**** SERVERURL var is either not set or is set to \"auto\", setting external IP to auto detected value of $SERVERURL ****"
+        elif [[ -n "${ORIG[SERVERURL]:-}" ]] && valid_endpoint_host "${ORIG[SERVERURL]}"; then
+            SERVERURL=${ORIG[SERVERURL]}
+            echo "**** WARNING: could not detect the external IP, keeping the previous value ${SERVERURL} ****"
+        else
+            SERVERURL=""
+            echo "**** ERROR: could not detect the external IP. Set SERVERURL to this server's public address or DNS name. ****"
+            GENERATION_BLOCKED=1
+        fi
     else
+        # A bare IPv6 address is not a valid Endpoint host; bracket it.
+        if [[ "$SERVERURL" == *:* ]] && [[ "$SERVERURL" != \[* ]]; then
+            SERVERURL="[${SERVERURL}]"
+        fi
         echo "**** External server address is set to $SERVERURL ****"
     fi
+    if [[ -n "$SERVERURL" ]] && ! valid_endpoint_host "$SERVERURL"; then
+        echo "**** ERROR: SERVERURL \"${SERVERURL}\" is not a valid host name or IP address ****"
+        GENERATION_BLOCKED=1
+    fi
     SERVERPORT=${SERVERPORT:-51820}
+    if [[ ! "$SERVERPORT" =~ ^[0-9]+$ ]] || (( SERVERPORT < 1 || SERVERPORT > 65535 )); then
+        echo "**** ERROR: SERVERPORT \"${SERVERPORT}\" is not a port number (1-65535) ****"
+        GENERATION_BLOCKED=1
+    fi
     echo "**** External server port is set to ${SERVERPORT}. Make sure that port is properly forwarded to port 51820 inside this container ****"
     INTERNAL_SUBNET=${INTERNAL_SUBNET:-10.13.13.0}
+    # The subnet is always a /24; older images accepted "10.13.13.0/24" too.
+    if [[ "$INTERNAL_SUBNET" == */* ]]; then
+        [[ "${INTERNAL_SUBNET#*/}" == 24 ]] || echo "**** WARNING: INTERNAL_SUBNET ${INTERNAL_SUBNET}: only /24 is supported, using ${INTERNAL_SUBNET%%/*}/24 ****"
+        INTERNAL_SUBNET=${INTERNAL_SUBNET%%/*}
+    fi
     echo "**** Internal subnet is set to $INTERNAL_SUBNET ****"
+    if ! is_ipv4 "$INTERNAL_SUBNET"; then
+        echo "**** ERROR: INTERNAL_SUBNET \"${INTERNAL_SUBNET}\" is not an IPv4 address such as 10.13.13.0 ****"
+        GENERATION_BLOCKED=1
+    fi
     INTERFACE=$(echo "$INTERNAL_SUBNET" | awk 'BEGIN{FS=OFS="."} NF--')
     ALLOWEDIPS=${ALLOWEDIPS:-0.0.0.0/0, ::/0}
     echo "**** AllowedIPs for peers $ALLOWEDIPS ****"
     if [[ -z "$PEERDNS" ]] || [[ "$PEERDNS" = "auto" ]]; then
         PEERDNS="${INTERFACE}.1"
         echo "**** PEERDNS var is either not set or is set to \"auto\", setting peer DNS to ${INTERFACE}.1 to use the container's unbound resolver. ****"
-        warn_if_subnet_outside_dns_acl "${INTERFACE}"
+        if [[ "${USE_DNS,,}" == "false" ]]; then
+            echo "**** WARNING: USE_DNS=false turns unbound off, so peers on PEERDNS=auto will get no DNS. Set PEERDNS to a resolver such as 1.1.1.1. ****"
+        fi
+        PEERDNS_AUTO=1
     else
         echo "**** Peer DNS servers will be set to $PEERDNS ****"
     fi
@@ -886,60 +1224,36 @@ if [[ -n "$PEERS" ]]; then
     generate_awg_params
     check_awg31_kernel_support
 
-    if [[ ! -f /config/wg_confs/wg0.conf ]]; then
-        echo "**** No wg0.conf found (maybe an initial install), generating 1 server and ${PEERS} peer/client confs ****"
+    # shellcheck disable=SC2034 # read through STATE_VARS
+    SERVER_ALLOWEDIPS_ALL=$(server_allowedips_all)
+    # shellcheck disable=SC2034
+    TEMPLATES_HASH=$(cat /config/templates/server.conf /config/templates/peer.conf | sha256sum | cut -d' ' -f1)
+
+    if [[ -n "${GENERATION_BLOCKED}" ]] || [[ -n "${AWG_PARAMS_INVALID}" ]]; then
+        config_generation_failed
+    elif [[ ! -f /config/wg_confs/wg0.conf ]]; then
+        echo "**** No wg0.conf found (maybe an initial install), generating 1 server and ${#PEER_IDS[@]} peer/client confs ****"
         if generate_confs; then
+            save_awg_params
+            save_vars
+        else
+            config_generation_failed
+        fi
+    elif state_changed; then
+        echo "**** Server related settings changed (${CHANGED_VAR} and possibly others), regenerating 1 server and ${#PEER_IDS[@]} peer/client confs ****"
+        if generate_confs; then
+            save_awg_params
             save_vars
         else
             config_generation_failed
         fi
     else
-        echo "**** Server mode is selected ****"
-        if [[ -f /config/.donoteditthisfile ]]; then
-            . /config/.donoteditthisfile
-        fi
-        if [[ "$SERVERURL" != "$ORIG_SERVERURL" ]] || \
-           [[ "$SERVERPORT" != "$ORIG_SERVERPORT" ]] || \
-           [[ "$PEERDNS" != "$ORIG_PEERDNS" ]] || \
-           [[ "$PEERS" != "$ORIG_PEERS" ]] || \
-           [[ "$INTERFACE" != "$ORIG_INTERFACE" ]] || \
-           [[ "$ALLOWEDIPS" != "$ORIG_ALLOWEDIPS" ]] || \
-           [[ "$PERSISTENTKEEPALIVE_PEERS" != "$ORIG_PERSISTENTKEEPALIVE_PEERS" ]] || \
-           [[ "$AWG_VERSION" != "$ORIG_AWG_VERSION" ]] || \
-           [[ "$AWG_JC" != "$ORIG_AWG_JC" ]] || \
-           [[ "$AWG_JMIN" != "$ORIG_AWG_JMIN" ]] || \
-           [[ "$AWG_JMAX" != "$ORIG_AWG_JMAX" ]] || \
-           [[ "$AWG_S1" != "$ORIG_AWG_S1" ]] || \
-           [[ "$AWG_S2" != "$ORIG_AWG_S2" ]] || \
-           [[ "$AWG_S3" != "$ORIG_AWG_S3" ]] || \
-           [[ "$AWG_S4" != "$ORIG_AWG_S4" ]] || \
-           [[ "$AWG_H1" != "$ORIG_AWG_H1" ]] || \
-           [[ "$AWG_H2" != "$ORIG_AWG_H2" ]] || \
-           [[ "$AWG_H3" != "$ORIG_AWG_H3" ]] || \
-           [[ "$AWG_H4" != "$ORIG_AWG_H4" ]] || \
-           [[ "$AWG_I1" != "$ORIG_AWG_I1" ]] || \
-           [[ "$AWG_I2" != "$ORIG_AWG_I2" ]] || \
-           [[ "$AWG_I3" != "$ORIG_AWG_I3" ]] || \
-           [[ "$AWG_I4" != "$ORIG_AWG_I4" ]] || \
-           [[ "$AWG_I5" != "$ORIG_AWG_I5" ]] || \
-           [[ "$AWG_HEADER_PROTECTION_KEY" != "$ORIG_AWG_HEADER_PROTECTION_KEY" ]] || \
-           [[ "$AWG_CONTENT_PADDING" != "$ORIG_AWG_CONTENT_PADDING" ]] || \
-           [[ "$AWG_REKEY_AFTER_TIME" != "$ORIG_AWG_REKEY_AFTER_TIME" ]] || \
-           [[ "$AWG_REKEY_TIMEOUT" != "$ORIG_AWG_REKEY_TIMEOUT" ]] || \
-           [[ "$AWG_REJECT_AFTER_TIME" != "$ORIG_AWG_REJECT_AFTER_TIME" ]] || \
-           [[ "$AWG_KEEPALIVE_TIMEOUT" != "$ORIG_AWG_KEEPALIVE_TIMEOUT" ]] || \
-           [[ "$AWG_MAX_HANDSHAKE_ATTEMPTS" != "$ORIG_AWG_MAX_HANDSHAKE_ATTEMPTS" ]] || \
-           [[ "$AWG_RANDOM_TRAILERS" != "$ORIG_AWG_RANDOM_TRAILERS" ]] || \
-           [[ "$AWG_DISABLE_COOKIES" != "$ORIG_AWG_DISABLE_COOKIES" ]]; then
-            echo "**** Server related environment variables changed, regenerating 1 server and ${PEERS} peer/client confs ****"
-            if generate_confs; then
-                save_vars
-            else
-                config_generation_failed
-            fi
-        else
-            echo "**** No changes to parameters. Existing configs are used. ****"
-        fi
+        echo "**** No changes to parameters. Existing configs are used. ****"
+        # Nothing changed, so recording the current values is safe; it also
+        # fills in keys an older state file lacks, which would otherwise never
+        # be compared (see STATE_VARS_OPTIONAL).
+        save_awg_params
+        save_vars
     fi
 else
     echo "**** Client mode selected. ****"
@@ -956,10 +1270,23 @@ if [[ ! -f /config/unbound/root.key ]]; then
     cp /usr/share/dnssec-root/trusted-key.key /config/unbound/root.key
 fi
 
+write_unbound_listen
+if ! grep -q '/run/unbound/listen.conf' /config/unbound/unbound.conf; then
+    if [[ -n "$PEERS" ]] || [[ "${USE_DNS,,}" == "true" ]]; then
+        echo "**** NOTE: /config/unbound/unbound.conf predates the generated listen and access-control settings, so unbound keeps listening where that file says. Compare it with /defaults/unbound.conf, or delete it to get the current default on the next start. ****"
+    fi
+    if [[ -n "${PEERDNS_AUTO:-}" ]]; then
+        warn_if_subnet_outside_dns_acl "${INTERFACE}"
+    fi
+fi
+
 # let openresolv take control of resolv.conf
 resolvconf -a control 2>/dev/null < /etc/resolv.conf
 resolvconf -u
 
 # permissions
+harden_permissions
 lsiown -R abc:abc \
     /config
+
+echo "**** Config initialization finished ****"
