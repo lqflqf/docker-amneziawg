@@ -3,6 +3,12 @@
 
 USE_DNS="${USE_DNS,,}"
 
+# Tells /app/healthcheck what to expect: "disabled" (on purpose), "invalid"
+# (wanted but its config is broken, which is unhealthy) or "running".
+set_state() {
+    printf '%s\n' "$1" > /run/unbound-state
+}
+
 # Only a local listener means port 53 is taken; `netstat -apn | grep ":53 "`
 # also matched outgoing queries to some server's port 53.
 if [[ -z "${USE_DNS}" ]]; then
@@ -15,24 +21,29 @@ if [[ -z "${USE_DNS}" ]]; then
 fi
 
 if [[ "${USE_DNS}" == "false" ]]; then
+    set_state disabled
     s6-notifyoncheck -d -n 300 -w 10000 -c "echo **** Disabling unbound ****" \
         sleep infinity
 elif ! unbound-checkconf /config/unbound/unbound.conf; then
-    # Do not exec unboud with a config it will reject: s6 would restart-loop
-    # the service and bury the reason in the churn.
-    echo "**** /config/unbound/unbound.conf is not valid, unbound will not be started. Fix the errors above, or delete the file to restart the default on next start. ****"
+    # Do not exec unbound with a config it will reject: s6 would restart-loop
+    # the service and bury the reason in the churn. The tunnel still comes up,
+    # but the container reports unhealthy until the config is fixed.
+    set_state invalid
+    echo "**** /config/unbound/unbound.conf is not valid, unbound will not be started. Fix the errors above, or delete the file to restore the default on next start. ****"
     s6-notifyoncheck -d -n 300 -w 10000 -c "echo **** unbound config is invalid ****" \
         sleep infinity
 elif grep -q "health.amneziawg" /config/unbound/unbound.conf; then
+    set_state running
     # -d keeps unbound in the foreground, so s6 can supervise it. The config
-    # sets user-syslog/logfile so its output lands on stderr for docker logs.
+    # sets use-syslog: no so its output lands on stderr for docker logs.
     exec \
         s6-notifyoncheck -d -n 300 -w 10000 -c "redirfd -w 1 /dev/null nslookup health.amneziawg. 127.0.0.1" \
         unbound -d -c /config/unbound/unbound.conf
 else
+    set_state running
     # Without the health zone the probe above will never answer, leaving
     # svc-amneziawg waiting on the service forever. Probe the socket instead.
-    # Not localhost: it resolves to ::1 first and unbound listens on 0.0.0.0
+    # Not localhost: it resolves to ::1 first and unbound listens on 127.0.0.1
     exec \
         s6-notifyoncheck -d -n 300 -w 10000 -c "nc -zu 127.0.0.1 53" \
         unbound -d -c /config/unbound/unbound.conf

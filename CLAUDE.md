@@ -27,7 +27,7 @@ docker exec awg-test /app/show-peer 1
 docker rm -f awg-test && rm -rf /tmp/awg-test
 ```
 
-There is no unit test suite. CI runs `.github/scripts/smoke-test.sh <image>` on PRs (binaries, s6 services/types/dependencies, Unbound, branding, AWG 3.1/2.0 config generation); run it locally against `amneziawg-test` the same way. Each check must fail on its own — never `test ... && echo` (errexit ignores the left side of `&&`). CI also runs `.github/scripts/next-version.test.sh` and `.github/scripts/release-tags.test.sh`.
+There is no unit test suite. CI runs `.github/scripts/smoke-test.sh <image>` before every publish and on PRs (binaries, s6 services/types/dependencies, Unbound user/listeners, branding, AWG 3.1/2.0 config generation, and a stateful section on one persistent volume: file modes, unchanged restart, 2.0↔1.5 transitions, invalid pinned 3.x values, `SERVER_ALLOWEDIPS_PEER_*` changes, duplicate/removed peers, invalid `SERVERURL`, world-writable and unparseable templates); run it locally against `amneziawg-test` the same way (~1 min). Each check must fail on its own — never `test ... && echo` (errexit ignores the left side of `&&`). CI also runs `.github/scripts/next-version.test.sh` and `.github/scripts/release-tags.test.sh`.
 
 ## Architecture
 
@@ -35,9 +35,11 @@ There is no unit test suite. CI runs `.github/scripts/smoke-test.sh <image>` on 
 
 | Stage | Base | Output |
 |---|---|---|
-| `go-builder` | `golang:1.26.8-alpine` | `/src/amneziawg-go` (static binary, CGO) |
-| `tools-builder` | `alpine:3.24` | `/usr/bin/awg` (compiled C) + `/usr/bin/awg-quick` (bash script copied from `src/wg-quick/linux.bash`) |
-| runtime | `ghcr.io/linuxserver/baseimage-alpine:3.24` | Production image |
+| `go-builder` | `golang:1.26.8-alpine@sha256:…` | `/src/amneziawg-go` (static binary, CGO) |
+| `tools-builder` | `alpine:3.24.2@sha256:…` | `/usr/bin/awg` (compiled C) + `/usr/bin/awg-quick` (bash script copied from `src/wg-quick/linux.bash`) |
+| runtime | `ghcr.io/linuxserver/baseimage-alpine:3.24@sha256:…` | Production image |
+
+Every input is content-pinned: base images by digest (Dependabot `docker` ecosystem bumps them), builder `apk` packages by version, and each upstream tag by commit (`AMNEZIAWG_*_COMMIT`; the clone fails if the tag moved, empty = unchecked for ad-hoc overrides). The `awg-quick` sed patch is followed by a `grep` that fails the build if upstream changed the line.
 
 Runtime creates compatibility symlinks: `wg → awg`, `wg-quick → awg-quick`, `/etc/wireguard → /config/wg_confs`.
 
@@ -47,19 +49,25 @@ Runtime creates compatibility symlinks: `wg → awg`, `wg-quick → awg-quick`, 
 init-config (LSIO) → init-amneziawg-module (oneshot) → init-amneziawg-confs (oneshot) → svc-unbound (longrun) → svc-amneziawg (oneshot)
 ```
 
-- **init-amneziawg-module**: Tests kernel support via `ip link add dev test type amneziawg` (the amnezia module's rtnl link kind — awg-quick creates `type amneziawg`, not `type wireguard`). Falls back to `amneziawg-go` userspace (exports `WG_QUICK_USERSPACE_IMPLEMENTATION`).
-- **init-amneziawg-confs**: Config generation using eval+heredoc template expansion from `/config/templates/`. Server mode generates keys, wg0.conf, peer configs, QR codes. Client mode defaults `USE_DNS` to `false` (written to `container_environment`). Also seeds `/config/unbound/unbound.conf` and `root.key`.
-- **svc-unbound**: Longrun Unbound resolver (`/config/unbound/unbound.conf`) with `notification-fd 3` readiness via `s6-notifyoncheck` (an `nslookup` of the `health.amneziawg.` zone, or `nc -zu 127.0.0.1 53` if a custom config lacks it). Disabled by `USE_DNS=false`, or when `USE_DNS` is unset and something already listens on port 53 (`ss -l`, listeners only). An invalid config (`unbound-checkconf`) is not started rather than restart-looped. Disabling it in server mode breaks DNS for peers on `PEERDNS=auto`; set `PEERDNS` to a public resolver.
-- **svc-amneziawg**: Oneshot service (up/down scripts). Validates `[Interface]` in each .conf, activates tunnels, saves active confs to `/run/activeconfs` via `declare -p`. If a tunnel fails it tears the others down and exits 1 (the container keeps running). Finish script tears down in reverse order.
-- **HEALTHCHECK** (`/app/healthcheck`): healthy only if `/run/activeconfs` exists and every interface it lists is in `awg show interfaces`. `/run/activeconfs` is written only after all tunnels came up, so it doubles as the "VPN is up" marker.
+- **init-amneziawg-module**: Tests kernel support by creating a probe interface `awgprobe<pid>` of `type amneziawg` (the amnezia module's rtnl link kind — awg-quick creates `type amneziawg`, not `type wireguard`); it never touches an existing interface. Falls back to `amneziawg-go` userspace (writes `WG_QUICK_USERSPACE_IMPLEMENTATION` to `/run/s6/container_environment`, the s6-overlay v3 path `with-contenv` reads).
+- **init-amneziawg-confs**: Config generation using eval+heredoc template expansion from `/config/templates/`. Server mode generates keys, wg0.conf, peer configs, QR codes. Client mode defaults `USE_DNS` to `false` (written to `container_environment`). Also seeds `/config/unbound/unbound.conf` and `root.key`, writes `/run/unbound/listen.conf` (interfaces + ACL, see below), fixes modes (`harden_permissions`) and ends with `Config initialization finished` (the smoke test waits on it). Sets `umask 077` on its first line.
+- **svc-unbound**: Longrun Unbound resolver (`/config/unbound/unbound.conf`) with `notification-fd 3` readiness via `s6-notifyoncheck` (an `nslookup` of the `health.amneziawg.` zone, or `nc -zu 127.0.0.1 53` if a custom config lacks it). Disabled by `USE_DNS=false`, or when `USE_DNS` is unset and something already listens on port 53 (`ss -l`, listeners only). An invalid config (`unbound-checkconf`) is not started rather than restart-looped. Writes `/run/unbound-state` (`disabled`/`invalid`/`running`) for the healthcheck. The default config sets `username: "abc"` and `include: "/run/unbound/listen.conf"` (127.0.0.1 + `<subnet>.1` with `ip-freebind`, ACL = loopback + VPN /24). Existing user configs are never rewritten (a deliberate choice, see 5aa0803); they keep their own `interface`/`access-control`/`username`, and init logs a NOTE. Disabling it in server mode breaks DNS for peers on `PEERDNS=auto`; set `PEERDNS` to a public resolver.
+- **svc-amneziawg**: Oneshot service (up/down scripts). Validates `[Interface]` in each .conf, activates tunnels, saves active confs to `/run/activeconfs` via `declare -p`. If a tunnel fails it tears the others down and retries the set (3 attempts, 5s apart). If it still fails, or there is no conf at all, it removes every IPv4 and IPv6 default route in every table (`drop_default_routes`, fail closed) and exits 1 (the container keeps running). Finish script tears down in reverse order.
+- **HEALTHCHECK** (`/app/healthcheck`): healthy only if `/run/activeconfs` exists and every interface it lists is in `awg show interfaces`, and — per `/run/unbound-state` — Unbound is not `invalid` and, when `running`, answers `health.amneziawg.` on 127.0.0.1 (plus `HEALTHCHECK_DNS_NAME` if set). `/run/activeconfs` is written only after all tunnels came up, so it doubles as the "VPN is up" marker.
 
 Dependencies are declared via empty files in `dependencies.d/`. Services are registered via empty files in `user/contents.d/`.
 
 ### Config persistence
 
-All env vars are saved to `/config/.donoteditthisfile` (LinuxServer pattern) for change detection on restart. AWG obfuscation params are additionally saved to `/config/server/awg_params` and loaded as fallback (via `grep`/`cut`, NOT `source` — to preserve env var priority). Configs only regenerate if any saved var differs from the current value.
+Generation inputs are saved to `/config/.donoteditthisfile` as `ORIG_<NAME>="value"` lines for change detection. The list is `STATE_VARS` (server vars, every `AWG_PARAM_NAMES` entry, plus `SERVER_ALLOWEDIPS_ALL` — all `SERVER_ALLOWEDIPS_PEER_*`, sorted — and `TEMPLATES_HASH`, sha256 of both templates). **The file is parsed by `load_state` into the `ORIG` array, never sourced**: sourcing made any saved value (an auto-detected `SERVERURL` included) root code on the next start. Keys in `STATE_VARS_OPTIONAL` are skipped when absent from an older file so upgrades do not regenerate. AWG params are also saved to `/config/server/awg_params` and loaded by `load_awg_params` with `grep`/`cut` (never `source`), which records env-set names in `AWG_FROM_ENV`. `save_awg_params` and `save_vars` run only after a successful generation (or on an unchanged start), so a failed run never persists parameters for configs that do not exist.
 
-Regeneration is all-or-nothing: `generate_confs` renders into `/config/.awg-staging.*` (`render_confs`), checks every conf (`validate_confs`: one `[Interface]`, one `PrivateKey`, no empty `Key =` value), then moves the set into place (`install_confs`: `wg0.conf` first, pngs last). On any failure no live file changes, and `save_vars` is skipped so the next start retries. Keys are still created in place, since they are persistent identities. `generate_confs` sets `umask 077` because renamed-in files keep the mode they were created with.
+Regeneration is transactional: `generate_confs` renders into `/config/.awg-staging.*` (`render_confs`), checks every conf (`validate_confs`: the awk structural check plus `parse_check_conf`, which runs `awg-quick strip` + `awg setconf awgparsecheck` against a non-existent interface — "Unable to modify interface" means it parsed; Endpoint is swapped to 127.0.0.1 first so no DNS lookup happens), then moves the set into place (`install_confs`: `wg0.conf` first, pngs last, backing up each live file and restoring all of them via `rollback_install` if any move fails). Only then are QR codes logged (`LOG_CONFS=true` only) and removed peers archived. Generation is refused up front (`GENERATION_BLOCKED` / `AWG_PARAMS_INVALID`) for duplicate peers, >253 peers, an invalid `SERVERURL`/`SERVERPORT`/`INTERNAL_SUBNET`, failed IP auto-detection with no saved value, or a pinned 3.x S value < 12. Keys are created in place, since they are persistent identities. Activation failure after install is not rolled back.
+
+Peer addresses (`assign_peer_addresses`): an existing peer keeps the address in its conf (translated if `INTERNAL_SUBNET` changed); new peers take the lowest address not held by a *current* peer (exact match, not grep). Peers dropped from `PEERS` are moved to `/config/removed_peers/<id>-<timestamp>/` after a successful install (`archive_removed_peers`), freeing their address; re-adding the name makes a new identity.
+
+`SERVERURL=auto` uses `detect_public_ipv4` (HTTPS, `--max-time`, strict IPv4 validation, three services); on failure it reuses the saved `ORIG[SERVERURL]` or blocks generation. `SERVERURL` must be a host name, IPv4 or bracketed IPv6 (a bare IPv6 is bracketed).
+
+`check_template` refuses world-writable templates: they are eval'd as root. `/config` is a root-equivalent trust boundary anyway (`PostUp` in any `wg_confs/*.conf` runs as root), so do not describe templates as data. `harden_permissions` sets 700/600 on `server/`, `wg_confs/`, `peer*/` and `removed_peers/` but deliberately not on `templates/` (that would hide the mode `check_template` must see).
 
 ### Volume layout
 
@@ -71,6 +79,7 @@ Regeneration is all-or-nothing: `generate_confs` renders into `/config/.awg-stag
 ├── unbound/              # unbound.conf, root.key (DNSSEC trust anchor, rewritten by unbound)
 ├── peer1/                # numeric peer: peer1.conf, peer1.png, private/public/presharedkey-peer1
 ├── peer_laptop/          # named peer (PEERS=laptop,phone)
+├── removed_peers/        # peers dropped from PEERS: <id>-<timestamp>/
 └── .donoteditthisfile    # saved vars for change detection
 ```
 
@@ -84,8 +93,8 @@ Regeneration is all-or-nothing: `generate_confs` renders into `/config/.awg-stag
 
 ### Adding a new environment variable
 1. Set default in `init-amneziawg-confs/run` main logic section
-2. If persistent: add to `save_vars()` (as `ORIG_X`) AND the change detection `if` block
-3. For AWG params: also add to `generate_awg_params()` save block AND `load_awg_params()` grep section
+2. If it shapes the generated confs: add it to `STATE_VARS` (saved as `ORIG_X`, compared by `state_changed`). If it is new and older state files lack it, also add it to `STATE_VARS_OPTIONAL`
+3. For AWG params: add it to `AWG_PARAM_NAMES` (loaded, saved and change-detected from there), and to `AWG_VERSIONED_PARAMS` if its shape depends on `AWG_VERSION`
 4. For config output: add to templates in `root/defaults/` (eval+heredoc expanded), `append_awg_signatures()` (server conf — appends after template, before peer blocks), or `append_awg_signatures_to_interface()` (peer confs — inserts before `[Peer]` using awk)
 5. Document in `docker-compose.yml` (commented example) and `README.md`
 
@@ -97,7 +106,9 @@ All clients and server must use identical values. Key constraints:
 - Never compare `AWG_VERSION` against string literals — use the `awg_has_3x_params()` (3.0/3.1) and `awg_has_2x_features()` (2.0/3.0/3.1) predicates, so a new version only has to be added in one place
 - AWG 3.0 params live in `[Interface]` and are written by `append_awg3_params()` (server conf) / `append_awg3_params_to_interface()` (peer confs), generated by `generate_awg3_params()`. Timer values are `lo-hi` ranges and may differ per side; `HeaderProtectionKey` must be identical everywhere
 - AWG 3.1 adds two independent `[Interface]` booleans, `AWG_RANDOM_TRAILERS` and `AWG_DISABLE_COOKIES`, honoured with **any** `AWG_VERSION`. Written by `append_awg31_options()` / `append_awg31_options_to_interface()`, built by `awg31_options_block()`. Values pass through `normalize_awg_switch()`, which maps aliases to `on`/`off` and drops anything else with a warning (a bad value makes `awg setconf` reject the whole config). `AWG_VERSION=3.1` only defaults `AWG_RANDOM_TRAILERS` to `on`; `DisableCookies` is never enabled implicitly
-- Only the **explicitly set** switch values are persisted to `awg_params` (`_rt_explicit`/`_dc_explicit`), not the effective ones. A `RandomTrailers` that came from the `3.1` preset must not survive a downgrade to `2.0` — otherwise a user dropping back to fix an old client still emits a key that client cannot parse. Change detection in `.donoteditthisfile` still compares the *effective* values, so flipping the preset regenerates confs
+- Only the **explicitly set** switch values are persisted to `awg_params` (`AWG_RT_EXPLICIT`/`AWG_DC_EXPLICIT`), not the effective ones. A `RandomTrailers` that came from the `3.1` preset must not survive a downgrade to `2.0` — otherwise a user dropping back to fix an old client still emits a key that client cannot parse. Change detection in `.donoteditthisfile` still compares the *effective* values, so flipping the preset regenerates confs
+- When the saved `AWG_VERSION` differs from the requested one, `generate_awg_params` drops the saved `AWG_VERSIONED_PARAMS` (not env-set ones) so they are drawn for the new version; likewise saved unequal S1-S4 are dropped when `RandomTrailers` is on. Env-pinned values always win
+- A pinned S value < 12 under 3.x sets `AWG_PARAMS_INVALID` and refuses generation (amneziawg-go would reject the config); other constraint violations only warn
 - `awg31_options_block()` returns its block via the `BLOCK_OUT` variable, not stdout: command substitution strips trailing newlines, which would glue the last switch onto the following `[Peer]` line and break `awg setconf`
 - `check_awg31_kernel_support()` warns when the 3.1 switches are requested against a pre-3.1 host kernel module, read from `/sys/module/amneziawg/version`. Skipped when `WG_QUICK_USERSPACE_IMPLEMENTATION` is set, since the bundled `amneziawg-go` is a 3.1 build
 - `Jmin < Jmax`, `Jmax ≤ 1280`
@@ -121,16 +132,16 @@ All clients and server must use identical values. Key constraints:
 ### Workflows
 
 **`docker-build.yml`** — main build pipeline:
-- Jobs: `changes` (mode + image-path gate) → `version` → `build` → `release`. Only `Dockerfile`, `root/**`, `.dockerignore`, the workflow and `.github/scripts/` are image content; on the default branch the gate diffs against the **last release tag**, not the previous push, so an image change from a failed or superseded run is never lost. Manual runs always build
+- Jobs: `changes` (mode + image-path gate) → `version` → `smoke` → `build` → `release`. `smoke` runs in every mode (amd64 build, `smoke-test.sh`, Trivy failing on fixable CRITICALs) and `build` needs it. `build` first builds linux/arm64 alone (sharing the gha cache) and runs its binaries under QEMU, then pushes the multi-arch image with SLSA provenance (`mode=max`) and an SBOM; the "reuse existing image" check ignores `unknown/unknown` attestation manifests. Only `Dockerfile`, `root/**`, `.dockerignore`, the workflow and `.github/scripts/` are image content; on the default branch the gate diffs against the **last release tag**, not the previous push, so an image change from a failed or superseded run is never lost. Manual runs always build
 - Push to the default branch (or `workflow_dispatch` on it without overrides) = **release mode**: builds multi-arch (`amd64`, `arm64`), pushes `:<tools>-r<N>` (immutable), `:<tools>` and `:latest` (floating) and `:sha-<short>`, then creates the annotated git tag `v<tools>-r<N>` and a GitHub Release with the image digest. One release == one image
 - Publishing runs are serialized (`concurrency` group `…-publish`) because they claim the next `N`
-- PRs → smoke tests only (single-platform `--load` build, no multi-arch QEMU): binaries, s6 structure, service types, dependency chain, Unbound, branding, plus `.github/scripts/next-version.test.sh`
+- PRs → `smoke` only (single-platform build, no multi-arch QEMU), plus `.github/scripts/next-version.test.sh`
 - `workflow_dispatch` with `amneziawg_go_version`/`amneziawg_tools_version` overrides = **ad-hoc mode**: pushes only `:dispatch-<run>` (not `:sha-*`, which always means "built from this commit's pins"), never `latest`, a release tag, or a GitHub Release
 - There is no `v*` tag trigger — do not push `v*-r*` tags by hand, they *are* the build counter
 
 **`upstream-check.yml`** — daily upstream version check (06:00 UTC):
 - Compares `ARG` defaults in Dockerfile against latest amneziawg-tools and amneziawg-go releases
-- If new version detected: updates Dockerfile and opens a pull request; the build workflow runs on merge
+- If new version detected: resolves each new tag to a commit once, builds + smoke-tests with `update-pins.sh <tools> <tools-commit> <go> <go-commit>`, and opens a pull request pinning those commits, so the merged build verifies it compiles exactly what was tested
 
 ### Versioning
 
@@ -139,6 +150,7 @@ Releases are `<amneziawg-tools>-r<N>` (e.g. image `3.1.20260812-r2`, git tag/rel
 Both upstream versions are pinned as `ARG` defaults at the top of the Dockerfile (single source of truth):
 - `AMNEZIAWG_GO_VERSION` — amneziawg-go tag (e.g., `v0.2.16`)
 - `AMNEZIAWG_TOOLS_VERSION` — amneziawg-tools release (e.g., `v1.0.20260223`)
+- `AMNEZIAWG_GO_COMMIT` / `AMNEZIAWG_TOOLS_COMMIT` — the commit each tag must resolve to (recorded in `/build_version`)
 
 ## Common Gotchas
 
@@ -146,13 +158,13 @@ Both upstream versions are pinned as `ARG` defaults at the top of the Dockerfile
 - `awg-quick` is a bash script, not compiled — it's copied from upstream `src/wg-quick/linux.bash`
 - Exit code 137 on container stop is normal (SIGKILL), not an error
 - The Dockerfile patches `awg-quick` to skip setting `src_valid_mark` sysctl if already set
-- Do NOT use `source` to load `awg_params` — it overrides Docker env vars. Use `grep`/`cut` with `${VAR:-fallback}` pattern
+- Do NOT `source` `awg_params` or `.donoteditthisfile` — the first overrides Docker env vars, and both would execute saved values as root code. Use `load_awg_params` / `load_state`
 - Peer naming: numeric peers → `peer1`, `peer2`; named peers → `peer_laptop`, `peer_phone` (underscore prefix, matching LinuxServer)
 - `INTERFACE` is derived from `INTERNAL_SUBNET` (e.g., `10.13.13` from `10.13.13.0`) — not a separate env var
 - `svc-amneziawg` is a oneshot (not longrun) — tunnels stay up without a running process
 - Container branding: `root/etc/s6-overlay/s6-rc.d/init-adduser/branding` + `LSIO_FIRST_PARTY=false` in Dockerfile
 - I1-I5 must be in `[Interface]` in peer confs, not `[Peer]` — the Amnezia app only checks `[Interface]` for version detection. `append_awg_signatures_to_interface()` handles this via awk insertion before `[Peer]`. The server conf is fine with append since peer blocks haven't been added yet when signatures are written.
-- The container never writes `MTU`; `awg-quick` derives `route MTU − 80` = 1420, which ignores `S4` and fragments full-size packets when `S4 > 20` (IPv4) or on IPv6 endpoints. `ContentPaddingAddition`/transport `RandomTrailers` are capped at the observed UDP window (NOT the MTU — the window counts received datagrams too, so full-size sends grow slightly) and do not fragment transport packets; kernel modules built before `4569c4c6` (2026-09-06) appended trailers to I1-I5/junk packets too, producing rare oversized handshake-burst packets. That fix did not bump `version.h` — a patched module still reports `3.1.20260812` — so never gate on the date component of `/sys/module/amneziawg/version`; `check_awg31_kernel_support()` only reads the `3.1` major/minor, which is fine. See `docs/awg-performance.md`. README "MTU" is the user-facing guidance: 1280 for ordinary paths, `path − 60/80 − S4` when the path itself is constrained (a true 1280-byte path needs 1208/1188, not 1280).
+- The container never writes `MTU`; `awg-quick` derives `route MTU − 80` = 1420, which ignores `S4` and fragments full-size packets when `S4 > 20` (IPv4) or on IPv6 endpoints. `ContentPaddingAddition`/transport `RandomTrailers` are capped at the observed UDP window (NOT the MTU — the window counts received datagrams too, so full-size sends grow slightly) and do not fragment transport packets; kernel modules built before `4569c4c6` (2026-09-06) appended trailers to I1-I5/junk packets too, producing rare oversized handshake-burst packets. That fix did not bump `version.h` — a patched module still reports `3.1.20260812` — so never gate on the date component of `/sys/module/amneziawg/version`; `check_awg31_kernel_support()` only reads the `3.1` major/minor, which is fine. See `docs/awg-performance.md`. `docs/mtu.md` is the user-facing guidance: 1280 for ordinary paths, `path − 60/80 − S4` when the path itself is constrained (a true 1280-byte path needs 1208/1188, not 1280).
 - Custom `SERVERPORT` requires port mapping `SERVERPORT:51820/udp` (not `SERVERPORT:SERVERPORT/udp`) — the container always listens on 51820 internally regardless of `SERVERPORT`.
 - `SYS_MODULE` does NOT enable the kernel datapath. `init-amneziawg-module/run` never calls `modprobe` — it only probes whether the `amneziawg` module is already active on the host via `ip link add ... type amneziawg` (the amnezia module registers link kind `amneziawg`; a plain `wireguard` module is never used because `awg-quick` creates `type amneziawg` and otherwise falls back to userspace `amneziawg-go`). The init script even logs "you can remove the SYS_MODULE capability" once the module is active. Keep `SYS_MODULE` only on minimal hosts that don't auto-load iptables NAT modules. `/lib/modules:/lib/modules` bind mount is a no-op for this container.
 
@@ -160,12 +172,12 @@ Both upstream versions are pinned as `ARG` defaults at the top of the Dockerfile
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| Container `unhealthy` | A tunnel failed (look for `Tunnel ... failed` in the logs) or no valid conf in `/config/wg_confs/` | Fix the conf named in the log, or set `PEERS`, then restart |
-| `Config generation failed` in the log | Broken custom template in `/config/templates/`, or a key could not be created | Fix the reported error and restart; the previous configs stay in use meanwhile |
+| Container `unhealthy` | A tunnel failed (look for `Tunnel ... failed` in the logs), no valid conf in `/config/wg_confs/`, or Unbound is enabled but invalid/not answering | `docker exec <c> /app/healthcheck` prints the reason; fix it and restart |
+| `Config generation failed` in the log | Broken or world-writable custom template, a conf `awg` rejects, duplicate peers, invalid `SERVERURL`/`SERVERPORT`/`INTERNAL_SUBNET`, failed IP auto-detection on a fresh install, or a pinned 3.x S value < 12 | Fix the reported error and restart; the previous configs stay in use meanwhile |
 | Permission denied / `RTNETLINK answers: Operation not permitted` | Missing `NET_ADMIN` | Add `cap_add: NET_ADMIN`. `SYS_MODULE` is not needed (see Gotchas) |
 | Custom `SERVERPORT` unreachable | Port mapped as `SERVERPORT:SERVERPORT/udp` | Map `SERVERPORT:51820/udp` |
 | Amnezia app shows AWG 1.5 | H1-H4 are single integers | Use AWG 2.0 range values (the default) |
 | Connection fails after a parameter change | Peers still hold the old values | Redistribute the regenerated peer confs |
 | Peers get no DNS | Unbound disabled (`USE_DNS=false`, or port 53 already taken) while `PEERDNS=auto` | Set `PEERDNS=1.1.1.1`, or free port 53 / set `USE_DNS=true` |
-| Connects, pings fine, downloads crawl | Full-size packets fragment (`S4`, MTU) or unequal S with `RandomTrailers` | See README "MTU" and `docs/awg-performance.md` |
+| Connects, pings fine, downloads crawl | Full-size packets fragment (`S4`, MTU) or unequal S with `RandomTrailers` | See `docs/mtu.md` and `docs/awg-performance.md` |
 | High CPU | Many junk packets | Lower `AWG_JC` |

@@ -1,10 +1,46 @@
 #!/usr/bin/with-contenv bash
 # shellcheck shell=bash
 
+# Attempts before giving up on the tunnel set; a failure caused by something
+# transient (the host still bringing up its network, a busy netlink) should not
+# need a container restart.
+ATTEMPTS=3
+RETRY_DELAY=5
+
 unset AWG_CONFS
 rm -rf /run/activeconfs
+
+# Fail closed: with no tunnel up, remove every default route (IPv4 and IPv6, in
+# every routing table) so nothing in this network namespace reaches the
+# internet outside the VPN, and stop accepting router advertisements, which
+# would add an IPv6 default route back.
+drop_default_routes() {
+    local family route f
+    for f in /proc/sys/net/ipv6/conf/*/accept_ra; do
+        { echo 0 > "${f}"; } 2>/dev/null || :
+    done
+    for family in -4 -6; do
+        while IFS= read -r route; do
+            [[ -n "${route}" ]] || continue
+            # "expires 1789sec" (RA-learned routes) is printed but not accepted
+            # back by ip route del.
+            route=$(sed -E 's/ expires [0-9]+sec//' <<<"${route}")
+            # shellcheck disable=SC2086 # the route spec is several words
+            ip "${family}" route del ${route} 2>/dev/null || :
+        done < <(ip "${family}" route show default table all 2>/dev/null)
+    done
+    if [[ -n "$(ip -4 route show default table all 2>/dev/null)$(ip -6 route show default table all 2>/dev/null)" ]]; then
+        echo "**** WARNING: some default routes could not be removed: ****"
+        ip -4 route show default table all 2>/dev/null
+        ip -6 route show default table all 2>/dev/null
+    else
+        echo "**** Removed the default routes, no traffic leaves this container outside a tunnel ****"
+    fi
+}
+
 # Enumerate interfaces
 for awgconf in /config/wg_confs/*.conf; do
+    [[ -f "${awgconf}" ]] || continue
     if grep -q "\[Interface\]" "${awgconf}"; then
         echo "**** Found AWG conf ${awgconf}, adding to list ****"
         AWG_CONFS+=("${awgconf}")
@@ -15,36 +51,43 @@ done
 
 if [[ -z "${AWG_CONFS[*]}" ]]; then
     echo "**** No valid tunnel config found. Please create a valid config and restart the container ****"
-    ip route del default
-    exit 0
+    drop_default_routes
+    # Fail the oneshot so s6 shows svc-amneziawg as down, like a failed tunnel.
+    exit 1
 fi
 
-unset FAILED
-for tunnel in "${AWG_CONFS[@]}"; do
-    echo "**** Activating tunnel ${tunnel} ****"
-    if ! awg-quick up "${tunnel}"; then
-        FAILED="${tunnel}"
-        break
+for (( attempt = 1; attempt <= ATTEMPTS; attempt++ )); do
+    unset FAILED
+    UP=()
+    for tunnel in "${AWG_CONFS[@]}"; do
+        echo "**** Activating tunnel ${tunnel} ****"
+        if ! awg-quick up "${tunnel}"; then
+            FAILED="${tunnel}"
+            break
+        fi
+        UP+=("${tunnel}")
+    done
+
+    if [[ -z "${FAILED}" ]]; then
+        declare -p AWG_CONFS > /run/activeconfs
+        echo "**** All tunnels are now active ****"
+        exit 0
+    fi
+
+    echo "**** Tunnel ${FAILED} failed, will stop all others! ****"
+    for (( k = ${#UP[@]} - 1; k >= 0; k-- )); do
+        echo "**** Disabling tunnel ${UP[k]} ****"
+        awg-quick down "${UP[k]}" || :
+    done
+    if (( attempt < ATTEMPTS )); then
+        echo "**** Retrying in ${RETRY_DELAY}s (attempt $((attempt + 1)) of ${ATTEMPTS}) ****"
+        sleep "${RETRY_DELAY}"
     fi
 done
 
-if [[ -z "${FAILED}" ]]; then
-    declare -p AWG_CONFS > /run/activeconfs
-    echo "**** All tunnels are now active ****"
-else
-    echo "**** Tunnel ${FAILED} failed, will stop all others! ****"
-    for tunnel in "${AWG_CONFS[@]}"; do
-        if [[ "${tunnel}" = "${FAILED}" ]]; then
-            break
-        else
-            echo "**** Disabling tunnel ${tunnel} ****"
-            awg-quick down "${tunnel}" || :
-        fi
-    done
-    ip route del default
-    echo "**** All tunnels are now down. Please fix the tunnel config ${FAILED} and restart the container ****"
-    # Fail the oneshot so s6 shows svc-amneziawg as down. The container keeps
-    # running (S6_BEHAVIOUR_IF_STAGE2_FAILS is unset), and the HEALTHCHECK
-    # reports it unhealthy because /run/activeconfs was never written.
-    exit 1
-fi
+drop_default_routes
+echo "**** All tunnels are now down. Please fix the tunnel config ${FAILED} and restart the container ****"
+# Fail the oneshot so s6 shows svc-amneziawg as down. The container keeps
+# running (S6_BEHAVIOUR_IF_STAGE2_FAILS is unset), and the HEALTHCHECK
+# reports it unhealthy because /run/activeconfs was never written.
+exit 1

@@ -134,13 +134,13 @@ Also check the client actually supports 3.1 — an AmneziaVPN app or `amneziawg`
 
 ## QR code not in logs
 
-`LOG_CONFS=true` must be set. By default it's `true`, but if the user disabled it:
+QR codes are only logged with `LOG_CONFS=true` (default `false`, because a QR code contains the peer's private key). Show one on demand instead:
 
 ```bash
 docker exec amneziawg /app/show-peer <peer-name>
 ```
 
-This works without `LOG_CONFS` and prints both the conf and a terminal QR.
+This works without `LOG_CONFS`; it prints a terminal QR and the path of the conf file.
 
 ## Logs say "Generating configs..." but then nothing
 

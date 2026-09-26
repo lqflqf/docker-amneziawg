@@ -31,13 +31,13 @@ services:
       # ---- Server Mode Configuration ----
       # Uncomment and configure for server mode
       # - SERVERURL=auto                    # External URL/IP (or 'auto' to detect)
-      # - SERVERPORT=51820                  # Listen port
+      # - SERVERPORT=51820                  # Port advertised to peers; map it as SERVERPORT:51820/udp (the container always listens on 51820)
       # - PEERS=3                           # Number or names: 3 or laptop,phone,tablet
       # - PEERDNS=auto                      # DNS for peers (auto = container's unbound; or specific: 8.8.8.8, 8.8.4.4)
       # - INTERNAL_SUBNET=10.13.13.0        # VPN subnet
       # - ALLOWEDIPS=0.0.0.0/0, ::/0        # Allowed IPs for peers
       # - PERSISTENTKEEPALIVE_PEERS=all     # Which peers get keepalive (all or comma-separated)
-      # - LOG_CONFS=true                    # Show QR codes in logs
+      # - LOG_CONFS=false                   # true prints QR codes (they contain private keys) to the logs; use /app/show-peer instead
 
       # ---- Per-peer server AllowedIPs (site-to-site VPN) ----
       # - SERVER_ALLOWEDIPS_PEER_laptop=192.168.1.0/24
@@ -52,11 +52,11 @@ services:
       # - AWG_S1=86                         # Init packet padding
       # - AWG_S2=12                         # Response packet padding
       # - AWG_S3=50                         # Cookie message padding (AWG 2.0, random if unset)
-      # - AWG_S4=50                         # Transport packet padding (random if unset: 4-20 in 2.0, 12-20 in 3.x, 0 in 1.5). Adds to every datagram on top of the 1420 default MTU — see README "MTU" for choosing a tunnel MTU (1280 on ordinary paths; constrained paths need path − 60/80 − S4)
-      # - AWG_H1=1755269708                 # Header obfuscation
-      # - AWG_H2=2101520157                 # Header obfuscation
-      # - AWG_H3=1829552136                 # Header obfuscation
-      # - AWG_H4=2016351429                 # Header obfuscation
+      # - AWG_S4=16                         # Transport packet padding, keep <= 20 (random if unset: 4-20 in 2.0, 12-20 in 3.x, 0 in 1.5). Adds to every datagram on top of the 1420 default MTU — see README "MTU" for choosing a tunnel MTU (1280 on ordinary paths; constrained paths need path − 60/80 − S4)
+      # - AWG_H1=90666522-140666522          # Header obfuscation: non-overlapping ranges in 2.0+
+      # - AWG_H2=623045912-673045912        # (single integers make the Amnezia app report AWG 1.5;
+      # - AWG_H3=1210341563-1260341563      #  use integers only with AWG_VERSION=1.5)
+      # - AWG_H4=1820577390-1870577390
 
       # ---- AWG 2.0 Signature Packets (Advanced - leave empty for standard mode) ----
       # - AWG_I1=<b 0x170303><r 2><b 0x0100><t>  # TLS-like signature
@@ -83,6 +83,7 @@ services:
 
       # ---- use internal DNS resolver ----
       # - USE_DNS=true                  # Enable internal DNS resolver (unbound)
+      # - HEALTHCHECK_DNS_NAME=example.com  # Also report unhealthy when unbound cannot resolve this name
     volumes:
       - ./config:/config
     ports:
@@ -114,7 +115,6 @@ services:
 #       - INTERNAL_SUBNET=10.13.13.0
 #       - ALLOWEDIPS=0.0.0.0/0, ::/0
 #       - PERSISTENTKEEPALIVE_PEERS=all
-#       - LOG_CONFS=true
 #     volumes:
 #       - ./config:/config
 #     ports:

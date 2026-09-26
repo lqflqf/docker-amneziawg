@@ -50,13 +50,18 @@ When using this Docker image:
 
 ## Security Features
 
-This image includes several security enhancements:
+- **Minimal attack surface**: Alpine Linux base, base images pinned by digest and upstream sources pinned by commit; images carry SLSA provenance and an SBOM, and CI fails on fixable critical vulnerabilities
+- **Secrets stay private**: keys, peer confs, QR codes and the saved AWG parameters are created mode `600` in `700` directories. QR codes (which contain private keys) are only written to the logs when `LOG_CONFS=true`
+- **Least privilege for DNS**: on new installs Unbound drops to the unprivileged `abc` user after binding, and only listens on loopback and the tunnel address, answering the VPN subnet only
+- **Fail closed**: if no tunnel comes up, every IPv4 and IPv6 default route is removed and the container reports `unhealthy`
+- **Validated configs**: generated configs are checked by `awg`'s own parser and installed transactionally; auto-detected addresses are fetched over HTTPS and validated
+- **AmneziaWG obfuscation**: built-in traffic obfuscation to evade detection
 
-- **Minimal Attack Surface**: Based on Alpine Linux with minimal packages
-- **Non-Root Execution**: Runs with appropriate user privileges
-- **Static Binary**: Uses statically compiled Go binary to avoid library vulnerabilities
-- **Graceful Shutdown**: Properly handles termination signals
-- **AmneziaWG Obfuscation**: Built-in traffic obfuscation to evade detection
+The container itself runs as root: it needs `NET_ADMIN` to create interfaces and firewall rules.
+
+### Trust boundary: `/config`
+
+Treat write access to the `/config` volume as root access to the container. `PostUp`/`PostDown` lines in any conf under `/config/wg_confs/` run as root, and the templates in `/config/templates/` are shell heredocs expanded as root. The container refuses world-writable templates, but anyone who can write the volume as its owner can run code. Keep the volume owned by `PUID` and not writable by other users.
 
 ## Vulnerability Response
 

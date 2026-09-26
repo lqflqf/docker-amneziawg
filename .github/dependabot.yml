@@ -11,3 +11,16 @@ updates:
           - "*"
     commit-message:
       prefix: chore
+
+  # Base images are pinned by tag and digest; this bumps the digest when the
+  # tag is rebuilt (security fixes in the base) and the tag within its series.
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      base-images:
+        patterns:
+          - "*"
+    commit-message:
+      prefix: chore

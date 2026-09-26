@@ -108,8 +108,9 @@ jobs:
             exit 0
           }
 
-          # Manual runs always build: that is how a base-image refresh of an
-          # unchanged commit gets released.
+          # Manual runs always build. Base images are pinned by digest, so a
+          # base-image refresh arrives as a (Dependabot) Dockerfile change; a
+          # manual run rebuilds the same pins, e.g. to retry a release.
           [[ "$EVENT" == "workflow_dispatch" ]] && decide true "yes (manual run)"
 
           if [[ "$MODE" == "pr" ]]; then
@@ -159,6 +160,8 @@ jobs:
     outputs:
       amneziawg_go: ${{ steps.versions.outputs.amneziawg_go }}
       amneziawg_tools: ${{ steps.versions.outputs.amneziawg_tools }}
+      amneziawg_go_commit: ${{ steps.versions.outputs.amneziawg_go_commit }}
+      amneziawg_tools_commit: ${{ steps.versions.outputs.amneziawg_tools_commit }}
       tools_version: ${{ steps.versions.outputs.tools_version }}
       version: ${{ steps.versions.outputs.version }}
     steps:
@@ -187,6 +190,12 @@ jobs:
           # workflow_dispatch inputs take precedence; otherwise read the pins from the Dockerfile
           AWG_GO="${GO_INPUT:-$(grep '^ARG AMNEZIAWG_GO_VERSION=' Dockerfile | cut -d= -f2)}"
           AWG_TOOLS="${TOOLS_INPUT:-$(grep '^ARG AMNEZIAWG_TOOLS_VERSION=' Dockerfile | cut -d= -f2)}"
+          # The commit pins belong to the pinned versions; an override is an
+          # ad-hoc build of whatever the tag points at, so it verifies nothing.
+          GO_COMMIT=""
+          TOOLS_COMMIT=""
+          [[ -z "$GO_INPUT" ]] && GO_COMMIT=$(grep '^ARG AMNEZIAWG_GO_COMMIT=' Dockerfile | cut -d= -f2)
+          [[ -z "$TOOLS_INPUT" ]] && TOOLS_COMMIT=$(grep '^ARG AMNEZIAWG_TOOLS_COMMIT=' Dockerfile | cut -d= -f2)
           if [[ -z "$AWG_GO" || -z "$AWG_TOOLS" ]]; then
             echo "::error::Could not resolve upstream versions (go: '${AWG_GO}', tools: '${AWG_TOOLS}')"
             exit 1
@@ -215,21 +224,23 @@ jobs:
           {
             echo "amneziawg_go=${AWG_GO}"
             echo "amneziawg_tools=${AWG_TOOLS}"
+            echo "amneziawg_go_commit=${GO_COMMIT}"
+            echo "amneziawg_tools_commit=${TOOLS_COMMIT}"
             echo "tools_version=${TOOLS_VERSION}"
             echo "version=${VERSION}"
           } >> "$GITHUB_OUTPUT"
           {
             echo "## Build versions"
             echo "- image: \`${VERSION}\` (${MODE}${REUSED:+, reused by re-run: ${REUSED}})"
-            echo "- amneziawg-go: \`${AWG_GO}\`"
-            echo "- amneziawg-tools: \`${AWG_TOOLS}\`"
+            echo "- amneziawg-go: \`${AWG_GO}\` ${GO_COMMIT:+(\`${GO_COMMIT}\`)}"
+            echo "- amneziawg-tools: \`${AWG_TOOLS}\` ${TOOLS_COMMIT:+(\`${TOOLS_COMMIT}\`)}"
           } >> "$GITHUB_STEP_SUMMARY"
 
-  # Pull requests: build one platform locally and smoke-test it. Kept apart
-  # from `build` so PR runs never hold a package-write token.
+  # Every run: build one platform locally, smoke-test it and scan it. Nothing is
+  # published unless this passes. Kept apart from `build` so it never holds a
+  # package-write token.
   smoke:
     needs: [changes, version]
-    if: needs.changes.outputs.mode == 'pr'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
@@ -242,18 +253,33 @@ jobs:
           IMAGE_VERSION: ${{ needs.version.outputs.version }}
           AWG_GO: ${{ needs.version.outputs.amneziawg_go }}
           AWG_TOOLS: ${{ needs.version.outputs.amneziawg_tools }}
+          AWG_GO_COMMIT: ${{ needs.version.outputs.amneziawg_go_commit }}
+          AWG_TOOLS_COMMIT: ${{ needs.version.outputs.amneziawg_tools_commit }}
         run: |
           docker build -t test-image \
             --build-arg VERSION="$IMAGE_VERSION" \
             --build-arg AMNEZIAWG_GO_VERSION="$AWG_GO" \
+            --build-arg AMNEZIAWG_GO_COMMIT="$AWG_GO_COMMIT" \
             --build-arg AMNEZIAWG_TOOLS_VERSION="$AWG_TOOLS" \
+            --build-arg AMNEZIAWG_TOOLS_COMMIT="$AWG_TOOLS_COMMIT" \
             .
 
       - name: Smoke tests
         run: .github/scripts/smoke-test.sh test-image
 
+      # Fails on critical vulnerabilities that already have a fix, so a
+      # release never ships one that a rebuild would remove.
+      - name: Vulnerability scan
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: test-image
+          format: table
+          severity: CRITICAL
+          ignore-unfixed: true
+          exit-code: '1'
+
   build:
-    needs: [changes, version]
+    needs: [changes, version, smoke]
     if: needs.changes.outputs.mode != 'pr'
     runs-on: ubuntu-latest
     permissions:
@@ -329,8 +355,9 @@ jobs:
           fi
           # The earlier attempt may have died mid-push: only reuse a complete
           # multi-arch index.
+          # Attestation manifests are listed as unknown/unknown; skip them.
           PLATFORMS=$(docker buildx imagetools inspect "$REF" --raw \
-            | jq -r '[.manifests[]?.platform | select(. != null) | "\(.os)/\(.architecture)"] | sort | join(",")')
+            | jq -r '[.manifests[]?.platform | select(. != null and .os != "unknown") | "\(.os)/\(.architecture)"] | sort | join(",")')
           if [[ "$PLATFORMS" != "linux/amd64,linux/arm64" ]]; then
             echo "::error::${REF} was pushed by this run but has platforms '${PLATFORMS}', expected linux/amd64,linux/arm64. Delete the image tag and re-run."
             exit 1
@@ -361,6 +388,40 @@ jobs:
             org.opencontainers.image.version=${{ env.IMAGE_VERSION }}
             io.github.actions.run-id=${{ github.run_id }}
 
+      # The smoke job only ran amd64. Build arm64 on its own first (the layers
+      # land in the cache the multi-arch push below reuses) and check that its
+      # binaries actually run, so a broken arm64 image is never published.
+      - name: Build linux/arm64 for a runtime check
+        if: steps.existing.outputs.digest == ''
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
+        with:
+          context: .
+          platforms: linux/arm64
+          load: true
+          tags: arm64-check
+          cache-from: type=gha,scope=${{ github.workflow }}
+          cache-to: type=gha,mode=max,scope=${{ github.workflow }}
+          build-args: |
+            VERSION=${{ env.IMAGE_VERSION }}
+            AMNEZIAWG_GO_VERSION=${{ needs.version.outputs.amneziawg_go }}
+            AMNEZIAWG_GO_COMMIT=${{ needs.version.outputs.amneziawg_go_commit }}
+            AMNEZIAWG_TOOLS_VERSION=${{ needs.version.outputs.amneziawg_tools }}
+            AMNEZIAWG_TOOLS_COMMIT=${{ needs.version.outputs.amneziawg_tools_commit }}
+          provenance: false
+          sbom: false
+
+      - name: Runtime check (linux/arm64)
+        if: steps.existing.outputs.digest == ''
+        run: |
+          docker run --rm --platform linux/arm64 --entrypoint /bin/bash arm64-check -euc '
+            awg --version
+            amneziawg-go --version
+            unbound -V | head -n1
+            test "$(uname -m)" = aarch64
+            awg genkey | awg pubkey >/dev/null
+            bash -n /etc/s6-overlay/s6-rc.d/init-amneziawg-confs/run
+          '
+
       - name: Build and push
         id: push
         if: steps.existing.outputs.digest == ''
@@ -377,10 +438,13 @@ jobs:
             BUILD_DATE=${{ github.event.repository.updated_at }}
             VERSION=${{ env.IMAGE_VERSION }}
             AMNEZIAWG_GO_VERSION=${{ needs.version.outputs.amneziawg_go }}
+            AMNEZIAWG_GO_COMMIT=${{ needs.version.outputs.amneziawg_go_commit }}
             AMNEZIAWG_TOOLS_VERSION=${{ needs.version.outputs.amneziawg_tools }}
+            AMNEZIAWG_TOOLS_COMMIT=${{ needs.version.outputs.amneziawg_tools_commit }}
             BUILDKIT_INLINE_CACHE=1
-          provenance: false
-          sbom: false
+          # SLSA provenance and an SBOM are attached to the image index.
+          provenance: mode=max
+          sbom: true
 
       # A push of several tags is not atomic: the earlier attempt may have
       # published <tools>-r<N> but not the aliases. Point every alias at the
