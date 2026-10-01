@@ -5,7 +5,9 @@
 #
 # Every check must fail the script on its own. Do not write `test ... && echo`:
 # a failing left side of && is exempt from errexit, so only the last line of a
-# group would count.
+# group would count. Do not pipe into `grep -q` either: it exits at the first
+# match, the writer can die of SIGPIPE, and pipefail fails the pipeline. Use
+# grep -q ... <<<"$(cmd)".
 set -euo pipefail
 
 image="${1:?usage: smoke-test.sh <image>}"
@@ -238,7 +240,7 @@ if [[ -n "$(foreign_listeners 10.56.56.1 "$listeners")" ]]; then
 fi
 dx grep -qx 'DNS = 10.56.56.1' /config/peer1/peer1.conf \
     || { echo "peer DNS is not the tunnel address"; dx cat /config/peer1/peer1.conf; exit 1; }
-if dx iptables -S | grep -q -- 'dport 53'; then
+if grep -q -- 'dport 53' <<<"$(dx iptables -S)"; then
     echo "DNS is restricted by dnsmasq's interface=, not by firewall rules:"; dx iptables -S; exit 1
 fi
 old_pid=$(dx pgrep -x dnsmasq)
@@ -596,11 +598,11 @@ else
     [[ "$(docker exec "$cli" awg show wg0 latest-handshakes | awk '{print $2}')" != 0 ]] || e2e_fail "no handshake"
     healthy "$cli" || e2e_fail "client is not healthy"
     docker exec "$cli" grep -qx 'nameserver 10.58.58.1' /etc/resolv.conf || e2e_fail "client resolver is not the tunnel address"
-    docker exec "$cli" nslookup -type=a upstream.test | grep -q '192.0.2.53' \
+    grep -q '192.0.2.53' <<<"$(docker exec "$cli" nslookup -type=a upstream.test)" \
         || e2e_fail "client -> tunnel -> dnsmasq -> upstream lookup failed"
-    docker exec "$cli" nslookup -type=a edit.test | grep -q '192.0.2.7' \
+    grep -q '192.0.2.7' <<<"$(docker exec "$cli" nslookup -type=a edit.test)" \
         || e2e_fail "a record from the edited dnsmasq template does not resolve"
-    docker exec "$cli" ip route get 1.1.1.1 | grep -q 'dev wg0' || e2e_fail "client traffic does not use the tunnel"
+    grep -q 'dev wg0' <<<"$(docker exec "$cli" ip route get 1.1.1.1)" || e2e_fail "client traffic does not use the tunnel"
     listeners=$(docker exec "$srv" ss -Hlntu 'sport = :53')
     if [[ -n "$(foreign_listeners 10.58.58.1 "$listeners")" ]] || ! grep -q '10.58.58.1:53 ' <<<"$listeners"; then
         e2e_fail "server dnsmasq should listen on 10.58.58.1 and loopback only: $listeners"
