@@ -1,11 +1,12 @@
 #!/bin/bash
 # Docker HEALTHCHECK: healthy only while every tunnel svc-amneziawg brought up
-# still exists and, when unbound is meant to run, it answers. svc-amneziawg
-# writes /run/activeconfs only after all tunnels came up, so a missing file
-# covers both "no valid config" and "a tunnel failed".
+# still exists and, in server mode, dnsmasq is running and answers on the
+# tunnel address.
+# svc-amneziawg writes /run/activeconfs only after all tunnels came up, so a
+# missing file covers both "no valid config" and "a tunnel failed".
 #
-# Set HEALTHCHECK_DNS_NAME (e.g. example.com) to also require that unbound can
-# resolve a real name, which proves its DNS-over-TLS upstream is reachable.
+# Set HEALTHCHECK_DNS_NAME (e.g. example.com) to also require that dnsmasq can
+# resolve a real name, which proves its upstream is reachable.
 
 if [[ ! -f /run/activeconfs ]]; then
     echo "no active tunnels"
@@ -23,26 +24,38 @@ for conf in "${AWG_CONFS[@]}"; do
     fi
 done
 
-case "$(cat /run/unbound-state 2>/dev/null)" in
-    invalid)
-        echo "unbound is enabled but /config/unbound/unbound.conf is invalid"
+# Server mode (PEERS set) needs dnsmasq answering; anything but "running"
+# (invalid, missing, or svc-dnsmasq never ran) is unhealthy. Client mode runs
+# no DNS, so the state is not checked there.
+if [[ -n "${PEERS:-}" ]]; then
+    state=$(cat /run/dnsmasq-state 2>/dev/null)
+    case "${state}" in
+        running)
+            ;;
+        invalid)
+            echo "dnsmasq has no valid config, see the container log"
+            exit 1
+            ;;
+        *)
+            echo "dnsmasq is not running (state: ${state:-none})"
+            exit 1
+            ;;
+    esac
+    # Query the tunnel address peers use, not loopback: dnsmasq can be alive
+    # without having bound wg0's address.
+    listen=$(cat /run/dnsmasq/address 2>/dev/null)
+    if ! ip -4 -o addr show dev wg0 2>/dev/null | grep -q " ${listen}/"; then
+        echo "the tunnel address ${listen:-(unknown)} is not on wg0"
         exit 1
-        ;;
-    running)
-        if grep -q "health.amneziawg" /config/unbound/unbound.conf 2>/dev/null; then
-            if ! nslookup health.amneziawg. 127.0.0.1 >/dev/null 2>&1; then
-                echo "unbound does not answer on 127.0.0.1"
-                exit 1
-            fi
-        elif ! pgrep -x unbound >/dev/null; then
-            echo "unbound is not running"
-            exit 1
-        fi
-        if [[ -n "${HEALTHCHECK_DNS_NAME:-}" ]] && ! nslookup "${HEALTHCHECK_DNS_NAME}" 127.0.0.1 >/dev/null 2>&1; then
-            echo "unbound cannot resolve ${HEALTHCHECK_DNS_NAME}"
-            exit 1
-        fi
-        ;;
-esac
+    fi
+    if ! nslookup -type=a health.amneziawg. "${listen}" >/dev/null 2>&1; then
+        echo "dnsmasq does not answer on ${listen}"
+        exit 1
+    fi
+    if [[ -n "${HEALTHCHECK_DNS_NAME:-}" ]] && ! nslookup "${HEALTHCHECK_DNS_NAME}" "${listen}" >/dev/null 2>&1; then
+        echo "dnsmasq cannot resolve ${HEALTHCHECK_DNS_NAME}"
+        exit 1
+    fi
+fi
 
 echo "tunnels up: ${ACTIVE[*]}"

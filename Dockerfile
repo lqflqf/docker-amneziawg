@@ -87,6 +87,7 @@ RUN \
   apk add --no-cache \
     bc=1.08.2-r1 \
     ca-certificates-bundle=20260909-r0 \
+    dnsmasq=2.92_p2-r0 \
     grep=3.12-r0 \
     iproute2=7.0.0-r0 \
     iptables=1.8.13-r0 \
@@ -97,9 +98,7 @@ RUN \
     libqrencode-tools=4.1.1-r3 \
     net-tools=2.10-r3 \
     nftables=1.1.6-r1 \
-    openresolv=3.17.4-r0 \
-    unbound=1.25.2-r2 && \
-  echo "wireguard" >> /etc/modules && \
+    openresolv=3.17.4-r0 && \
   echo "**** cleanup ****" && \
   rm -rf \
     /tmp/*
@@ -109,11 +108,7 @@ COPY --from=go-builder /src/amneziawg-go /usr/bin/
 COPY --from=tools-builder /tools-install/usr/bin/awg /usr/bin/
 COPY --from=tools-builder /tools-install/usr/bin/awg-quick /usr/bin/
 
-# Create symlinks for WireGuard compatibility
-RUN \
-  ln -sf /usr/bin/awg /usr/bin/wg && \
-  ln -sf /usr/bin/awg-quick /usr/bin/wg-quick && \
-  chmod +x /usr/bin/awg /usr/bin/awg-quick /usr/bin/amneziawg-go
+RUN chmod +x /usr/bin/awg /usr/bin/awg-quick /usr/bin/amneziawg-go
 
 # Apply awg-quick sysctl patch to avoid errors when sysctl is already set.
 # sed succeeds on zero matches, so check the patch took: an upstream change to
@@ -121,11 +116,6 @@ RUN \
 RUN sed -i 's|\[\[ $proto == -4 \]\] && cmd sysctl -q net\.ipv4\.conf\.all\.src_valid_mark=1|[[ $proto == -4 ]] \&\& [[ $(sysctl -n net.ipv4.conf.all.src_valid_mark) != 1 ]] \&\& cmd sysctl -q net.ipv4.conf.all.src_valid_mark=1|' /usr/bin/awg-quick && \
   grep -qF '[[ $(sysctl -n net.ipv4.conf.all.src_valid_mark) != 1 ]]' /usr/bin/awg-quick || \
   { echo "awg-quick src_valid_mark patch did not apply" >&2; exit 1; }
-
-# Create symlink for /etc/wireguard -> /config/wg_confs
-RUN \
-  rm -rf /etc/wireguard && \
-  ln -s /config/wg_confs /etc/wireguard
 
 # write build version info
 RUN \

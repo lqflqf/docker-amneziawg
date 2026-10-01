@@ -1,0 +1,27 @@
+#!/usr/bin/with-contenv bash
+# shellcheck shell=bash
+
+BASE=/run/dnsmasq/base.conf
+
+# Tells /app/healthcheck what to expect: "disabled" (client mode), "invalid"
+# (server mode but no usable config, which is unhealthy) or "running".
+set_state() {
+    printf '%s\n' "$1" > /run/dnsmasq-state
+}
+
+if [[ -z "${PEERS}" ]]; then
+    set_state disabled
+    exec sleep infinity
+fi
+
+# Do not exec dnsmasq with a config it will reject: s6 would restart-loop the
+# service and bury the reason in the churn. The tunnel still comes up, but the
+# container reports unhealthy until the config is fixed.
+if [[ ! -f "${BASE}" ]] || [[ ! -f /config/dnsmasq/dnsmasq.conf ]] || ! dnsmasq --test -C "${BASE}"; then
+    set_state invalid
+    echo "**** No valid dnsmasq config, dnsmasq will not be started. See the errors above (or the init log), fix /config/templates/dnsmasq.conf or DNS_UPSTREAM and restart. ****"
+    exec sleep infinity
+fi
+
+set_state running
+exec dnsmasq -k -C "${BASE}"

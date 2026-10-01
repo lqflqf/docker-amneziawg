@@ -37,7 +37,9 @@ Ask in one batch (use the `ask_user` tool with several fields):
 | `PEERS` | — | Prefer names (`laptop,phone` → `peer_laptop`…); letters and digits only — other names are skipped |
 | `TZ` | `Etc/UTC` | Log timestamps only |
 
-Optional, only if the user wants them: `INTERNAL_SUBNET` (LAN conflict), `PEERDNS` (public resolver instead of the bundled Unbound), `ALLOWEDIPS` (split tunnel), `PERSISTENTKEEPALIVE_PEERS` (`all` for mobile/NAT), `SERVER_ALLOWEDIPS_PEER_<name>` (site-to-site). Meanings and defaults: README "Parameters".
+Optional, only if the user wants them: `INTERNAL_SUBNET` (LAN conflict), `DNS_UPSTREAM` (where the peers' dnsmasq forwarder sends queries; default `1.1.1.1,1.0.0.1`), `ALLOWEDIPS` (split tunnel), `PERSISTENTKEEPALIVE_PEERS` (`all` for mobile/NAT), `SERVER_ALLOWEDIPS_PEER_<name>` (site-to-site). Meanings and defaults: README "Parameters".
+
+Offer encrypted, DNSSEC-validated DNS for peers: Unbound on the host, set up as in README "Recommended: Unbound on the host" (fixed Compose network, Unbound on its gateway only, a host-firewall rule for the bridge, `DNS_UPSTREAM` = the gateway). Never bind it to `0.0.0.0` or a public address.
 
 ## Phase 4 — Obfuscation
 
