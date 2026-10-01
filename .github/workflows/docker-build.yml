@@ -390,7 +390,8 @@ jobs:
 
       # The smoke job only ran amd64. Build arm64 on its own first (the layers
       # land in the cache the multi-arch push below reuses) and check that its
-      # binaries actually run, so a broken arm64 image is never published.
+      # binaries run and that /init boots, so a broken arm64 image is never
+      # published.
       - name: Build linux/arm64 for a runtime check
         if: steps.existing.outputs.digest == ''
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
@@ -421,6 +422,28 @@ jobs:
             awg genkey | awg pubkey >/dev/null
             bash -n /etc/s6-overlay/s6-rc.d/init-amneziawg-confs/run
           '
+          # Boot /init too: s6 comes from Alpine's arm64 packages. No tunnel can
+          # come up here (no module, no /dev/net/tun), so wait for the verdict.
+          docker run -d --name arm64-boot --platform linux/arm64 --cap-add NET_ADMIN \
+            -e PEERS=1 -e SERVERURL=ci.example.com -e PUID=1234 -e PGID=2345 arm64-check
+          booted=false
+          for _ in $(seq 1 90); do
+            if grep -qE 'All tunnels are now (active|down)' <<<"$(docker logs arm64-boot 2>&1)"; then
+              booted=true; break
+            fi
+            sleep 2
+          done
+          logs=$(docker logs arm64-boot 2>&1)
+          echo "$logs" | tail -n 40
+          [ "$booted" = true ]
+          grep -q 'User UID:    1234' <<<"$logs"
+          grep -q 'Config initialization finished' <<<"$logs"
+          docker exec arm64-boot test -s /config/peer1/peer1.png
+          [ "$(docker exec arm64-boot id -u abc)" = 1234 ]
+          services=$(docker exec arm64-boot s6-rc -a list)
+          grep -qx init-amneziawg-confs <<<"$services"
+          grep -qx svc-dnsmasq <<<"$services"
+          docker rm -f arm64-boot >/dev/null
 
       - name: Build and push
         id: push

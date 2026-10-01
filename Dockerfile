@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 
-# Dockerfile for AmneziaWG with LinuxServer.io architecture
+# Dockerfile for AmneziaWG on Alpine Linux with s6-overlay
 # Multi-stage build: compile amneziawg-go, awg-tools, then create runtime image
 
 # Upstream version defaults — override via --build-arg or CI. Each tag is
@@ -54,9 +54,9 @@ RUN make && \
     chmod +x /tools-install/usr/bin/awg-quick
 
 # ============================================================================
-# Stage 3: Runtime image using LinuxServer base
+# Stage 3: Runtime image: Alpine + Alpine's s6-overlay package
 # ============================================================================
-FROM ghcr.io/linuxserver/baseimage-alpine:3.24@sha256:e4772029b98af17b6670341d07cbd54138a3dc7f6323af1ef76bbc02fd0a813d
+FROM alpine:3.24.2@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6
 
 # set version label
 ARG BUILD_DATE
@@ -66,9 +66,8 @@ ARG AMNEZIAWG_GO_COMMIT
 ARG AMNEZIAWG_TOOLS_VERSION
 ARG AMNEZIAWG_TOOLS_COMMIT
 LABEL build_version="AmneziaWG version:- ${VERSION} Build-date:- ${BUILD_DATE}"
-# Override the labels inherited from the LinuxServer base image (maintainer
-# included, or it reads as a LinuxServer maintainer). CI's
-# metadata-action also sets source/title/url/revision; these cover local builds.
+# CI's metadata-action also sets source/title/url/revision; these cover local
+# builds.
 LABEL org.opencontainers.image.title="docker-amneziawg"
 LABEL maintainer="lqflqf"
 LABEL org.opencontainers.image.authors="lqflqf"
@@ -80,13 +79,33 @@ LABEL org.opencontainers.image.description="AmneziaWG VPN container (amneziawg-t
 LABEL org.opencontainers.image.licenses="MIT"
 LABEL org.opencontainers.image.version="${AMNEZIAWG_TOOLS_VERSION}"
 
-ENV LSIO_FIRST_PARTY="false"
+# s6-overlay 3.2+ already waits forever when S6_CMD_WAIT_FOR_SERVICES_MAXTIME
+# is unset; it is set to make that explicit: a limit would fail stage 2 while
+# init-amneziawg-confs (IP detection) or svc-amneziawg (retries) still runs.
+ENV HOME="/root" \
+  TERM="xterm" \
+  S6_CMD_WAIT_FOR_SERVICES_MAXTIME="0" \
+  S6_VERBOSITY="1"
 
 RUN \
+  echo "**** install s6-overlay (whole stack pinned) ****" && \
+  apk add --no-cache \
+    execline=2.9.9.1-r0 \
+    s6=2.15.0.0-r0 \
+    s6-linux-init=1.2.0.1-r0 \
+    s6-linux-utils=2.6.4.1-r0 \
+    s6-overlay=3.2.3.0-r0 \
+    s6-overlay-helpers=0.1.2.2-r0 \
+    s6-portable-utils=2.3.1.2-r0 \
+    s6-rc=0.6.1.1-r0 \
+    skalibs-libs=2.15.0.0-r0 && \
   echo "**** install dependencies ****" && \
   apk add --no-cache \
+    bash=5.3.9-r1 \
     bc=1.08.2-r1 \
     ca-certificates-bundle=20260909-r0 \
+    coreutils=9.11-r0 \
+    curl=8.22.0-r0 \
     dnsmasq=2.92_p2-r0 \
     grep=3.12-r0 \
     iproute2=7.0.0-r0 \
@@ -98,7 +117,13 @@ RUN \
     libqrencode-tools=4.1.1-r3 \
     net-tools=2.10-r3 \
     nftables=1.1.6-r1 \
-    openresolv=3.17.4-r0 && \
+    openresolv=3.17.4-r0 \
+    shadow=4.18.0-r1 \
+    tzdata=2026d-r0 && \
+  echo "**** create abc user (PUID/PGID are applied at start) ****" && \
+  groupadd -g 911 abc && \
+  useradd -u 911 -g abc -G users -d /config -s /bin/false -M abc && \
+  mkdir -p /app /config /defaults && \
   echo "**** cleanup ****" && \
   rm -rf \
     /tmp/*
@@ -119,7 +144,8 @@ RUN sed -i 's|\[\[ $proto == -4 \]\] && cmd sysctl -q net\.ipv4\.conf\.all\.src_
 
 # write build version info
 RUN \
-  printf "AmneziaWG version: ${VERSION}\nBuild-date: ${BUILD_DATE}\namneziawg-tools: ${AMNEZIAWG_TOOLS_VERSION} (${AMNEZIAWG_TOOLS_COMMIT:-unpinned})\namneziawg-go: ${AMNEZIAWG_GO_VERSION} (${AMNEZIAWG_GO_COMMIT:-unpinned})\n" > /build_version
+  printf "AmneziaWG version: ${VERSION}\nBuild-date: ${BUILD_DATE}\namneziawg-tools: ${AMNEZIAWG_TOOLS_VERSION} (${AMNEZIAWG_TOOLS_COMMIT:-unpinned})\namneziawg-go: ${AMNEZIAWG_GO_VERSION} (${AMNEZIAWG_GO_COMMIT:-unpinned})\ns6: %s\n" \
+    "$(apk info -v 2>/dev/null | grep -E '^(s6-overlay|s6|s6-rc|s6-linux-init)-[0-9]' | sort | tr '\n' ' ' | sed 's/ $//')" > /build_version
 
 # add local files
 COPY /root /
@@ -131,3 +157,7 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
 
 # ports and volumes
 EXPOSE 51820/udp
+
+# Setting ENTRYPOINT also clears alpine's inherited CMD ["/bin/sh"]; a CMD
+# would make /init stop the container when it exits.
+ENTRYPOINT ["/init"]

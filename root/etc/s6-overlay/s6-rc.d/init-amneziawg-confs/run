@@ -1392,7 +1392,9 @@ resolvconf -u
 
 # permissions
 harden_permissions
-lsiown -R abc:abc \
-    /config
+# Only what is not abc:abc already. ! -type l: never follow a symlink out of
+# /config.
+find /config ! -type l \( ! -user abc -o ! -group abc \) -exec chown abc:abc {} + 2>/dev/null ||
+    echo "**** WARNING: could not set the owner of everything in /config (read-only or remote volume?) ****"
 
 echo "**** Config initialization finished ****"

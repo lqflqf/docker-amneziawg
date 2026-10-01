@@ -21,7 +21,7 @@ cleanup() {
     for c in "$container" "$container-up" "$container-srv" "$container-cli"; do
         docker rm -f "$c" >/dev/null 2>&1 || true
     done
-    docker volume rm -f "$volume" "$volume-srv" "$volume-cli" >/dev/null 2>&1 || true
+    docker volume rm -f "$volume" "$volume-srv" "$volume-cli" "$volume-old" >/dev/null 2>&1 || true
     docker network rm "$network" >/dev/null 2>&1 || true
     rm -rf "$tmpdir"
 }
@@ -60,6 +60,11 @@ in_image "Binaries" \
 s6=/etc/s6-overlay/s6-rc.d
 in_image "s6-overlay services and branding" \
     "test -f $s6/init-adduser/branding" \
+    "! grep -qi linuxserver $s6/init-adduser/branding" \
+    "test -f $s6/user/contents.d/init-adduser" \
+    "test -f $s6/user/contents.d/init-config" \
+    "test -f $s6/user/contents.d/init-services" \
+    "test -x $s6/init-adduser/run" \
     "test -f $s6/user/contents.d/init-amneziawg-module" \
     "test -f $s6/user/contents.d/init-amneziawg-confs" \
     "test -f $s6/user/contents.d/svc-dnsmasq" \
@@ -71,12 +76,17 @@ in_image "s6-overlay services and branding" \
     "test -x $s6/svc-amneziawg/finish"
 
 in_image "Service types" \
+    "test \"\$(cat $s6/init-adduser/type)\" = oneshot" \
+    "test \"\$(cat $s6/init-config/type)\" = oneshot" \
+    "test \"\$(cat $s6/init-services/type)\" = oneshot" \
     "test \"\$(cat $s6/init-amneziawg-module/type)\" = oneshot" \
     "test \"\$(cat $s6/init-amneziawg-confs/type)\" = oneshot" \
     "test \"\$(cat $s6/svc-dnsmasq/type)\" = longrun" \
     "test \"\$(cat $s6/svc-amneziawg/type)\" = oneshot"
 
 in_image "Dependency chain" \
+    "test -f $s6/init-config/dependencies.d/init-adduser" \
+    "test -f $s6/init-services/dependencies.d/init-config" \
     "test -f $s6/init-amneziawg-module/dependencies.d/init-config" \
     "test -f $s6/init-amneziawg-confs/dependencies.d/init-amneziawg-module" \
     "test -f $s6/svc-dnsmasq/dependencies.d/init-amneziawg-confs" \
@@ -84,6 +94,34 @@ in_image "Dependency chain" \
     "test -f $s6/svc-amneziawg/dependencies.d/init-amneziawg-confs" \
     "test ! -e $s6/svc-amneziawg/dependencies.d/svc-dnsmasq" \
     "test ! -e $s6/svc-unbound"
+
+# Plain Alpine with Alpine's s6-overlay package, nothing left of the
+# LinuxServer.io base. GNU coreutils: busybox shuf allocates the whole -i range
+# and runs out of memory on the H1-H4 ranges.
+# shellcheck disable=SC2016 # expanded inside the container
+in_image "Runtime base" \
+    'apk info -e s6-overlay >/dev/null' \
+    'test -x /init' \
+    'grep -q "^s6: s6-[0-9]" /build_version' \
+    '! test -e /docker-mods && ! test -e /usr/bin/lsiown && ! test -e /lsiopy' \
+    '! test -e /etc/s6-overlay/s6-rc.d/init-mods && ! test -e /etc/s6-overlay/s6-rc.d/svc-cron' \
+    'shuf --version | grep -q GNU' \
+    'command -v bash curl usermod groupmod >/dev/null' \
+    'test -f /usr/share/zoneinfo/Asia/Shanghai' \
+    'test "$(id -u abc):$(id -g abc)" = 911:911'
+echo "### Image config"
+[[ "$(docker image inspect "$image" --format '{{json .Config.Entrypoint}}')" == '["/init"]' ]] \
+    || { echo "  FAIL - entrypoint is not /init"; exit 1; }
+[[ "$(docker image inspect "$image" --format '{{json .Config.Cmd}}')" == null ]] \
+    || { echo "  FAIL - CMD must be empty (/init stops the container when CMD exits)"; exit 1; }
+image_env=$(docker image inspect "$image" --format '{{range .Config.Env}}{{println .}}{{end}}')
+grep -qx 'S6_CMD_WAIT_FOR_SERVICES_MAXTIME=0' <<<"$image_env" \
+    || { echo "  FAIL - S6_CMD_WAIT_FOR_SERVICES_MAXTIME=0 is missing"; exit 1; }
+if grep -qE '^(S6_STAGE2_HOOK|LSIO_[A-Z_]*|VIRTUAL_ENV)=' <<<"$image_env"; then
+    echo "  FAIL - LinuxServer.io environment left in the image:"; echo "$image_env"; exit 1
+fi
+echo "  ok   - entrypoint /init, no CMD, no LinuxServer.io environment"
+echo "- Image config: OK" >> "$summary"
 
 in_image "Scripts and defaults" \
     'test -x /app/show-peer' \
@@ -517,6 +555,108 @@ else
     ok "client mode: nothing generated, no dnsmasq, fails closed without a tunnel"
 fi
 echo "- Client mode: OK" >> "$summary"
+
+# ----------------------------------------------------------------------------
+# PUID/PGID, TZ, the init order, warnings for LinuxServer.io base image options
+# the image no longer has, and a clean stop.
+# ----------------------------------------------------------------------------
+echo "### Identity, timezone and LinuxServer.io options"
+echo "### Identity, timezone and LinuxServer.io options" >> "$summary"
+docker rm -f "$container" >/dev/null
+docker volume rm "$volume" >/dev/null
+mkdir -p "$tmpdir/custom-init"
+printf '#!/bin/sh\necho custom-init-ran\n' > "$tmpdir/custom-init/10-test"
+chmod +x "$tmpdir/custom-init/10-test"
+start -e PEERS=1 -e PUID=1234 -e PGID=2345 -e TZ=Asia/Shanghai \
+    -e FILE__SERVERURL=/run/secrets/serverurl -e DOCKER_MODS=linuxserver/mods:x -e UMASK=022 \
+    -v "$tmpdir/custom-init":/custom-cont-init.d:ro
+wait_tunnels "$container"
+{ logs_have 'User UID:    1234' && logs_have 'User GID:    2345'; } || fail "the banner does not show PUID/PGID"
+order=$(docker logs "$container" 2>&1 | grep -nE 'AmneziaWG VPN Container|Config initialization finished|All tunnels are now' | cut -d: -f1 | tr '\n' ' ')
+read -r l_banner l_init l_tunnels <<<"$order"
+(( l_banner < l_init && l_init < l_tunnels )) || fail "init order is not banner, configs, tunnels (lines: $order)"
+for w in 'FILE__SERVERURL is no longer supported' 'DOCKER_MODS is a LinuxServer.io base image option' \
+         'UMASK is a LinuxServer.io base image option' '/custom-cont-init.d is no longer run'; do
+    logs_have "WARNING: $w" || fail "no warning: $w"
+done
+if grep -qE '\[(ls\.io-init|custom-init|mods-init|env-init|migrations)\]|custom-init-ran|linuxserver\.io/donate' \
+        <<<"$(docker logs "$container" 2>&1)"; then
+    fail "LinuxServer.io init output in the log"
+fi
+unowned=$(docker exec "$container" find /config ! -type l \( ! -user 1234 -o ! -group 2345 \))
+[[ -z "$unowned" ]] || fail "not owned by PUID:PGID: $unowned"
+# svc-amneziawg restarts dnsmasq after wg0 is up; retry across that.
+for _ in $(seq 1 15); do
+    # shellcheck disable=SC2016 # expanded inside the container
+    dns_uid=$(docker exec "$container" sh -c 'stat -c %u /proc/$(pgrep -x dnsmasq)' 2>/dev/null || true)
+    [[ "$dns_uid" == 1234 ]] && break
+    sleep 1
+done
+[[ "$dns_uid" == 1234 ]] || fail "dnsmasq runs as uid '${dns_uid}', expected PUID 1234"
+[[ "$(docker exec "$container" date +%Z)" == CST ]] || fail "TZ=Asia/Shanghai is not applied"
+ok "PUID/PGID own /config and run dnsmasq, TZ applies, banner before configs before tunnels"
+ok "FILE__*, DOCKER_MODS, UMASK and /custom-cont-init.d are ignored with a warning"
+tunnel_was_up=false
+logs_have 'All tunnels are now active' && tunnel_was_up=true
+docker stop -t 20 "$container" >/dev/null
+stop_code=$(docker inspect "$container" --format '{{.State.ExitCode}}')
+[[ "$stop_code" == 0 ]] || fail "docker stop exited with $stop_code, expected 0"
+if [[ "$tunnel_was_up" == true ]]; then
+    logs_have '**** All tunnels are down ****' || fail "the finish script did not take the tunnels down"
+fi
+ok "docker stop exits 0 and takes the tunnels down"
+
+# A PUID/PGID that cannot be applied stops the container before any config is
+# touched (exit 1).
+for ids in 'PUID=abc PGID=1000' 'PUID=1000 PGID=99999999999' 'PUID=4294967295 PGID=1000' 'PUID=-5 PGID=1000'; do
+    read -r id_u id_g <<<"$ids"
+    docker rm -f "$container" >/dev/null 2>&1 || true
+    docker volume rm "$volume" >/dev/null 2>&1 || true
+    docker run -d --name "$container" --cap-add NET_ADMIN -v "$volume":/config \
+        -e PEERS=1 -e SERVERURL=ci.example.com -e "$id_u" -e "$id_g" "$image" >/dev/null
+    for _ in $(seq 1 30); do
+        [[ "$(docker inspect "$container" --format '{{.State.Running}}')" == false ]] && break
+        sleep 1
+    done
+    [[ "$(docker inspect "$container" --format '{{.State.Running}}')" == false ]] || fail "$ids: the container kept running"
+    [[ "$(docker inspect "$container" --format '{{.State.ExitCode}}')" == 1 ]] || fail "$ids: exit code is not 1"
+    logs_have "is not a numeric ID" || fail "$ids: no error in the log"
+    logs_have "Config initialization finished" && fail "$ids: init ran"
+done
+ok "an invalid PUID/PGID stops the container (exit 1) before init"
+echo "- Identity, timezone and LinuxServer.io options: OK" >> "$summary"
+
+# ----------------------------------------------------------------------------
+# Upgrade: a volume written by the last LinuxServer.io-based release keeps its
+# keys and configs unchanged.
+# ----------------------------------------------------------------------------
+echo "### Upgrade from the LinuxServer.io-based release"
+echo "### Upgrade from the LinuxServer.io-based release" >> "$summary"
+lsio_image=ghcr.io/lqflqf/docker-amneziawg:3.1.20260812-r5@sha256:fedf0b6f781845faa65db65cec8fc03ec657a421575eacd8055c34faff5b33d8
+upgrade_run() {
+    docker rm -f "$container" >/dev/null 2>&1 || true
+    docker run -d --name "$container" --cap-add NET_ADMIN -v "$volume-old":/config \
+        -e PEERS=2 -e SERVERURL=ci.example.com -e PUID=1000 -e PGID=1000 "$1" >/dev/null
+    for _ in $(seq 1 60); do
+        logs_have 'Config initialization finished' && return 0
+        sleep 1
+    done
+    fail "init did not finish ($1)"
+}
+# shellcheck disable=SC2016 # expanded inside the container
+config_sums='sha256sum /config/wg_confs/wg0.conf /config/peer*/peer*.conf /config/server/* /config/dnsmasq/dnsmasq.conf'
+upgrade_run "$lsio_image"
+before=$(docker exec "$container" sh -c "$config_sums")
+upgrade_run "$image"
+after=$(docker exec "$container" sh -c "$config_sums")
+[[ "$before" == "$after" ]] || fail "the upgrade changed configs or keys: $(diff <(echo "$before") <(echo "$after"))"
+logs_have 'No changes to parameters' || fail "the upgrade regenerated the tunnel configs"
+logs_have 'No changes to DNS settings' || fail "the upgrade re-rendered dnsmasq.conf"
+unowned=$(docker exec "$container" find /config ! -type l \( ! -user 1000 -o ! -group 1000 \))
+[[ -z "$unowned" ]] || fail "not owned by PUID:PGID after the upgrade: $unowned"
+ok "keys and configs unchanged, ownership kept"
+docker rm -f "$container" >/dev/null
+echo "- Upgrade from the LinuxServer.io-based release: OK" >> "$summary"
 
 # ----------------------------------------------------------------------------
 # End to end: a server, a client-mode container using the server's peer1.conf,

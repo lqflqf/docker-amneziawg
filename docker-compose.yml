@@ -1,4 +1,4 @@
-# Docker Compose for AmneziaWG with LinuxServer.io architecture
+# Docker Compose for AmneziaWG
 #
 # Server Mode (auto-generate configs):
 #   Set PEERS to enable server mode with automatic peer generation
@@ -23,7 +23,7 @@ services:
     devices:
       - /dev/net/tun:/dev/net/tun
     environment:
-      # LinuxServer standard variables
+      # Owner of ./config (numeric IDs) and timezone
       - PUID=1000
       - PGID=1000
       - TZ=Etc/UTC

@@ -1,6 +1,6 @@
 # docker-amneziawg — developer instructions
 
-AmneziaWG VPN container on LinuxServer.io base images with s6-overlay. **Server mode** (`PEERS` set) generates keys, `wg0.conf` and peer confs; **client mode** brings up the user's confs. Every `*.conf` in `/config/wg_confs/` is brought up on start.
+AmneziaWG VPN container on plain Alpine with Alpine's `s6-overlay` package (no LinuxServer.io base since after `3.1.20260812-r5`). **Server mode** (`PEERS` set) generates keys, `wg0.conf` and peer confs; **client mode** brings up the user's confs. Every `*.conf` in `/config/wg_confs/` is brought up on start.
 
 ## Where things are documented
 
@@ -25,20 +25,23 @@ docker build -t amneziawg-test .
 .github/scripts/next-version.test.sh && .github/scripts/release-tags.test.sh
 ```
 
-There is no unit test suite. `smoke-test.sh` covers binaries (and the absence of `wg`/`wg-quick`/`/etc/wireguard`), s6 services, dnsmasq (user, `interface=wg0`, listeners only on the tunnel address and loopback, no firewall rules, answers again after a service restart), branding, config generation for 3.1/2.0, a stateful section on one volume (file modes, unchanged restart, 2.0↔1.5, invalid pinned 3.x values, `SERVER_ALLOWEDIPS_PEER_*` changes, duplicate/removed peers, invalid `SERVERURL`, world-writable and unparseable templates), DNS re-rendering (`DNS_UPSTREAM`/template changes, hand edits, invalid input, `PEERDNS`/`USE_DNS` ignored), client mode on a volume with only `wg0.conf`, and an end-to-end run (server, client-mode peer and fake upstream on a private network: DNS through the tunnel over UDP and TCP, a routed neighbour refused (the UDP query is the regression check; dnsmasq refuses neighbour TCP with `listen-address` too), client without `src_valid_mark=1` fails closed). Each check must fail on its own — never `test ... && echo` (errexit ignores the left side of `&&`). Containers outside the end-to-end section get no `/dev/net/tun`, so their tunnel comes up only if the host has the amneziawg module; checks accept both outcomes. The end-to-end section needs `/dev/net/tun` on the host: required in CI, skipped locally without it.
+There is no unit test suite. `smoke-test.sh` covers binaries (and the absence of `wg`/`wg-quick`/`/etc/wireguard`), s6 services, dnsmasq (user, `interface=wg0`, listeners only on the tunnel address and loopback, no firewall rules, answers again after a service restart), branding, config generation for 3.1/2.0, a stateful section on one volume (file modes, unchanged restart, 2.0↔1.5, invalid pinned 3.x values, `SERVER_ALLOWEDIPS_PEER_*` changes, duplicate/removed peers, invalid `SERVERURL`, world-writable and unparseable templates), DNS re-rendering (`DNS_UPSTREAM`/template changes, hand edits, invalid input, `PEERDNS`/`USE_DNS` ignored), client mode on a volume with only `wg0.conf`, the runtime base (`/init` entrypoint, no `CMD`, GNU `shuf`, no LinuxServer.io files or env), identity (`PUID`/`PGID` own `/config` and run dnsmasq, `TZ`, init order, warnings for LinuxServer.io options, `docker stop` exits 0, invalid IDs stop the container with exit 1), an upgrade of a volume written by the last LinuxServer.io-based release (pinned by digest; confs and keys unchanged), and an end-to-end run (server, client-mode peer and fake upstream on a private network: DNS through the tunnel over UDP and TCP, a routed neighbour refused (the UDP query is the regression check; dnsmasq refuses neighbour TCP with `listen-address` too), client without `src_valid_mark=1` fails closed). Each check must fail on its own — never `test ... && echo` (errexit ignores the left side of `&&`), and never `cmd | grep -q` (SIGPIPE + pipefail); use `grep -q ... <<<"$(cmd)"`. Containers outside the end-to-end section get no `/dev/net/tun`, so their tunnel comes up only if the host has the amneziawg module; checks accept both outcomes. The end-to-end section needs `/dev/net/tun` on the host: required in CI, skipped locally without it.
 
 ## Architecture
 
 ### Dockerfile (3 stages, multi-arch amd64/arm64)
 
-`go-builder` (golang-alpine → static `amneziawg-go`), `tools-builder` (alpine → `awg`, plus `awg-quick` copied from upstream `src/wg-quick/linux.bash`), runtime (`ghcr.io/linuxserver/baseimage-alpine`). Base images are pinned by digest (Dependabot bumps them), builder `apk` packages by version, each upstream tag by commit (`AMNEZIAWG_*_COMMIT`; the clone fails if the tag moved, empty = unchecked). The `awg-quick` sed patch (skip `src_valid_mark` if already set) is followed by a `grep` that fails the build if upstream changed the line. There are no `wg`/`wg-quick` aliases or `/etc/wireguard` link (`awg-quick` looks up bare names in `/etc/amnezia/amneziawg/`; `svc-amneziawg` passes full paths). `HEALTHCHECK` runs `/app/healthcheck`.
+`go-builder` (golang-alpine → static `amneziawg-go`), `tools-builder` (alpine → `awg`, plus `awg-quick` copied from upstream `src/wg-quick/linux.bash`), runtime (`alpine` + `s6-overlay` from apk, the whole s6 stack pinned and recorded in `/build_version`; `coreutils` because busybox `shuf` runs out of memory on the H ranges; `shadow` for `usermod`; `abc` created as 911:911; `ENTRYPOINT ["/init"]`, which also clears alpine's `CMD`). Base images are pinned by digest (Dependabot bumps them), `apk` packages by version (Alpine keeps only the newest of each, so a pin breaks the build when it is replaced: bump it), each upstream tag by commit (`AMNEZIAWG_*_COMMIT`; the clone fails if the tag moved, empty = unchecked). The `awg-quick` sed patch (skip `src_valid_mark` if already set) is followed by a `grep` that fails the build if upstream changed the line. There are no `wg`/`wg-quick` aliases or `/etc/wireguard` link (`awg-quick` looks up bare names in `/etc/amnezia/amneziawg/`; `svc-amneziawg` passes full paths). `HEALTHCHECK` runs `/app/healthcheck`.
 
 ### s6-overlay services (`root/etc/s6-overlay/s6-rc.d/`)
 
 ```
-init-config → init-amneziawg-module → init-amneziawg-confs → svc-dnsmasq
-                                                           → svc-amneziawg
+init-adduser → init-config → init-amneziawg-module → init-amneziawg-confs → svc-dnsmasq
+                           → init-services → svc-dnsmasq                  → svc-amneziawg
 ```
+
+- **init-adduser**: applies `PUID`/`PGID` (default 911) to `abc` with `groupmod -o`/`usermod -o` (home moved off `/config` during `usermod -u`, which re-owns the home). A non-numeric or out-of-range ID, or one that does not apply, halts the container with exit 1 (`/run/s6/basedir/bin/halt`): a failed oneshot alone would leave it running without `svc-amneziawg`, so a client would keep its default routes. Prints the branding, UID/GID and `/build_version`, then a `WARNING` for each LinuxServer.io base option still set (`FILE__*`, `DOCKER_MODS`, `UMASK`, `ATTACHED_DEVICES_PERMS`, `LSIO_READ_ONLY_FS`, `LSIO_NON_ROOT_USER`, non-empty `/custom-cont-init.d`/`/custom-services.d`); none of them is implemented.
+- **init-config**, **init-services**: empty markers (names kept from the LinuxServer.io base).
 
 - **init-amneziawg-module**: probes `ip link add awgprobe<pid> type amneziawg` (the amnezia module's link kind; a plain `wireguard` module is never used). On failure writes `WG_QUICK_USERSPACE_IMPLEMENTATION` to `/run/s6/container_environment` → userspace `amneziawg-go`. Never calls `modprobe`, so `SYS_MODULE` does not enable the kernel datapath and a `/lib/modules` mount is a no-op.
 - **init-amneziawg-confs** (`umask 077`): config generation (below), then in server mode `configure_dns` (below), runs `harden_permissions`, ends with `Config initialization finished` (the smoke test waits for it). `PEERDNS`/`USE_DNS` are ignored with a NOTE; a leftover `/config/unbound` gets a NOTE.
@@ -90,19 +93,20 @@ Generic semantics and limits live in the `amneziawg-config` skill; measured cost
 
 ## Development patterns
 
-- s6 scripts: `#!/usr/bin/with-contenv bash`, `# shellcheck shell=bash`, executable, `lsiown -R abc:abc /config` for ownership. `local` only inside functions.
+- s6 scripts: `#!/usr/bin/with-contenv bash`, `# shellcheck shell=bash`, executable. Ownership: `init-amneziawg-confs` ends with `find /config ! -type l ... -exec chown abc:abc` (never follows symlinks; failure only warns). `local` only inside functions.
+- The runtime is busybox plus GNU `coreutils` and `grep`: `find` has no `-uid`/`-xtype` (use `-user`/`-group`, which take IDs).
 - **New env var**: default it in the main section of `init-amneziawg-confs/run`; if it shapes confs add it to `STATE_VARS` (and `STATE_VARS_OPTIONAL` if older state files lack it); AWG params go in `AWG_PARAM_NAMES` (+ `AWG_VERSIONED_PARAMS` if version-shaped); output via the templates or the `append_*` writers; document in `README.md` and `docker-compose.yml`.
-- Branding: `root/etc/s6-overlay/s6-rc.d/init-adduser/branding` + `LSIO_FIRST_PARTY=false`.
+- Branding: `root/etc/s6-overlay/s6-rc.d/init-adduser/branding`.
 - Indentation: 4 spaces for shell/s6, 2 for Dockerfile/YAML (`.editorconfig`).
 - Conventional commits (`feat:`, `fix:`, `docs:`, `chore:`); branches `feature/<name>`.
-- Exit code 137 on stop is normal.
+- `docker stop` exits 0 (smoke-tested).
 
 ## CI/CD
 
 **`docker-build.yml`**: `changes` → `version` → `smoke` → `build` → `release`.
 - Image content = `Dockerfile`, `root/**`, `.dockerignore`, `docker-build.yml`, `.github/scripts/`. Other changes (docs, skills, compose) never publish. On the default branch the gate diffs against the **last release tag**, so an image change from a failed run is not lost; manual runs always build.
 - `smoke` (every mode): amd64 build, `smoke-test.sh`, Trivy failing on fixable CRITICALs. PRs run only this plus the script tests.
-- Release (push to default branch, or `workflow_dispatch` without overrides): builds arm64 alone and runs its binaries under QEMU, then pushes amd64+arm64 with SLSA provenance and SBOM as `:<tools>-r<N>` (immutable), `:<tools>`, `:latest`, `:sha-<short>`; creates annotated tag `v<tools>-r<N>` and a GitHub Release with the digest and generated notes. Runs are serialized; a superseded run publishes only its immutable tag.
+- Release (push to default branch, or `workflow_dispatch` without overrides): builds arm64 alone, runs its binaries and boots `/init` under QEMU (server mode, `PUID`/`PGID`, s6 services up; no tunnel), then pushes amd64+arm64 with SLSA provenance and SBOM as `:<tools>-r<N>` (immutable), `:<tools>`, `:latest`, `:sha-<short>`; creates annotated tag `v<tools>-r<N>` and a GitHub Release with the digest and generated notes. Runs are serialized; a superseded run publishes only its immutable tag.
 - `workflow_dispatch` with version overrides: ad-hoc `:dispatch-<run>` only.
 - No `v*` tag trigger — never push `v*-r*` tags by hand; they are the build counter.
 
