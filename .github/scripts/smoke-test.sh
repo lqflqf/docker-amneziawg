@@ -344,6 +344,21 @@ logs_have "No changes to parameters" || fail "restart with the same settings reg
 [[ "$(wg0_sum)" == "$sum" ]] || fail "wg0.conf changed on an unchanged restart"
 ok "unchanged restart keeps the configs"
 
+# keepalive_peers: the peers that get PersistentKeepalive in wg0.conf.
+keepalive_peers() {
+    docker exec "$container" awk '/^# / { p = $2 } /^PersistentKeepalive = 25$/ { printf "%s ", p }' \
+        /config/wg_confs/wg0.conf
+}
+[[ "$(keepalive_peers)" == "peer1 peer2 " ]] || fail "default keepalive peers: '$(keepalive_peers)', expected all"
+start -e PEERS=2 -e PERSISTENTKEEPALIVE_PEERS=none
+logs_have "PersistentKeepalive is disabled" || fail "PERSISTENTKEEPALIVE_PEERS=none not reported"
+[[ -z "$(keepalive_peers)" ]] || fail "PERSISTENTKEEPALIVE_PEERS=none kept keepalive for: $(keepalive_peers)"
+docker exec "$container" grep -qx 'ORIG_PERSISTENTKEEPALIVE_PEERS=""' /config/.donoteditthisfile \
+    || fail "PERSISTENTKEEPALIVE_PEERS=none is not saved as empty"
+start -e PEERS=2 -e PERSISTENTKEEPALIVE_PEERS=2
+[[ "$(keepalive_peers)" == "peer2 " ]] || fail "PERSISTENTKEEPALIVE_PEERS=2 gave keepalive to: '$(keepalive_peers)'"
+ok "PersistentKeepalive: all by default, none disables it, a list selects peers"
+
 start -e PEERS=2 -e AWG_VERSION=1.5
 logs_have "AWG_VERSION changed from 2.0 to 1.5" || fail "2.0 -> 1.5 not detected"
 [[ "$(iface_value /config/peer1/peer1.conf H1)" =~ ^[0-9]+$ ]] || fail "1.5 kept an H range"
@@ -496,9 +511,10 @@ run_dns
 ok "a broken hand edit stops dnsmasq; deleting the file renders it again"
 
 p=$(peer_sum)
-run_dns -e PEERDNS=8.8.8.8 -e USE_DNS=false
+run_dns -e PEERDNS=8.8.8.8 -e USE_DNS=false -e HEALTHCHECK_DNS_NAME=example.com
 logs_have "PEERDNS is no longer supported" || fail "PEERDNS was not reported as ignored"
 logs_have "USE_DNS is no longer supported" || fail "USE_DNS was not reported as ignored"
+logs_have "HEALTHCHECK_DNS_NAME is no longer supported" || fail "HEALTHCHECK_DNS_NAME was not reported as ignored"
 [[ "$(peer_sum)" == "$p" && "$(dns_state)" == running ]] || fail "PEERDNS/USE_DNS still have an effect"
 docker exec "$container" sed -i 's/^ORIG_PEERDNS=.*/ORIG_PEERDNS="1.1.1.1"/' /config/.donoteditthisfile
 docker exec "$container" mkdir -p /config/unbound
@@ -506,7 +522,7 @@ run_dns
 logs_have "settings changed (PEERDNS" || fail "a saved custom PEERDNS did not regenerate"
 docker exec "$container" grep -qx 'DNS = 10.57.57.1' /config/peer1/peer1.conf || fail "peer DNS is not the tunnel address"
 logs_have "/config/unbound is no longer used" || fail "a leftover /config/unbound was not reported"
-ok "PEERDNS/USE_DNS are ignored; an old custom PEERDNS is replaced by the tunnel address"
+ok "PEERDNS/USE_DNS/HEALTHCHECK_DNS_NAME are ignored; an old custom PEERDNS is replaced by the tunnel address"
 echo "- DNS config on restart: OK" >> "$summary"
 
 # ----------------------------------------------------------------------------
@@ -633,10 +649,13 @@ echo "- Identity, timezone and LinuxServer.io options: OK" >> "$summary"
 echo "### Upgrade from the LinuxServer.io-based release"
 echo "### Upgrade from the LinuxServer.io-based release" >> "$summary"
 lsio_image=ghcr.io/lqflqf/docker-amneziawg:3.1.20260812-r5@sha256:fedf0b6f781845faa65db65cec8fc03ec657a421575eacd8055c34faff5b33d8
+# PERSISTENTKEEPALIVE_PEERS is set because its default changed from none to all,
+# which regenerates wg0.conf once on a volume that never set it.
 upgrade_run() {
     docker rm -f "$container" >/dev/null 2>&1 || true
     docker run -d --name "$container" --cap-add NET_ADMIN -v "$volume-old":/config \
-        -e PEERS=2 -e SERVERURL=ci.example.com -e PUID=1000 -e PGID=1000 "$1" >/dev/null
+        -e PEERS=2 -e SERVERURL=ci.example.com -e PUID=1000 -e PGID=1000 \
+        -e PERSISTENTKEEPALIVE_PEERS=all "$1" >/dev/null
     for _ in $(seq 1 60); do
         logs_have 'Config initialization finished' && return 0
         sleep 1
@@ -700,7 +719,7 @@ else
         docker run -d --name "$srv" --network "$network" --ip 10.199.53.10 \
             --cap-add NET_ADMIN --device /dev/net/tun -v "$volume-srv":/config \
             -e PEERS=1 -e SERVERURL=10.199.53.10 -e INTERNAL_SUBNET=10.58.58.0 \
-            -e DNS_UPSTREAM=10.199.53.53 "$image" >/dev/null
+            -e DNS_UPSTREAM=10.199.53.53 -e HEALTHCHECK_DNS_NAME=unresolvable.invalid "$image" >/dev/null
         wait_tunnels "$srv"
         grep -q 'All tunnels are now active' <<<"$(docker logs "$srv" 2>&1)" || e2e_fail "server tunnel did not come up"
     }

@@ -1284,8 +1284,14 @@ if [[ -n "$PEERS" ]]; then
         echo "**** ERROR: Too many peers (${#PEER_IDS[@]}). Maximum is 253 for a /24 subnet ****"
         GENERATION_BLOCKED=1
     fi
-    if [[ -n "${PERSISTENTKEEPALIVE_PEERS}" ]]; then
-        echo "**** PersistentKeepalive will be set for: ${PERSISTENTKEEPALIVE_PEERS/,/ } ****"
+    # s6 drops empty variables, so "off" needs a value of its own. It is saved as
+    # empty, matching volumes that never had keepalive.
+    PERSISTENTKEEPALIVE_PEERS=${PERSISTENTKEEPALIVE_PEERS:-all}
+    if [[ "${PERSISTENTKEEPALIVE_PEERS}" == none ]]; then
+        PERSISTENTKEEPALIVE_PEERS=""
+        echo "**** PersistentKeepalive is disabled for all peers ****"
+    else
+        echo "**** PersistentKeepalive will be set for: ${PERSISTENTKEEPALIVE_PEERS//,/ } ****"
         mapfile -t PERSISTENTKEEPALIVE_PEERS_ARRAY < <(echo "${PERSISTENTKEEPALIVE_PEERS}" | tr ',' '\n')
     fi
 
@@ -1381,6 +1387,9 @@ fi
 
 if [[ -n "${USE_DNS:-}" ]]; then
     echo "**** NOTE: USE_DNS is no longer supported and is ignored. dnsmasq always runs in server mode and never in client mode. ****"
+fi
+if [[ -n "${HEALTHCHECK_DNS_NAME:-}" ]]; then
+    echo "**** NOTE: HEALTHCHECK_DNS_NAME is no longer supported and is ignored. The health check only tests that dnsmasq answers on the tunnel address. ****"
 fi
 if [[ -d /config/unbound ]]; then
     echo "**** NOTE: /config/unbound is no longer used (this image runs dnsmasq instead of Unbound) and can be deleted. ****"
