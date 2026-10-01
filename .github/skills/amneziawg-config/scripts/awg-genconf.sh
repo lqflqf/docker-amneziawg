@@ -45,7 +45,7 @@
 #     bytes of the S-prefix), enforced by the kernel module in netlink.c
 #   RejectAfterTime.lo > RekeyAfterTime.hi and > KeepaliveTimeout.lo + RekeyTimeout.lo
 #
-# Performance (measured; see references/performance.md):
+# Performance (measured; see docs/awg-performance.md):
 #   S1 == S2 == S3 == S4 whenever RandomTrailers is on with wide 2.0+ H ranges.
 #     Trailers relax the receiver's type check from "== expected_len" to ">=",
 #     so the H range test becomes the only discriminator. Unequal S values make
@@ -114,7 +114,7 @@ done
 
 if [ "$content_padding" = "on" ] && [ "$random_trailers" = "on" ]; then
     die "ContentPaddingAddition suppresses RandomTrailers on send but not on receive.
-       Pick one. See references/performance.md."
+       Pick one. See docs/awg-performance.md."
 fi
 # ContentPaddingAddition only exists in the 3.x parameter set. Silently dropping
 # the flag would hand back a config that looks like it honoured the request.

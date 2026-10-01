@@ -46,7 +46,6 @@ Temporary Items
 # AmneziaWG Configuration Files
 # Never commit real configuration files with private keys
 *.conf
-!*.conf.example
 
 # Docker volumes and data
 volumes/
@@ -63,7 +62,7 @@ data/
 *.log
 
 # Skill evaluation scratch (run outputs, timings, generated test configs)
-.claude/skills/*-workspace/
+.github/skills/*-workspace/
 
 # Python bytecode from running the skill scripts
 __pycache__/

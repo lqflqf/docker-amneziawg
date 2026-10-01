@@ -1,32 +1,22 @@
 ## Description
-Brief description of the changes in this PR.
+What this PR changes and why.
 
-## Type of Change
-- [ ] Bug fix (non-breaking change which fixes an issue)
-- [ ] New feature (non-breaking change which adds functionality)
-- [ ] Breaking change (fix or feature that would cause existing functionality to not work as expected)
-- [ ] Documentation update
-- [ ] Configuration change
-- [ ] CI/CD improvement
+## Type of change
+- [ ] Bug fix
+- [ ] New feature
+- [ ] Breaking change (existing deployments need action)
+- [ ] Documentation / skills
+- [ ] CI/CD
 
 ## Testing
-- [ ] I have tested these changes locally
-- [ ] I have tested with different configurations
-- [ ] I have tested both server and client setups
-- [ ] The container starts and stops gracefully
+- [ ] `.github/scripts/smoke-test.sh` passes against a local build (paste the summary line)
+- [ ] `.github/scripts/next-version.test.sh` and `release-tags.test.sh` pass (if `.github/scripts/` changed)
+- [ ] Tested on a real host with `/dev/net/tun` (describe below), if tunnel behaviour changed
 
 ## Checklist
-- [ ] My code follows the project's style guidelines
-- [ ] I have performed a self-review of my own code
-- [ ] I have commented my code, particularly in hard-to-understand areas
-- [ ] I have made corresponding changes to the documentation
-- [ ] My changes generate no new warnings
-- [ ] I have updated the example configuration if needed
+- [ ] User-facing changes are documented in `README.md` / `docker-compose.yml` / `docs/`
+- [ ] Developer-facing changes are reflected in `.github/copilot-instructions.md` and affected skills
+- [ ] No content duplicated across docs (each topic has one home)
 
-## Screenshots/Logs (if applicable)
-Add any relevant screenshots or log outputs that demonstrate the changes.
-
-## Related Issues
-Fixes #(issue number)
-Closes #(issue number)
-Related to #(issue number)
+## Related issues
+Fixes #
