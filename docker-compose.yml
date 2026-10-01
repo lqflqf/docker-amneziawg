@@ -30,12 +30,12 @@ services:
 
       # ---- Server Mode Configuration ----
       # Uncomment and configure for server mode
-      # - SERVERURL=auto                    # External URL/IP (or 'auto' to detect)
+      # - SERVERURL=vpn.example.com         # External URL/IP (unset: detect the public IPv4)
       # - SERVERPORT=51820                  # Port advertised to peers; map it as SERVERPORT:51820/udp (the container always listens on 51820)
       # - PEERS=3                           # Number or names: 3 or laptop,phone,tablet
       # - INTERNAL_SUBNET=10.13.13.0        # VPN subnet
       # - ALLOWEDIPS=0.0.0.0/0, ::/0        # Allowed IPs for peers
-      # - PERSISTENTKEEPALIVE_PEERS=all     # Which peers get keepalive (all or comma-separated)
+      # - PERSISTENTKEEPALIVE_PEERS=all     # Which peers get keepalive: all (default), comma-separated, or none
       # - LOG_CONFS=false                   # true prints QR codes (they contain private keys) to the logs; use /app/show-peer instead
 
       # ---- Per-peer server AllowedIPs (site-to-site VPN) ----
@@ -81,7 +81,6 @@ services:
       # Peers always use dnsmasq on the server's tunnel address; it forwards to DNS_UPSTREAM.
       # Further dnsmasq options: ./config/templates/dnsmasq.conf (README "DNS").
       # - DNS_UPSTREAM=1.1.1.1,1.0.0.1      # IPv4/IPv6, optional #port; e.g. 172.31.53.1 for Unbound on the host
-      # - HEALTHCHECK_DNS_NAME=example.com  # Also report unhealthy when dnsmasq cannot resolve this name
     volumes:
       - ./config:/config
     ports:

@@ -24,7 +24,7 @@ services:
       - PUID=1000
       - PGID=1000
       - TZ=Etc/UTC
-      - SERVERURL=vpn.example.com   # or auto
+      - SERVERURL=vpn.example.com   # or leave out to detect the public IPv4
       - PEERS=laptop,phone,tablet   # or a number
     volumes:
       - ./config:/config
@@ -86,7 +86,7 @@ This fork also adds:
 
 ### Upgrading from the LinuxServer.io-based releases
 
-Releases up to `3.1.20260812-r5` were built on the LinuxServer.io base image. Later ones run on plain Alpine with s6-overlay. Change nothing for a normal setup: the volume, `PUID`/`PGID`/`TZ`, keys and configs carry over unchanged.
+Releases up to `3.1.20260812-r5` were built on the LinuxServer.io base image. Later ones run on plain Alpine with s6-overlay. Change nothing for a normal setup: the volume, `PUID`/`PGID`/`TZ`, keys and configs carry over unchanged (except the one-time `wg0.conf` update for the [new keepalive default](#changed-defaults)).
 
 The extras of the LinuxServer.io base image are gone. Each one that is still set logs a `WARNING` at start-up and is ignored:
 
@@ -170,7 +170,7 @@ Let the container's dnsmasq forward to a validating resolver on the host. Peer l
 
 3. Allow DNS from the bridge through the host firewall, for example with ufw: `sudo ufw allow in on br-awg to 172.31.53.1 port 53`.
 
-4. Recreate the container (`docker compose up -d`) and check: `docker exec amneziawg nslookup example.com 172.31.53.1`. Set `HEALTHCHECK_DNS_NAME=example.com` to have the health check keep testing the whole chain.
+4. Recreate the container (`docker compose up -d`) and check: `docker exec amneziawg nslookup example.com 172.31.53.1`.
 
 With `network_mode: host`, use `interface: 127.0.0.1@5335` and `access-control: 127.0.0.0/8 allow` instead, skip the firewall step, and set `DNS_UPSTREAM=127.0.0.1#5335`.
 
@@ -179,18 +179,22 @@ With `network_mode: host`, use `interface: 127.0.0.1@5335` and `access-control: 
 | Parameter | Function |
 |-----------|----------|
 | `-e PUID=911` / `-e PGID=911` / `-e TZ` | Owner of `/config` (dnsmasq also runs as this user) and timezone. An invalid `PUID`/`PGID` stops the container |
-| `-e SERVERURL=auto` | Host or IP written into peer configs. `auto` detects the public IPv4 over HTTPS (and keeps the previous value if detection fails) |
+| `-e SERVERURL=` | Host or IP written into peer configs. Unset (or `auto`) detects the public IPv4 over HTTPS (and keeps the previous value if detection fails) |
 | `-e SERVERPORT=51820` | Port advertised to peers. The container always listens on 51820, so map `SERVERPORT:51820/udp` (**not** `SERVERPORT:SERVERPORT`) |
 | `-e PEERS=` | Number or comma-separated alphanumeric names. Enables server mode |
 | `-e INTERNAL_SUBNET=10.13.13.0` | VPN subnet (`.1` is the server, `.2` and up are peers) |
 | `-e ALLOWEDIPS=0.0.0.0/0, ::/0` | What peers route into the tunnel. The tunnel is IPv4-only; `::/0` sinks peer IPv6 to prevent leaks. Narrow it for split tunnelling |
-| `-e PERSISTENTKEEPALIVE_PEERS=` | `all`, or comma-separated peers that get `PersistentKeepalive = 25` |
+| `-e PERSISTENTKEEPALIVE_PEERS=all` | Peers the server sends `PersistentKeepalive = 25` to: `all`, `none`, or a comma-separated list of `PEERS` entries or peer IDs (`laptop` or `peer_laptop`; a peer named `none` can only be selected as `peer_none`) |
 | `-e SERVER_ALLOWEDIPS_PEER_<peer>=` | Extra server-side AllowedIPs for one peer (site-to-site) |
 | `-e LOG_CONFS=false` | `true` prints each peer's QR code to the log. QR codes contain private keys; `show-peer` is the safer way |
 | `-e DNS_UPSTREAM=1.1.1.1,1.0.0.1` | Where the peers' DNS forwarder (dnsmasq, server mode) sends queries: comma-separated IPv4/IPv6 addresses, each with an optional `#port`. See [DNS](#dns-dnsmasq) |
-| `-e HEALTHCHECK_DNS_NAME=` | If set, the health check also requires dnsmasq to resolve this name, which proves the upstream is reachable |
 | `-e AWG_VERSION=2.0` | Protocol version, see below |
 | `-e AWG_*` | Obfuscation parameters, see below. All are random by default |
+
+### Changed defaults
+
+- `PERSISTENTKEEPALIVE_PEERS` now defaults to `all` (it used to be off). On a volume that never set it, the first start regenerates the configs once to add the keepalive lines to `wg0.conf`; keys and peer configs stay the same, so peers need no re-import. Set `none` to keep the old behaviour, for example to spare phone batteries.
+- `HEALTHCHECK_DNS_NAME` has been removed and is ignored with a note in the log. The health check only tests that dnsmasq answers on the tunnel address, not that `DNS_UPSTREAM` is reachable; check that with `docker exec amneziawg nslookup example.com <tunnel address>`.
 
 ## Protocol versions and obfuscation
 

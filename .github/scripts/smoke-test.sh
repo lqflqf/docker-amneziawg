@@ -344,6 +344,25 @@ logs_have "No changes to parameters" || fail "restart with the same settings reg
 [[ "$(wg0_sum)" == "$sum" ]] || fail "wg0.conf changed on an unchanged restart"
 ok "unchanged restart keeps the configs"
 
+# keepalive_peers: the peers that get PersistentKeepalive in wg0.conf.
+keepalive_peers() {
+    docker exec "$container" awk '/^# / { p = $2 } /^PersistentKeepalive = 25$/ { printf "%s ", p }' \
+        /config/wg_confs/wg0.conf
+}
+[[ "$(keepalive_peers)" == "peer1 peer2 " ]] || fail "default keepalive peers: '$(keepalive_peers)', expected all"
+start -e PEERS=2 -e PERSISTENTKEEPALIVE_PEERS=none
+logs_have "PersistentKeepalive is disabled" || fail "PERSISTENTKEEPALIVE_PEERS=none not reported"
+[[ -z "$(keepalive_peers)" ]] || fail "PERSISTENTKEEPALIVE_PEERS=none kept keepalive for: $(keepalive_peers)"
+docker exec "$container" grep -qx 'ORIG_PERSISTENTKEEPALIVE_PEERS=""' /config/.donoteditthisfile \
+    || fail "PERSISTENTKEEPALIVE_PEERS=none is not saved as empty"
+start -e PEERS=2 -e PERSISTENTKEEPALIVE_PEERS=2
+[[ "$(keepalive_peers)" == "peer2 " ]] || fail "PERSISTENTKEEPALIVE_PEERS=2 gave keepalive to: '$(keepalive_peers)'"
+start -e PEERS=2,none -e PERSISTENTKEEPALIVE_PEERS=peer_none
+[[ "$(keepalive_peers)" == "peer_none " ]] || fail "PERSISTENTKEEPALIVE_PEERS=peer_none gave keepalive to: '$(keepalive_peers)'"
+start -e PEERS=2,none -e PERSISTENTKEEPALIVE_PEERS=none
+[[ -z "$(keepalive_peers)" ]] || fail "PERSISTENTKEEPALIVE_PEERS=none with a peer named none kept: $(keepalive_peers)"
+ok "PersistentKeepalive: all by default, none disables it, a list selects peers by name or ID"
+
 start -e PEERS=2 -e AWG_VERSION=1.5
 logs_have "AWG_VERSION changed from 2.0 to 1.5" || fail "2.0 -> 1.5 not detected"
 [[ "$(iface_value /config/peer1/peer1.conf H1)" =~ ^[0-9]+$ ]] || fail "1.5 kept an H range"
@@ -496,9 +515,10 @@ run_dns
 ok "a broken hand edit stops dnsmasq; deleting the file renders it again"
 
 p=$(peer_sum)
-run_dns -e PEERDNS=8.8.8.8 -e USE_DNS=false
+run_dns -e PEERDNS=8.8.8.8 -e USE_DNS=false -e HEALTHCHECK_DNS_NAME=example.com
 logs_have "PEERDNS is no longer supported" || fail "PEERDNS was not reported as ignored"
 logs_have "USE_DNS is no longer supported" || fail "USE_DNS was not reported as ignored"
+logs_have "HEALTHCHECK_DNS_NAME is no longer supported" || fail "HEALTHCHECK_DNS_NAME was not reported as ignored"
 [[ "$(peer_sum)" == "$p" && "$(dns_state)" == running ]] || fail "PEERDNS/USE_DNS still have an effect"
 docker exec "$container" sed -i 's/^ORIG_PEERDNS=.*/ORIG_PEERDNS="1.1.1.1"/' /config/.donoteditthisfile
 docker exec "$container" mkdir -p /config/unbound
@@ -506,7 +526,7 @@ run_dns
 logs_have "settings changed (PEERDNS" || fail "a saved custom PEERDNS did not regenerate"
 docker exec "$container" grep -qx 'DNS = 10.57.57.1' /config/peer1/peer1.conf || fail "peer DNS is not the tunnel address"
 logs_have "/config/unbound is no longer used" || fail "a leftover /config/unbound was not reported"
-ok "PEERDNS/USE_DNS are ignored; an old custom PEERDNS is replaced by the tunnel address"
+ok "PEERDNS/USE_DNS/HEALTHCHECK_DNS_NAME are ignored; an old custom PEERDNS is replaced by the tunnel address"
 echo "- DNS config on restart: OK" >> "$summary"
 
 # ----------------------------------------------------------------------------
@@ -644,17 +664,30 @@ upgrade_run() {
     fail "init did not finish ($1)"
 }
 # shellcheck disable=SC2016 # expanded inside the container
-config_sums='sha256sum /config/wg_confs/wg0.conf /config/peer*/peer*.conf /config/server/* /config/dnsmasq/dnsmasq.conf'
+config_sums='sha256sum /config/peer*/* /config/server/* /config/dnsmasq/dnsmasq.conf'
 upgrade_run "$lsio_image"
 before=$(docker exec "$container" sh -c "$config_sums")
+wg0_before=$(docker exec "$container" cat /config/wg_confs/wg0.conf)
 upgrade_run "$image"
 after=$(docker exec "$container" sh -c "$config_sums")
-[[ "$before" == "$after" ]] || fail "the upgrade changed configs or keys: $(diff <(echo "$before") <(echo "$after"))"
-logs_have 'No changes to parameters' || fail "the upgrade regenerated the tunnel configs"
+[[ "$before" == "$after" ]] || fail "the upgrade changed peer configs or keys: $(diff <(echo "$before") <(echo "$after"))"
+# The default PERSISTENTKEEPALIVE_PEERS changed from off to all: wg0.conf is
+# regenerated once and gains exactly one keepalive line per peer.
+logs_have 'settings changed (PERSISTENTKEEPALIVE_PEERS' || fail "the new keepalive default was not applied"
+# Both sides through $(...), which strips the trailing blank lines alike.
+wg0_after=$(docker exec "$container" cat /config/wg_confs/wg0.conf)
+wg0_diff=$(diff <(echo "$wg0_before") <(echo "$wg0_after") | grep '^[<>]' || true)
+[[ "$wg0_diff" == $'> PersistentKeepalive = 25\n> PersistentKeepalive = 25' ]] \
+    || fail "the upgrade changed wg0.conf beyond the keepalive lines: $wg0_diff"
 logs_have 'No changes to DNS settings' || fail "the upgrade re-rendered dnsmasq.conf"
+sum=$(wg0_sum)
+upgrade_run "$image"
+logs_have 'No changes to parameters' || fail "the second start after the upgrade regenerated again"
+[[ "$(wg0_sum)" == "$sum" && "$(docker exec "$container" sh -c "$config_sums")" == "$after" ]] \
+    || fail "the second start after the upgrade changed configs"
 unowned=$(docker exec "$container" find /config ! -type l \( ! -user 1000 -o ! -group 1000 \))
 [[ -z "$unowned" ]] || fail "not owned by PUID:PGID after the upgrade: $unowned"
-ok "keys and configs unchanged, ownership kept"
+ok "keys and peer configs unchanged, wg0.conf gains only keepalive once, ownership kept"
 docker rm -f "$container" >/dev/null
 echo "- Upgrade from the LinuxServer.io-based release: OK" >> "$summary"
 
@@ -700,7 +733,7 @@ else
         docker run -d --name "$srv" --network "$network" --ip 10.199.53.10 \
             --cap-add NET_ADMIN --device /dev/net/tun -v "$volume-srv":/config \
             -e PEERS=1 -e SERVERURL=10.199.53.10 -e INTERNAL_SUBNET=10.58.58.0 \
-            -e DNS_UPSTREAM=10.199.53.53 "$image" >/dev/null
+            -e DNS_UPSTREAM=10.199.53.53 -e HEALTHCHECK_DNS_NAME=unresolvable.invalid "$image" >/dev/null
         wait_tunnels "$srv"
         grep -q 'All tunnels are now active' <<<"$(docker logs "$srv" 2>&1)" || e2e_fail "server tunnel did not come up"
     }

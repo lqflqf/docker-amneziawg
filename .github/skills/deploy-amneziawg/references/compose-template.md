@@ -15,14 +15,14 @@ services:
       - PUID=<<uid owning ./config, e.g. 1000>>
       - PGID=<<gid, e.g. 1000>>
       - TZ=<<IANA zone, e.g. Etc/UTC>>
-      - SERVERURL=<<vpn.example.com or auto>>
+      - SERVERURL=<<vpn.example.com; omit the line to detect the public IPv4>>
       - SERVERPORT=<<port, default 51820>>
       - PEERS=<<count or names, e.g. laptop,phone>>
       # Optional — omit to keep the defaults:
       # - DNS_UPSTREAM=1.1.1.1,1.0.0.1   # or the host Unbound's address, README "Recommended: Unbound on the host"
       # - INTERNAL_SUBNET=10.13.13.0
       # - ALLOWEDIPS=0.0.0.0/0, ::/0
-      # - PERSISTENTKEEPALIVE_PEERS=all
+      # - PERSISTENTKEEPALIVE_PEERS=all   # all | comma-separated peers | none
       # - SERVER_ALLOWEDIPS_PEER_<<name>>=192.168.1.0/24
       # - AWG_VERSION=2.0          # 2.0 | 3.0 | 3.1 | 1.5
       # - AWG_DISABLE_COOKIES=on
