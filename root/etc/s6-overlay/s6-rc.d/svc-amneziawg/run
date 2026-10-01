@@ -10,6 +10,12 @@ RETRY_DELAY=5
 unset AWG_CONFS
 rm -rf /run/activeconfs
 
+# svc-dnsmasq waits for this file, so dnsmasq starts once wg0 is up (or the
+# first attempt has failed) instead of racing awg-quick.
+tunnels_settled() {
+    : > /run/amneziawg-settled
+}
+
 # Fail closed: with no tunnel up, remove every default route (IPv4 and IPv6, in
 # every routing table) so nothing in this network namespace reaches the
 # internet outside the VPN, and stop accepting router advertisements, which
@@ -52,6 +58,7 @@ done
 if [[ -z "${AWG_CONFS[*]}" ]]; then
     echo "**** No valid tunnel config found. Please create a valid config and restart the container ****"
     drop_default_routes
+    tunnels_settled
     # Fail the oneshot so s6 shows svc-amneziawg as down, like a failed tunnel.
     exit 1
 fi
@@ -70,11 +77,13 @@ for (( attempt = 1; attempt <= ATTEMPTS; attempt++ )); do
 
     if [[ -z "${FAILED}" ]]; then
         # dnsmasq (bind-dynamic) only rescans on address events, and awg-quick
-        # adds the address before it sets wg0 up, so dnsmasq can skip the
-        # address and never bind it. A restart now binds the up interface.
-        if [[ -n "${PEERS}" ]]; then
+        # adds the address before it sets wg0 up, so a dnsmasq that was
+        # already running (a retry, or a manual restart of this service) can
+        # skip the address and never bind it. A restart binds the up interface.
+        if [[ -n "${PEERS}" ]] && pgrep -x dnsmasq >/dev/null; then
             s6-svc -r /run/service/svc-dnsmasq 2>/dev/null || :
         fi
+        tunnels_settled
         declare -p AWG_CONFS > /run/activeconfs
         echo "**** All tunnels are now active ****"
         exit 0
@@ -85,6 +94,8 @@ for (( attempt = 1; attempt <= ATTEMPTS; attempt++ )); do
         echo "**** Disabling tunnel ${UP[k]} ****"
         awg-quick down "${UP[k]}" || :
     done
+    # Do not hold DNS back for the retries; a later success restarts dnsmasq.
+    tunnels_settled
     if (( attempt < ATTEMPTS )); then
         echo "**** Retrying in ${RETRY_DELAY}s (attempt $((attempt + 1)) of ${ATTEMPTS}) ****"
         sleep "${RETRY_DELAY}"

@@ -7,6 +7,11 @@
 # be group or world readable. harden_permissions fixes files from older images.
 umask 077
 
+# /run is on the container layer and survives docker restart. svc-dnsmasq and
+# svc-amneziawg start after this script, so a stale marker is gone before
+# either reads or writes it.
+rm -f /run/amneziawg-settled
+
 mkdir -p /config/wg_confs
 
 # migration to subfolder for wg confs
