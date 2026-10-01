@@ -701,6 +701,17 @@ assign_peer_addresses () {
     done
 }
 
+# wants_keepalive LABEL PEER_ID: whether PERSISTENTKEEPALIVE_PEERS selects the
+# peer, by its PEERS entry (1, laptop) or its ID (peer1, peer_laptop). The ID
+# is the only way to select a peer named "none".
+wants_keepalive() {
+    local entry
+    for entry in "${PERSISTENTKEEPALIVE_PEERS_ARRAY[@]}"; do
+        [[ "${entry}" == all || "${entry}" == "$1" || "${entry}" == "$2" ]] && return 0
+    done
+    return 1
+}
+
 render_confs () {
     local stage=$1 n i PEER_ID CLIENT_IP SERVER_ALLOWEDIPS peer_conf
     check_template /config/templates/server.conf || return 1
@@ -790,8 +801,7 @@ DUDE
 AllowedIPs = ${CLIENT_IP}/32
 DUDE
         fi
-        # add PersistentKeepalive if the peer is specified
-        if [[ -n "${PERSISTENTKEEPALIVE_PEERS_ARRAY}" ]] && ([[ "${PERSISTENTKEEPALIVE_PEERS_ARRAY[0]}" = "all" ]] || printf '%s\0' "${PERSISTENTKEEPALIVE_PEERS_ARRAY[@]}" | grep -Fxqz -- "${i}"); then
+        if wants_keepalive "${i}" "${PEER_ID}"; then
             cat <<DUDE >> "${stage}/wg0.conf"
 PersistentKeepalive = 25
 
@@ -1289,6 +1299,7 @@ if [[ -n "$PEERS" ]]; then
     PERSISTENTKEEPALIVE_PEERS=${PERSISTENTKEEPALIVE_PEERS:-all}
     if [[ "${PERSISTENTKEEPALIVE_PEERS}" == none ]]; then
         PERSISTENTKEEPALIVE_PEERS=""
+        PERSISTENTKEEPALIVE_PEERS_ARRAY=()
         echo "**** PersistentKeepalive is disabled for all peers ****"
     else
         echo "**** PersistentKeepalive will be set for: ${PERSISTENTKEEPALIVE_PEERS//,/ } ****"

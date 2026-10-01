@@ -184,7 +184,7 @@ With `network_mode: host`, use `interface: 127.0.0.1@5335` and `access-control: 
 | `-e PEERS=` | Number or comma-separated alphanumeric names. Enables server mode |
 | `-e INTERNAL_SUBNET=10.13.13.0` | VPN subnet (`.1` is the server, `.2` and up are peers) |
 | `-e ALLOWEDIPS=0.0.0.0/0, ::/0` | What peers route into the tunnel. The tunnel is IPv4-only; `::/0` sinks peer IPv6 to prevent leaks. Narrow it for split tunnelling |
-| `-e PERSISTENTKEEPALIVE_PEERS=all` | Peers the server sends `PersistentKeepalive = 25` to: `all`, comma-separated peers, or `none` |
+| `-e PERSISTENTKEEPALIVE_PEERS=all` | Peers the server sends `PersistentKeepalive = 25` to: `all`, `none`, or a comma-separated list of `PEERS` entries or peer IDs (`laptop` or `peer_laptop`; a peer named `none` can only be selected as `peer_none`) |
 | `-e SERVER_ALLOWEDIPS_PEER_<peer>=` | Extra server-side AllowedIPs for one peer (site-to-site) |
 | `-e LOG_CONFS=false` | `true` prints each peer's QR code to the log. QR codes contain private keys; `show-peer` is the safer way |
 | `-e DNS_UPSTREAM=1.1.1.1,1.0.0.1` | Where the peers' DNS forwarder (dnsmasq, server mode) sends queries: comma-separated IPv4/IPv6 addresses, each with an optional `#port`. See [DNS](#dns-dnsmasq) |
