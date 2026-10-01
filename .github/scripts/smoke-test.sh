@@ -751,10 +751,28 @@ else
     docker exec "$srv" sh -c 'echo "address=/edit.test/192.0.2.7" >> /config/templates/dnsmasq.conf'
     run_srv
     healthy "$srv" || e2e_fail "server is not healthy"
-    # dnsmasq waits for wg0 instead of starting early and being restarted.
-    srv_log=$(docker logs "$srv" 2>&1)
-    grep -q 'interface wg0 does not currently exist' <<<"$srv_log" && e2e_fail "dnsmasq started before wg0"
-    grep -q 'exiting on receipt of SIGTERM' <<<"$srv_log" && e2e_fail "dnsmasq was restarted after a first-attempt tunnel"
+    # dnsmasq waits for wg0 instead of starting early and being restarted. A
+    # failed first attempt legitimately starts it early, so skip the check then.
+    clean_dns_start() {
+        grep -q 'Retrying in' <<<"$1" && return 0
+        ! grep -qE 'interface wg0 does not currently exist|exiting on receipt of SIGTERM' <<<"$1"
+    }
+    clean_dns_start "$(docker logs "$srv" 2>&1)" || e2e_fail "dnsmasq started before wg0 or was restarted"
+    # /run survives docker restart; a stale marker must not let dnsmasq start
+    # early. Only the new start's log counts: shutdown stops dnsmasq too.
+    docker stop "$srv" >/dev/null
+    sleep 1
+    since=$(date +%s)
+    docker start "$srv" >/dev/null
+    for _ in $(seq 1 45); do
+        grep -qE 'All tunnels are now (active|down)' <<<"$(docker logs --since "$since" "$srv" 2>&1)" && break
+        sleep 1
+    done
+    grep -q 'All tunnels are now active' <<<"$(docker logs --since "$since" "$srv" 2>&1)" \
+        || e2e_fail "server tunnel did not come up after docker restart"
+    healthy "$srv" || e2e_fail "server is not healthy after docker restart"
+    clean_dns_start "$(docker logs --since "$since" "$srv" 2>&1)" \
+        || e2e_fail "dnsmasq started before wg0 or was restarted after docker restart"
     # Server mode: any DNS state but "running" is unhealthy, a missing one included.
     for bad in missing bogus disabled; do
         if [[ "$bad" == missing ]]; then

@@ -21,6 +21,8 @@ for (( i = 0; i < 300; i++ )); do
     [[ -e /run/amneziawg-settled ]] && break
     sleep 0.2
 done
+[[ -e /run/amneziawg-settled ]] \
+    || echo "**** svc-amneziawg has not finished its first attempt after 60s, starting dnsmasq anyway ****"
 
 # Do not exec dnsmasq with a config it will reject: s6 would restart-loop the
 # service and bury the reason in the churn. The tunnel still comes up, but the
