@@ -1,0 +1,73 @@
+#!/usr/bin/with-contenv bash
+# shellcheck shell=bash
+
+# A PUID/PGID that cannot be applied stops the container instead of exiting 1:
+# a failed oneshot leaves it running without svc-amneziawg, and in client mode
+# that means the default routes are never dropped.
+fatal() {
+    echo "**** ERROR: $* ****"
+    echo "**** The container is stopping. Fix PUID/PGID and start it again. ****"
+    echo 1 > /run/s6-linux-init-container-results/exitcode
+    /run/s6/basedir/bin/halt
+    exit 1
+}
+
+# Sets ID_OUT (no command substitution: fatal must stop this script).
+parse_id() {
+    local name=$1 value=$2
+    if [[ ! "${value}" =~ ^[0-9]{1,10}$ ]] || (( 10#${value} > 4294967294 )); then
+        fatal "${name}='${value}' is not a numeric ID between 0 and 4294967294"
+    fi
+    ID_OUT=$((10#${value}))
+}
+
+parse_id PUID "${PUID:-911}"
+puid=${ID_OUT}
+parse_id PGID "${PGID:-911}"
+pgid=${ID_OUT}
+
+# -o: the ID may belong to another account already (e.g. 100 = users).
+if [[ "$(id -g abc)" != "${pgid}" ]]; then
+    groupmod -o -g "${pgid}" abc || fatal "could not set the abc group to PGID ${pgid}"
+fi
+if [[ "$(id -u abc)" != "${puid}" ]]; then
+    # Point the home away from /config while changing the UID: usermod
+    # re-owns everything under the home directory.
+    if ! { usermod -d /root abc && usermod -o -u "${puid}" abc && usermod -d /config abc; }; then
+        fatal "could not set the abc user to PUID ${puid}"
+    fi
+fi
+[[ "$(id -u abc):$(id -g abc)" == "${puid}:${pgid}" ]] ||
+    fatal "abc is $(id -u abc):$(id -g abc), expected PUID:PGID ${puid}:${pgid}"
+
+cat /etc/s6-overlay/s6-rc.d/init-adduser/branding
+echo "
+User UID:    ${puid}
+User GID:    ${pgid}
+───────────────────────────────────────"
+if [[ -f /build_version ]]; then
+    cat /build_version
+    echo '───────────────────────────────────────'
+fi
+
+# Features of the LinuxServer.io base image, which this image no longer uses.
+lsio_warn() {
+    echo "**** WARNING: $* ****"
+}
+for var in $(compgen -e | grep '^FILE__' || :); do
+    target=${var#FILE__}
+    lsio_warn "${var} is no longer supported: ${target} is not read from the file. Set ${target} directly."
+    if [[ "${target}" == PEERS && -z "${PEERS:-}" ]]; then
+        lsio_warn "PEERS is not set, so the container runs in client mode."
+    fi
+done
+for var in DOCKER_MODS UMASK ATTACHED_DEVICES_PERMS LSIO_READ_ONLY_FS LSIO_NON_ROOT_USER; do
+    if [[ -n "$(printenv "${var}")" ]]; then
+        lsio_warn "${var} is a LinuxServer.io base image option and is ignored by this image."
+    fi
+done
+for dir in /custom-cont-init.d /custom-services.d; do
+    if [[ -n "$(ls -A "${dir}" 2>/dev/null)" ]]; then
+        lsio_warn "${dir} is no longer run (it was a LinuxServer.io base image feature)."
+    fi
+done

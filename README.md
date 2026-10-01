@@ -5,7 +5,7 @@
 [![GitHub release](https://img.shields.io/github/v/release/lqflqf/docker-amneziawg)](https://github.com/lqflqf/docker-amneziawg/releases)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-[AmneziaWG](https://docs.amnezia.org/) VPN server and client in one container. AmneziaWG is WireGuard with traffic obfuscation, which makes the handshake harder for deep packet inspection to recognize. In server mode the container writes the server config, gives you a config and QR code for every peer, and answers DNS for connected clients. It is built on [LinuxServer.io](https://www.linuxserver.io/) base images with s6-overlay.
+[AmneziaWG](https://docs.amnezia.org/) VPN server and client in one container. AmneziaWG is WireGuard with traffic obfuscation, which makes the handshake harder for deep packet inspection to recognize. In server mode the container writes the server config, gives you a config and QR code for every peer, and answers DNS for connected clients. It runs on Alpine Linux with [s6-overlay](https://github.com/just-containers/s6-overlay).
 
 > Forked from [AYastrebov/docker-amneziawg](https://github.com/AYastrebov/docker-amneziawg), created and maintained by [Andrey Yastrebov](https://github.com/AYastrebov). The container's design, its config generation and most of its AWG work are his. Many thanks to him for building it and releasing it under the MIT license. The main change here is DNS; see [Differences from the original](#differences-from-the-original).
 
@@ -82,6 +82,22 @@ This fork also adds:
 - archiving of removed peers
 - hardened secrets and DNS defaults
 - per-build image tags (`<amneziawg-tools>-r<N>`, for example `3.1.20260812-r2`); each has a [release](https://github.com/lqflqf/docker-amneziawg/releases) with its changes
+- a plain Alpine base with Alpine's s6-overlay package instead of the LinuxServer.io base image, see [Upgrading from the LinuxServer.io-based releases](#upgrading-from-the-linuxserverio-based-releases)
+
+### Upgrading from the LinuxServer.io-based releases
+
+Releases up to `3.1.20260812-r5` were built on the LinuxServer.io base image. Later ones run on plain Alpine with s6-overlay. Change nothing for a normal setup: the volume, `PUID`/`PGID`/`TZ`, keys and configs carry over unchanged.
+
+The extras of the LinuxServer.io base image are gone. Each one that is still set logs a `WARNING` at start-up and is ignored:
+
+| No longer supported | Instead |
+|---|---|
+| `FILE__<NAME>` (read a variable from a file) | Set `<NAME>` directly. A `FILE__PEERS` leaves `PEERS` unset, which means client mode |
+| `DOCKER_MODS`, `/custom-cont-init.d`, `/custom-services.d` | Build your own image `FROM` this one |
+| `UMASK` | Not needed: configs and keys are always written `600` |
+| `ATTACHED_DEVICES_PERMS`, `LSIO_READ_ONLY_FS`, `LSIO_NON_ROOT_USER` | None; the container runs as root and needs a writable root filesystem |
+
+A `PUID` or `PGID` that is not a number from 0 to 4294967294, or that cannot be applied, now stops the container with exit code 1 before any config is touched.
 
 ## DNS (dnsmasq)
 
@@ -162,7 +178,7 @@ With `network_mode: host`, use `interface: 127.0.0.1@5335` and `access-control: 
 
 | Parameter | Function |
 |-----------|----------|
-| `-e PUID` / `-e PGID` / `-e TZ` | File ownership and timezone (LinuxServer standard) |
+| `-e PUID=911` / `-e PGID=911` / `-e TZ` | Owner of `/config` (dnsmasq also runs as this user) and timezone. An invalid `PUID`/`PGID` stops the container |
 | `-e SERVERURL=auto` | Host or IP written into peer configs. `auto` detects the public IPv4 over HTTPS (and keeps the previous value if detection fails) |
 | `-e SERVERPORT=51820` | Port advertised to peers. The container always listens on 51820, so map `SERVERPORT:51820/udp` (**not** `SERVERPORT:SERVERPORT`) |
 | `-e PEERS=` | Number or comma-separated alphanumeric names. Enables server mode |
@@ -245,6 +261,8 @@ docker exec amneziawg cat /build_version      # bundled versions and commits
 | Peers get no DNS | Run `/app/healthcheck`. The log shows `DNS config generation failed` or `No valid dnsmasq config` with the reason. If dnsmasq answers but names don't resolve, the container cannot reach `DNS_UPSTREAM` |
 | Client: `Tunnel ... failed` after `sysctl: permission denied on key "net.ipv4.conf.all.src_valid_mark"` | Add the `net.ipv4.conf.all.src_valid_mark=1` sysctl to the container |
 | Connects, pings fine, downloads crawl | Fragmentation. See [Performance and MTU](#performance-and-mtu) |
+| Container exits with code 1 right after start, log says `PUID=... is not a numeric ID` | Set `PUID`/`PGID` to numeric IDs, for example the output of `id -u` and `id -g` |
+| `WARNING: ... LinuxServer.io base image option` | See [Upgrading from the LinuxServer.io-based releases](#upgrading-from-the-linuxserverio-based-releases) |
 
 ## Security
 
