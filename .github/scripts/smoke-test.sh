@@ -223,8 +223,8 @@ done
 grep -qE 'All tunnels are now (active|down)' <<<"$(docker logs "$container" 2>&1)" \
     || { echo "svc-amneziawg never finished"; docker logs "$container"; exit 1; }
 if grep -qw wg0 <<<"$(docker exec "$container" awg show interfaces)"; then
-    # dnsmasq binds the tunnel address when it appears, which can lag the
-    # "active" log line by a moment.
+    # dnsmasq starts after svc-amneziawg, which can lag the "active" log line
+    # by a moment.
     for _ in $(seq 1 10); do
         docker exec "$container" /app/healthcheck >/dev/null && break
         sleep 1
@@ -605,7 +605,7 @@ if grep -qE '\[(ls\.io-init|custom-init|mods-init|env-init|migrations)\]|custom-
 fi
 unowned=$(docker exec "$container" find /config ! -type l \( ! -user 1234 -o ! -group 2345 \))
 [[ -z "$unowned" ]] || fail "not owned by PUID:PGID: $unowned"
-# svc-amneziawg restarts dnsmasq after wg0 is up; retry across that.
+# dnsmasq starts after svc-amneziawg's first attempt; retry across that.
 for _ in $(seq 1 15); do
     # shellcheck disable=SC2016 # expanded inside the container
     dns_uid=$(docker exec "$container" sh -c 'stat -c %u /proc/$(pgrep -x dnsmasq)' 2>/dev/null || true)
@@ -751,6 +751,10 @@ else
     docker exec "$srv" sh -c 'echo "address=/edit.test/192.0.2.7" >> /config/templates/dnsmasq.conf'
     run_srv
     healthy "$srv" || e2e_fail "server is not healthy"
+    # dnsmasq waits for wg0 instead of starting early and being restarted.
+    srv_log=$(docker logs "$srv" 2>&1)
+    grep -q 'interface wg0 does not currently exist' <<<"$srv_log" && e2e_fail "dnsmasq started before wg0"
+    grep -q 'exiting on receipt of SIGTERM' <<<"$srv_log" && e2e_fail "dnsmasq was restarted after a first-attempt tunnel"
     # Server mode: any DNS state but "running" is unhealthy, a missing one included.
     for bad in missing bogus disabled; do
         if [[ "$bad" == missing ]]; then

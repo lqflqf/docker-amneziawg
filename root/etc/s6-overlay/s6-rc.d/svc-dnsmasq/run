@@ -14,6 +14,14 @@ if [[ -z "${PEERS}" ]]; then
     exec sleep infinity
 fi
 
+# Start once svc-amneziawg has brought wg0 up (or failed its first attempt):
+# started earlier, dnsmasq races awg-quick and can miss the tunnel address.
+# Not an s6 dependency, because dnsmasq must still run when the tunnel fails.
+for (( i = 0; i < 300; i++ )); do
+    [[ -e /run/amneziawg-settled ]] && break
+    sleep 0.2
+done
+
 # Do not exec dnsmasq with a config it will reject: s6 would restart-loop the
 # service and bury the reason in the churn. The tunnel still comes up, but the
 # container reports unhealthy until the config is fixed.
