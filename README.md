@@ -7,7 +7,7 @@
 
 [AmneziaWG](https://docs.amnezia.org/) VPN server and client in one container. AmneziaWG is WireGuard with traffic obfuscation, which makes the handshake harder for deep packet inspection to recognize. In server mode the container writes the server config, gives you a config and QR code for every peer, and answers DNS for connected clients. It is built on [LinuxServer.io](https://www.linuxserver.io/) base images with s6-overlay.
 
-> Forked from [AYastrebov/docker-amneziawg](https://github.com/AYastrebov/docker-amneziawg), created and maintained by [Andrey Yastrebov](https://github.com/AYastrebov). The container's design, its config generation and most of its AWG work are his. Many thanks to him for building it and releasing it under the MIT license. The main change here is the DNS resolver; see [Differences from the original](#differences-from-the-original).
+> Forked from [AYastrebov/docker-amneziawg](https://github.com/AYastrebov/docker-amneziawg), created and maintained by [Andrey Yastrebov](https://github.com/AYastrebov). The container's design, its config generation and most of its AWG work are his. Many thanks to him for building it and releasing it under the MIT license. The main change here is DNS; see [Differences from the original](#differences-from-the-original).
 
 ## Quick start
 
@@ -56,26 +56,24 @@ The container works without a kernel module: it falls back to the bundled usersp
 
 ## Modes
 
-- **Server mode (`PEERS` set):** generates keys, `wg0.conf`, and one config plus QR code per peer, and starts Unbound so that peers on `PEERDNS=auto` have a resolver.
-- **Client mode (`PEERS` unset):** brings up every `.conf` in `./config/wg_confs/`. Nothing is generated, and Unbound stays off unless `USE_DNS=true`.
+- **Server mode (`PEERS` set):** generates keys, `wg0.conf`, and one config plus QR code per peer, and runs a dnsmasq DNS forwarder on the server's tunnel address, which every peer config uses as its DNS server.
+- **Client mode (`PEERS` unset):** brings up every `.conf` in `./config/wg_confs/` (the file name is the interface name). Nothing is generated and dnsmasq does not run; each conf's `DNS` line becomes the container's resolver. A full tunnel (`AllowedIPs = 0.0.0.0/0`) needs the `net.ipv4.conf.all.src_valid_mark=1` sysctl, see the client example in [`docker-compose.yml`](docker-compose.yml).
 
 In either mode, if no tunnel comes up the container removes every IPv4 and IPv6 default route, so nothing leaks outside the VPN, and it reports itself `unhealthy`.
 
 ## Differences from the original
 
-The main change from [AYastrebov/docker-amneziawg](https://github.com/AYastrebov/docker-amneziawg) is the DNS resolver for peers: **Unbound instead of CoreDNS**.
+The main change from [AYastrebov/docker-amneziawg](https://github.com/AYastrebov/docker-amneziawg) is DNS for peers: **a dnsmasq forwarder instead of CoreDNS**, meant to sit in front of a resolver of your choice, ideally [Unbound on the host](#recommended-unbound-on-the-host).
 
-| | Original (CoreDNS) | This fork (Unbound) |
+| | Original (CoreDNS) | This fork (dnsmasq) |
 |---|---|---|
-| Where peer queries go | The host's resolver | Cloudflare `1.1.1.1` / `1.0.0.1`, or any upstream you set |
-| Encryption to the upstream | None | DNS-over-TLS (port 853) |
-| DNSSEC validation | No | Yes |
-| On/off switch | `USE_COREDNS` | `USE_DNS` |
-| Config file | `/config/coredns/Corefile` | `/config/unbound/unbound.conf` |
+| Where peer queries go | The host's resolver | `DNS_UPSTREAM`: Cloudflare `1.1.1.1` / `1.0.0.1` by default, or a resolver on the host |
+| Who can query it | Anyone who reaches port 53 | Peers through the tunnel only |
+| On/off | `USE_COREDNS` | Always on in server mode, off in client mode |
+| Peer DNS | `PEERDNS` | Always the server's tunnel address |
+| Config file | `/config/coredns/Corefile` | `/config/templates/dnsmasq.conf` |
 
-With CoreDNS, peer queries left the server in plain text, so the VPS provider could read or change them. The trade-offs of Unbound: lookups go to Cloudflare by default, and the server needs outbound TCP 853.
-
-**Switching from the original image:** change `image:`, and rename `USE_COREDNS` to `USE_DNS` if you set it (`USE_COREDNS` is ignored). The `/config` volume is reused as is, and peer configs don't change. `/config/coredns/` can be deleted.
+**Switching from the original image:** change `image:`. `USE_COREDNS` and `PEERDNS` are ignored; if you had set `PEERDNS`, the peer configs are regenerated with the tunnel address as DNS, so re-import them. `/config/coredns/` can be deleted.
 
 This fork also adds:
 - a health check
@@ -85,18 +83,80 @@ This fork also adds:
 - hardened secrets and DNS defaults
 - per-build image tags (`<amneziawg-tools>-r<N>`, for example `3.1.20260812-r2`); each has a [release](https://github.com/lqflqf/docker-amneziawg/releases) with its changes
 
-## DNS (Unbound)
+## DNS (dnsmasq)
 
-With `PEERDNS=auto` (the default), each peer config gets `DNS = <subnet>.1`, the server end of the tunnel. The default `/config/unbound/unbound.conf`:
-- forwards queries to Cloudflare over DNS-over-TLS
-- validates DNSSEC
-- drops root privileges after start-up
+In server mode every peer config gets `DNS = <subnet>.1`, the server end of the tunnel. dnsmasq answers there and forwards each query to `DNS_UPSTREAM` (default `1.1.1.1`, then `1.0.0.1`). It sends to whichever upstream answers, so one can fail without slowing lookups down. It is a forwarder only: it caches, but does not recurse or validate DNSSEC, and it talks plain DNS to the upstream. For encrypted, validated lookups, point it at [Unbound on the host](#recommended-unbound-on-the-host).
 
-Where it listens is generated at every start: on `127.0.0.1` and the tunnel address only, answering only the VPN subnet. Do not publish port 53.
+dnsmasq runs as the unprivileged `abc` user and is bound to the tunnel interface (`interface=wg0`): it answers only queries that arrive through the tunnel, plus loopback inside the container. A host or container that routes the VPN subnet to the container gets no answer. Do not publish port 53. In client mode it does not run.
 
-The file is copied only when it is missing, so your edits survive updates. Delete it to get the current default back. Configs created by older images keep their own `interface`/`access-control` lines, and the log mentions this. To use another upstream, replace the `forward-addr` lines and keep the `#hostname` suffix, for example `forward-addr: 9.9.9.9#dns.quad9.net`.
+Its configuration follows the same rule as the tunnel configs:
 
-Unbound does not run when `USE_DNS=false`, in client mode (unless `USE_DNS=true`), or when something already listens on port 53. In those cases, set `PEERDNS` to a resolver such as `1.1.1.1`. An invalid config is not started and makes the container `unhealthy`; the tunnel still comes up.
+| File | Written by | When |
+|---|---|---|
+| `/config/templates/dnsmasq.conf` | you | Copied from the image only if it is missing |
+| `/config/dnsmasq/dnsmasq.conf` | the container | Rendered from the template and `DNS_UPSTREAM` when either changed (or the file is missing); otherwise left as it is |
+| `/run/dnsmasq/base.conf` | the container | Every start: user, listen address, and an include of the file above |
+
+To change dnsmasq, edit the template and restart. Any dnsmasq option works, for example `address=/router.lan/192.168.1.1` or `server=/corp.example/10.0.0.53`. Options are added to the container's own, so `interface=`, `listen-address=` or `bind-interfaces` lines make dnsmasq answer outside the tunnel as well. Like the other templates it is expanded by the shell, so escape a literal `$` as `\$`. The rendered file is checked with `dnsmasq --test` before it replaces the old one; if the check fails, the previous file stays and the log shows `DNS config generation failed` with the reason. Edits made directly to the rendered file last until the next change to the template or `DNS_UPSTREAM`. If dnsmasq rejects the file, it is not started and the container reports `unhealthy`; the tunnel still comes up. Delete the rendered file to render it again.
+
+DNS changes never regenerate the peer configs, and tunnel changes never re-render `dnsmasq.conf`.
+
+### Upgrading from the Unbound releases
+
+- `PEERDNS` and `USE_DNS` are ignored, with a note in the log. If you had set `PEERDNS`, the peer configs are regenerated with the tunnel address as DNS; re-import them.
+- `/config/unbound/` is no longer used and can be deleted.
+- Unbound queried Cloudflare over DNS-over-TLS and validated DNSSEC; dnsmasq forwards plain DNS. To keep both, run [Unbound on the host](#recommended-unbound-on-the-host).
+- The `wg`/`wg-quick` aliases and the `/etc/wireguard` link are gone; use `awg` and `awg-quick`.
+
+## Recommended: Unbound on the host
+
+Let the container's dnsmasq forward to a validating resolver on the host. Peer lookups then leave the server over DNS-over-TLS, DNSSEC is checked, and Unbound's cache serves everything on the host. Example for Debian/Ubuntu with Compose:
+
+1. Give the stack a fixed network, so the host has a stable address on it, and point `DNS_UPSTREAM` at that address:
+
+   ```yaml
+   services:
+     amneziawg:
+       # ... as in Quick start, plus:
+       environment:
+         - DNS_UPSTREAM=172.31.53.1
+       networks:
+         - awg
+
+   networks:
+     awg:
+       driver_opts:
+         com.docker.network.bridge.name: br-awg
+       ipam:
+         config:
+           - subnet: 172.31.53.0/24
+             gateway: 172.31.53.1
+   ```
+
+2. Install Unbound (`sudo apt install unbound`) and make it listen on that gateway only, in `/etc/unbound/unbound.conf.d/amneziawg.conf`:
+
+   ```
+   server:
+       interface: 172.31.53.1
+       # Unbound starts before Docker creates br-awg
+       ip-freebind: yes
+       access-control: 172.31.53.0/24 allow
+       tls-cert-bundle: /etc/ssl/certs/ca-certificates.crt
+
+   forward-zone:
+       name: "."
+       forward-tls-upstream: yes
+       forward-addr: 1.1.1.1@853#cloudflare-dns.com
+       forward-addr: 1.0.0.1@853#cloudflare-dns.com
+   ```
+
+   Then `sudo unbound-checkconf && sudo systemctl restart unbound`. The Debian and Ubuntu packages validate DNSSEC by default. Leave out the `forward-zone` to have Unbound resolve from the root servers itself. Never bind Unbound to `0.0.0.0` or a public address: an open resolver gets abused.
+
+3. Allow DNS from the bridge through the host firewall, for example with ufw: `sudo ufw allow in on br-awg to 172.31.53.1 port 53`.
+
+4. Recreate the container (`docker compose up -d`) and check: `docker exec amneziawg nslookup example.com 172.31.53.1`. Set `HEALTHCHECK_DNS_NAME=example.com` to have the health check keep testing the whole chain.
+
+With `network_mode: host`, use `interface: 127.0.0.1@5335` and `access-control: 127.0.0.0/8 allow` instead, skip the firewall step, and set `DNS_UPSTREAM=127.0.0.1#5335`.
 
 ## Parameters
 
@@ -106,14 +166,13 @@ Unbound does not run when `USE_DNS=false`, in client mode (unless `USE_DNS=true`
 | `-e SERVERURL=auto` | Host or IP written into peer configs. `auto` detects the public IPv4 over HTTPS (and keeps the previous value if detection fails) |
 | `-e SERVERPORT=51820` | Port advertised to peers. The container always listens on 51820, so map `SERVERPORT:51820/udp` (**not** `SERVERPORT:SERVERPORT`) |
 | `-e PEERS=` | Number or comma-separated alphanumeric names. Enables server mode |
-| `-e PEERDNS=auto` | DNS for peers. `auto` means the container's Unbound at `<subnet>.1` |
 | `-e INTERNAL_SUBNET=10.13.13.0` | VPN subnet (`.1` is the server, `.2` and up are peers) |
 | `-e ALLOWEDIPS=0.0.0.0/0, ::/0` | What peers route into the tunnel. The tunnel is IPv4-only; `::/0` sinks peer IPv6 to prevent leaks. Narrow it for split tunnelling |
 | `-e PERSISTENTKEEPALIVE_PEERS=` | `all`, or comma-separated peers that get `PersistentKeepalive = 25` |
 | `-e SERVER_ALLOWEDIPS_PEER_<peer>=` | Extra server-side AllowedIPs for one peer (site-to-site) |
 | `-e LOG_CONFS=false` | `true` prints each peer's QR code to the log. QR codes contain private keys; `show-peer` is the safer way |
-| `-e USE_DNS=` | Force Unbound on or off. Defaults to on in server mode and off in client mode |
-| `-e HEALTHCHECK_DNS_NAME=` | If set, the health check also requires Unbound to resolve this name, which proves the upstream is reachable |
+| `-e DNS_UPSTREAM=1.1.1.1,1.0.0.1` | Where the peers' DNS forwarder (dnsmasq, server mode) sends queries: comma-separated IPv4/IPv6 addresses, each with an optional `#port`. See [DNS](#dns-dnsmasq) |
+| `-e HEALTHCHECK_DNS_NAME=` | If set, the health check also requires dnsmasq to resolve this name, which proves the upstream is reachable |
 | `-e AWG_VERSION=2.0` | Protocol version, see below |
 | `-e AWG_*` | Obfuscation parameters, see below. All are random by default |
 
@@ -165,11 +224,11 @@ docker exec amneziawg /app/show-peer laptop phone
 
 To add a peer, add it to `PEERS` and restart; existing peers keep their keys and addresses. When you remove a peer from `PEERS`, it disappears from `wg0.conf` and its directory moves to `/config/removed_peers/<peer>-<timestamp>/`, which frees its address. Adding the same name again creates a new identity.
 
-Configs are regenerated when a server-side variable, an `AWG_*` value, a `SERVER_ALLOWEDIPS_PEER_*` value or a template changes. Every generated config is checked with `awg`'s own parser, and the new set is installed all-or-nothing. If anything fails, such as a broken template, a duplicate peer or an invalid `SERVERURL`, no file changes and the log shows `Config generation failed` with the reason.
+Configs are regenerated when a server-side variable, an `AWG_*` value, a `SERVER_ALLOWEDIPS_PEER_*` value or the `server.conf`/`peer.conf` template changes; otherwise they are left as they are. (DNS settings have their own rule, see [DNS](#dns-dnsmasq).) Every generated config is checked with `awg`'s own parser, and the new set is installed all-or-nothing. If anything fails, such as a broken template, a duplicate peer or an invalid `SERVERURL`, no file changes and the log shows `Config generation failed` with the reason.
 
 ## Health check and troubleshooting
 
-The container is `healthy` only while every tunnel in `/config/wg_confs` is up and, when Unbound is enabled, Unbound answers. A tunnel is retried twice before the container gives up. Docker does not restart unhealthy containers by itself, so use the status for monitoring or with a tool such as autoheal.
+The container is `healthy` only while every tunnel in `/config/wg_confs` is up and, in server mode, dnsmasq answers on the tunnel address. A tunnel is retried twice before the container gives up. Docker does not restart unhealthy containers by itself, so use the status for monitoring or with a tool such as autoheal.
 
 ```bash
 docker logs amneziawg
@@ -183,7 +242,8 @@ docker exec amneziawg cat /build_version      # bundled versions and commits
 | Custom `SERVERPORT` unreachable | Map `SERVERPORT:51820/udp` |
 | Amnezia app shows AWG 1.5 | H1-H4 are integers. Use the 2.0 default ranges |
 | Connection fails after a parameter change | Give the peers their regenerated configs |
-| Peers get no DNS | Unbound is off (`USE_DNS=false`, or port 53 is taken). Set `PEERDNS=1.1.1.1` |
+| Peers get no DNS | Run `/app/healthcheck`. The log shows `DNS config generation failed` or `No valid dnsmasq config` with the reason. If dnsmasq answers but names don't resolve, the container cannot reach `DNS_UPSTREAM` |
+| Client: `Tunnel ... failed` after `sysctl: permission denied on key "net.ipv4.conf.all.src_valid_mark"` | Add the `net.ipv4.conf.all.src_valid_mark=1` sysctl to the container |
 | Connects, pings fine, downloads crawl | Fragmentation. See [Performance and MTU](#performance-and-mtu) |
 
 ## Security

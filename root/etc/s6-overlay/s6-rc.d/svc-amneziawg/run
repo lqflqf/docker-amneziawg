@@ -69,6 +69,12 @@ for (( attempt = 1; attempt <= ATTEMPTS; attempt++ )); do
     done
 
     if [[ -z "${FAILED}" ]]; then
+        # dnsmasq (bind-dynamic) only rescans on address events, and awg-quick
+        # adds the address before it sets wg0 up, so dnsmasq can skip the
+        # address and never bind it. A restart now binds the up interface.
+        if [[ -n "${PEERS}" ]]; then
+            s6-svc -r /run/service/svc-dnsmasq 2>/dev/null || :
+        fi
         declare -p AWG_CONFS > /run/activeconfs
         echo "**** All tunnels are now active ****"
         exit 0

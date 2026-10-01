@@ -19,7 +19,7 @@ services:
       - SERVERPORT=<<port, default 51820>>
       - PEERS=<<count or names, e.g. laptop,phone>>
       # Optional — omit to keep the defaults:
-      # - PEERDNS=1.1.1.1
+      # - DNS_UPSTREAM=1.1.1.1,1.0.0.1   # or the host Unbound's address, README "Recommended: Unbound on the host"
       # - INTERNAL_SUBNET=10.13.13.0
       # - ALLOWEDIPS=0.0.0.0/0, ::/0
       # - PERSISTENTKEEPALIVE_PEERS=all

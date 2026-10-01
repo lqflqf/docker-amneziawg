@@ -416,7 +416,7 @@ jobs:
           docker run --rm --platform linux/arm64 --entrypoint /bin/bash arm64-check -euc '
             awg --version
             amneziawg-go --version
-            unbound -V | head -n1
+            dnsmasq --version | head -n1
             test "$(uname -m)" = aarch64
             awg genkey | awg pubkey >/dev/null
             bash -n /etc/s6-overlay/s6-rc.d/init-amneziawg-confs/run

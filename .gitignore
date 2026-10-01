@@ -46,6 +46,8 @@ Temporary Items
 # AmneziaWG Configuration Files
 # Never commit real configuration files with private keys
 *.conf
+# ...but the image's templates hold no secrets
+!root/defaults/*.conf
 
 # Docker volumes and data
 volumes/

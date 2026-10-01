@@ -29,6 +29,9 @@ fi
 if [[ ! -f /config/templates/peer.conf ]]; then
     cp /defaults/peer.conf /config/templates/peer.conf
 fi
+if [[ ! -f /config/templates/dnsmasq.conf ]]; then
+    cp /defaults/dnsmasq.conf /config/templates/dnsmasq.conf
+fi
 # add preshared key to user templates (backwards compatibility)
 if ! grep -q 'PresharedKey' /config/templates/peer.conf; then
     sed -i 's|^Endpoint|PresharedKey = \$\(cat /config/\${PEER_ID}/presharedkey-\${PEER_ID}\)\nEndpoint|' /config/templates/peer.conf
@@ -959,23 +962,6 @@ config_generation_failed () {
     echo "****        Fix the error above and restart the container to try again.                                              ****"
 }
 
-warn_if_subnet_outside_dns_acl () {
-    # The unbound.conf shipped by older images answers 127.0.0.0/8 and the
-    # RFC1918 range only. A VPN subnet outside those is refused, so peers on
-    # PEERDNS=auto get no DNS at all with nothing in the log to explain it.
-    local first second
-    first=${1%%.*}
-    second=${1#*.}; second=${second%%.*}
-    [[ "$first" =~ ^[0-9]+$ ]] || return 0
-    [[ "$second" =~ ^[0-9]+$ ]] || return 0
-    if [[ "$first" == "10" ]] || [[ "$first" == "127" ]] || \
-        { [[ "$first" == "192" ]] && [[ "$second" == "168" ]]; } || \
-        { [[ "$first" == "172" ]] && (( second >= 16 && second <= 31 )); }; then
-        return 0
-    fi
-    echo "**** WARNING: The internal subnet ${INTERNAL_SUBNET} is outside the ranges your unbound.conf answers (127.0.0.0/8 and RFC1918), so peers using PEERDNS=auto will be REFUSED. Add \"access-control: ${1}.0/24 allow\" to /config/unbound/unbound.conf, or set PEERDNS to a resolver of your own. ****"
-}
-
 # ============================================================================
 # Saved state (/config/.donoteditthisfile)
 # ============================================================================
@@ -994,8 +980,8 @@ declare -A ORIG=()
 # The state file is data. It used to be sourced, which turned any value in it,
 # an auto-detected SERVERURL included, into code run as root on the next start.
 load_state () {
-    local line name value
-    [[ -f "${STATE_FILE}" ]] || return 0
+    local file=${1:-${STATE_FILE}} line name value
+    [[ -f "${file}" ]] || return 0
     while IFS= read -r line || [[ -n "${line}" ]]; do
         [[ "${line}" =~ ^ORIG_([A-Z0-9_]+)=(.*)$ ]] || continue
         name=${BASH_REMATCH[1]}
@@ -1004,7 +990,7 @@ load_state () {
             value=${value:1:${#value}-2}
         fi
         ORIG[${name}]=${value}
-    done < "${STATE_FILE}"
+    done < "${file}"
 }
 
 # Values are stored one per line, so newlines are folded (the same way on both
@@ -1013,13 +999,19 @@ state_value () {
     printf '%s' "${1//$'\n'/ }"
 }
 
-save_vars () {
-    local name
+# write_state FILE NAME... saves the current value of each NAME.
+write_state () {
+    local file=$1 name
+    shift
     {
-        for name in "${STATE_VARS[@]}"; do
+        for name in "$@"; do
             printf 'ORIG_%s="%s"\n' "${name}" "$(state_value "${!name}")"
         done
-    } > "${STATE_FILE}.tmp" && mv -f "${STATE_FILE}.tmp" "${STATE_FILE}"
+    } > "${file}.tmp" && mv -f "${file}.tmp" "${file}"
+}
+
+save_vars () {
+    write_state "${STATE_FILE}" "${STATE_VARS[@]}"
 }
 
 # Sets CHANGED_VAR to the first input that differs from the saved state.
@@ -1081,28 +1073,159 @@ detect_public_ipv4 () {
 }
 
 # ============================================================================
-# Unbound
+# DNS (dnsmasq, server mode)
 # ============================================================================
+#
+# Same model as the tunnel confs: /config/templates/dnsmasq.conf plus
+# DNS_UPSTREAM render /config/dnsmasq/dnsmasq.conf, which is rewritten only when
+# one of them changed (saved in DNS_STATE_FILE, separately from the tunnel
+# state, so neither side regenerates the other). /run/dnsmasq/base.conf holds
+# what the container owns (user, interface) and includes the rendered file.
 
-# Written at every start and included by the default unbound.conf: listen on
-# loopback and, in server mode, the tunnel address only, and answer only those
-# networks. ip-freebind lets unbound bind the tunnel address before the tunnel
-# exists (svc-unbound starts first).
-write_unbound_listen () {
-    mkdir -p /run/unbound
-    {
-        echo "# Generated at every start by init-amneziawg-confs. Do not edit;"
-        echo "# add settings to /config/unbound/unbound.conf instead."
-        echo "interface: 127.0.0.1"
-        echo "access-control: 127.0.0.0/8 allow"
-        if [[ -n "${INTERFACE:-}" ]]; then
-            echo "interface: ${INTERFACE}.1"
-            echo "access-control: ${INTERFACE}.0/24 allow"
-            echo "ip-freebind: yes"
+DNS_STATE_FILE=/config/dnsmasq/.donoteditthisfile
+DNS_STATE_VARS=(DNS_UPSTREAM DNS_TEMPLATE_HASH)
+DNSMASQ_CONF=/config/dnsmasq/dnsmasq.conf
+DNSMASQ_BASE=/run/dnsmasq/base.conf
+DNSMASQ_ADDRESS=/run/dnsmasq/address
+
+is_ipv6 () {
+    [[ "$1" == *:* ]] && [[ "$1" =~ ^[0-9A-Fa-f:.]+$ ]]
+}
+
+# DNS_UPSTREAM is a comma-separated list of IPv4/IPv6 addresses, each with an
+# optional #port (dnsmasq's server= takes no host names). Normalizes
+# DNS_UPSTREAM and sets DNS_SERVER_LINES to one server= line per entry.
+parse_dns_upstream () {
+    local entry addr port
+    local -a entries list=()
+    DNS_SERVER_LINES=""
+    IFS=',' read -ra entries <<< "${DNS_UPSTREAM}"
+    for entry in "${entries[@]}"; do
+        entry=${entry//[[:space:]]/}
+        [[ -n "${entry}" ]] || continue
+        addr=${entry%%#*}
+        port=""
+        [[ "${entry}" == *#* ]] && port=${entry#*#}
+        if ! is_ipv4 "${addr}" && ! is_ipv6 "${addr}"; then
+            echo "**** ERROR: DNS_UPSTREAM entry \"${entry}\" is not an IPv4 or IPv6 address (host names are not supported) ****"
+            return 1
         fi
-    } > /run/unbound/listen.conf
-    chmod 755 /run/unbound
-    chmod 644 /run/unbound/listen.conf
+        if [[ "${entry}" == *#* ]] && { [[ ! "${port}" =~ ^[0-9]{1,5}$ ]] || (( 10#${port} < 1 || 10#${port} > 65535 )); }; then
+            echo "**** ERROR: DNS_UPSTREAM entry \"${entry}\" has an invalid port (use address#port, 1-65535) ****"
+            return 1
+        fi
+        list+=("${entry}")
+        DNS_SERVER_LINES+="server=${entry}"$'\n'
+    done
+    if (( ${#list[@]} == 0 )); then
+        echo "**** ERROR: DNS_UPSTREAM is empty ****"
+        return 1
+    fi
+    DNS_SERVER_LINES=${DNS_SERVER_LINES%$'\n'}
+    DNS_UPSTREAM=$(IFS=,; printf '%s' "${list[*]}")
+}
+
+# dnsmasq_base CONF_FILE
+# interface=wg0 with bind-dynamic answers only queries that arrive on wg0 (plus
+# loopback, which dnsmasq adds and only this container can reach). A query for
+# the tunnel address that arrives on eth0, from a neighbour that routes the VPN
+# subnet here, is ignored. listen-address would answer it.
+dnsmasq_base () {
+    cat <<EOF
+# Generated at every start by init-amneziawg-confs. Do not edit; change
+# /config/templates/dnsmasq.conf or DNS_UPSTREAM instead.
+user=abc
+group=abc
+no-resolv
+bind-dynamic
+interface=wg0
+host-record=health.amneziawg,127.0.0.1
+log-facility=-
+conf-file=${1}
+EOF
+}
+
+dns_state_changed () {
+    local name
+    CHANGED_VAR=""
+    for name in "${DNS_STATE_VARS[@]}"; do
+        if [[ "$(state_value "${!name}")" != "${ORIG[${name}]:-}" ]]; then
+            CHANGED_VAR=${name}
+            return 0
+        fi
+    done
+    return 1
+}
+
+# Like generate_confs: render into a staging file, check it with dnsmasq's own
+# parser together with the base config, then move it into place. On failure
+# the previous dnsmasq.conf is left as it is.
+render_dnsmasq () {
+    local stage rc=1
+    check_template /config/templates/dnsmasq.conf || return 1
+    stage=$(mktemp /config/dnsmasq/.staging.XXXXXX) || return 1
+    if ! eval "$(printf %s)
+    cat <<DUDE > ${stage}
+$(cat /config/templates/dnsmasq.conf)
+DUDE"; then
+        echo "**** ERROR: /config/templates/dnsmasq.conf could not be rendered, see the error above ****"
+    elif ! dnsmasq_base "${stage}" > "${stage}.base"; then
+        :
+    elif ! dnsmasq --test -C "${stage}.base"; then
+        echo "**** ERROR: the rendered dnsmasq config is not valid, see the error above ****"
+    elif mv -f "${stage}" "${DNSMASQ_CONF}"; then
+        rc=0
+    fi
+    rm -f "${stage}" "${stage}.base"
+    return "${rc}"
+}
+
+dns_generation_failed () {
+    echo "**** ERROR: DNS config generation failed. ${DNSMASQ_CONF} was not changed. Fix the error above and restart the container. ****"
+}
+
+# The tunnel address peers send DNS to, taken from the installed wg0.conf
+# rather than INTERNAL_SUBNET: if generating a new set failed, the previous
+# wg0.conf is the one that comes up. The health check queries it.
+configure_dns () {
+    DNS_UPSTREAM=${DNS_UPSTREAM:-1.1.1.1,1.0.0.1}
+    DNS_LISTEN=""
+    [[ -f /config/wg_confs/wg0.conf ]] && DNS_LISTEN=$(conf_address /config/wg_confs/wg0.conf)
+    mkdir -p /config/dnsmasq /run/dnsmasq
+    chmod 755 /run/dnsmasq
+    rm -f /config/dnsmasq/.staging.*
+    rm -f "${DNSMASQ_BASE}" "${DNSMASQ_ADDRESS}"
+    load_state "${DNS_STATE_FILE}"
+
+    if ! parse_dns_upstream; then
+        dns_generation_failed
+    else
+        # shellcheck disable=SC2034 # read through DNS_STATE_VARS
+        DNS_TEMPLATE_HASH=$(sha256sum < /config/templates/dnsmasq.conf | cut -d' ' -f1)
+        if [[ ! -f "${DNSMASQ_CONF}" ]] || dns_state_changed; then
+            if [[ -f "${DNSMASQ_CONF}" ]]; then
+                echo "**** DNS settings changed (${CHANGED_VAR}), rendering ${DNSMASQ_CONF} ****"
+            else
+                echo "**** Rendering ${DNSMASQ_CONF} ****"
+            fi
+            if render_dnsmasq; then
+                write_state "${DNS_STATE_FILE}" "${DNS_STATE_VARS[@]}"
+            else
+                dns_generation_failed
+            fi
+        else
+            echo "**** No changes to DNS settings. Existing ${DNSMASQ_CONF} is used. ****"
+        fi
+    fi
+
+    if ! is_ipv4 "${DNS_LISTEN}"; then
+        echo "**** ERROR: no server tunnel address in /config/wg_confs/wg0.conf, dnsmasq will not be started ****"
+        return
+    fi
+    dnsmasq_base "${DNSMASQ_CONF}" > "${DNSMASQ_BASE}"
+    printf '%s\n' "${DNS_LISTEN}" > "${DNSMASQ_ADDRESS}"
+    chmod 644 "${DNSMASQ_BASE}" "${DNSMASQ_ADDRESS}"
+    echo "**** Peers use ${DNS_LISTEN} for DNS; dnsmasq forwards to ${DNS_UPSTREAM} (unless /config/templates/dnsmasq.conf says otherwise) ****"
 }
 
 # Keys, confs, pngs and saved parameters are secret. Older images created some
@@ -1208,16 +1331,11 @@ if [[ -n "$PEERS" ]]; then
     INTERFACE=$(echo "$INTERNAL_SUBNET" | awk 'BEGIN{FS=OFS="."} NF--')
     ALLOWEDIPS=${ALLOWEDIPS:-0.0.0.0/0, ::/0}
     echo "**** AllowedIPs for peers $ALLOWEDIPS ****"
-    if [[ -z "$PEERDNS" ]] || [[ "$PEERDNS" = "auto" ]]; then
-        PEERDNS="${INTERFACE}.1"
-        echo "**** PEERDNS var is either not set or is set to \"auto\", setting peer DNS to ${INTERFACE}.1 to use the container's unbound resolver. ****"
-        if [[ "${USE_DNS,,}" == "false" ]]; then
-            echo "**** WARNING: USE_DNS=false turns unbound off, so peers on PEERDNS=auto will get no DNS. Set PEERDNS to a resolver such as 1.1.1.1. ****"
-        fi
-        PEERDNS_AUTO=1
-    else
-        echo "**** Peer DNS servers will be set to $PEERDNS ****"
+    if [[ -n "${PEERDNS:-}" ]]; then
+        echo "**** NOTE: PEERDNS is no longer supported and is ignored. Peers always use the container's dnsmasq at ${INTERFACE}.1; set DNS_UPSTREAM to choose where it forwards. ****"
     fi
+    # Not a setting any more, but kept in the templates and the saved state.
+    PEERDNS="${INTERFACE}.1"
 
     # Load saved AWG params as fallback, then generate/validate
     load_awg_params
@@ -1255,29 +1373,17 @@ if [[ -n "$PEERS" ]]; then
         save_awg_params
         save_vars
     fi
+
+    configure_dns
 else
     echo "**** Client mode selected. ****"
-    USE_DNS="${USE_DNS,,}"
-    printf %s "${USE_DNS:-false}" > /run/s6/container_environment/USE_DNS
 fi
 
-# set up unbound
-if [[ ! -f /config/unbound/unbound.conf ]]; then
-    cp /defaults/unbound.conf /config/unbound/unbound.conf
+if [[ -n "${USE_DNS:-}" ]]; then
+    echo "**** NOTE: USE_DNS is no longer supported and is ignored. dnsmasq always runs in server mode and never in client mode. ****"
 fi
-
-if [[ ! -f /config/unbound/root.key ]]; then
-    cp /usr/share/dnssec-root/trusted-key.key /config/unbound/root.key
-fi
-
-write_unbound_listen
-if ! grep -q '/run/unbound/listen.conf' /config/unbound/unbound.conf; then
-    if [[ -n "$PEERS" ]] || [[ "${USE_DNS,,}" == "true" ]]; then
-        echo "**** NOTE: /config/unbound/unbound.conf predates the generated listen and access-control settings, so unbound keeps listening where that file says. Compare it with /defaults/unbound.conf, or delete it to get the current default on the next start. ****"
-    fi
-    if [[ -n "${PEERDNS_AUTO:-}" ]]; then
-        warn_if_subnet_outside_dns_acl "${INTERFACE}"
-    fi
+if [[ -d /config/unbound ]]; then
+    echo "**** NOTE: /config/unbound is no longer used (this image runs dnsmasq instead of Unbound) and can be deleted. ****"
 fi
 
 # let openresolv take control of resolv.conf
