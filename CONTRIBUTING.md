@@ -1,95 +1,30 @@
-# Contributing to Docker AmneziaWG
+# Contributing
 
-Thank you for your interest in contributing to this project! This document provides guidelines for contributing.
+Issues and pull requests are welcome. Use the issue templates; for security problems follow [SECURITY.md](SECURITY.md) instead.
 
-## How to Contribute
+## Workflow
 
-### Reporting Issues
+1. Fork, then branch: `feature/<name>`.
+2. Make the change. Architecture, invariants and conventions are in [`.github/copilot-instructions.md`](.github/copilot-instructions.md) — read it before touching `root/` or CI.
+3. Build and test:
 
-1. Check if the issue already exists in the [Issues](https://github.com/lqflqf/docker-amneziawg/issues) section
-2. If not, create a new issue with:
-   - Clear description of the problem
-   - Steps to reproduce
-   - Expected vs actual behavior
-   - Docker version and host OS
-   - Relevant logs or error messages
+   ```bash
+   docker build -t amneziawg-test .
+   .github/scripts/smoke-test.sh amneziawg-test     # what CI runs, ~1 min
+   # if you changed .github/scripts/:
+   .github/scripts/next-version.test.sh && .github/scripts/release-tags.test.sh
+   ```
 
-### Suggesting Enhancements
+   For a multi-arch build: `docker buildx build --platform linux/amd64,linux/arm64 .`
+4. Update the user docs the change affects (`README.md`, `docker-compose.yml`, `docs/`). Each topic has one home, listed in `.github/copilot-instructions.md`.
+5. Commit with [conventional commits](https://www.conventionalcommits.org/) (`feat:`, `fix:`, `docs:`, `chore:`) and open a PR against `master`.
 
-1. Open an issue with the "enhancement" label
-2. Describe the proposed feature and its benefits
-3. Include examples of how it would be used
+## Style
 
-### Pull Requests
+- Shell and s6 scripts: 4-space indent, `#!/usr/bin/with-contenv bash` plus `# shellcheck shell=bash`, executable bit set.
+- Dockerfile and YAML: 2-space indent (see `.editorconfig`).
+- Comment only what needs explaining.
 
-1. Fork the repository
-2. Create a feature branch: `git checkout -b feature/your-feature-name`
-3. Make your changes
-4. Test your changes thoroughly
-5. Update documentation if needed
-6. Commit with clear, descriptive messages
-7. Push to your fork and submit a pull request
+## Releases
 
-## Development Guidelines
-
-### Code Style
-
-- Follow existing code style and conventions
-- Use clear, descriptive variable and function names
-- Add comments for complex logic
-- Keep Dockerfile efficient and secure
-
-### Testing
-
-- Test with different AmneziaWG configurations
-- Verify both server and client setups
-- Test with Docker and Docker Compose
-- Ensure the container starts and stops gracefully
-
-### Documentation
-
-- Update README.md if adding new features
-- Update configuration examples if needed
-- Add inline documentation for complex scripts
-
-## Project Structure
-
-```
-├── Dockerfile          # Multi-stage build configuration
-├── docker-compose.yml  # Compose setup example
-├── entrypoint.sh       # Container startup script
-├── awg0.conf.example   # Configuration template
-├── .github/workflows/  # CI/CD automation
-└── README.md          # Project documentation
-```
-
-## Building and Testing Locally
-
-```bash
-# Build the image
-docker build -t amneziawg-test .
-
-# Test with a configuration
-cp awg0.conf.example awg0.conf
-# Edit awg0.conf with your settings
-docker run --rm -it --cap-add NET_ADMIN --device /dev/net/tun \
-  -v $(pwd)/awg0.conf:/etc/wireguard/awg0.conf \
-  amneziawg-test awg0
-```
-
-## Commit Message Format
-
-Use clear, imperative commit messages:
-
-- `feat: add support for custom interface names`
-- `fix: resolve startup script permissions issue`
-- `docs: update configuration examples`
-- `chore: update base image to Alpine 3.19`
-
-## Questions?
-
-If you have questions about contributing, feel free to:
-- Open an issue with the "question" label
-- Start a discussion in the repository
-
-Thank you for contributing! 🚀
+Merging to `master` publishes a new image automatically when image content changed (`Dockerfile`, `root/`, `.dockerignore`, the build workflow or `.github/scripts/`). Do not create `v*` tags by hand — they are the build counter.

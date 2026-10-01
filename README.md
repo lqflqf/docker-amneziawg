@@ -52,9 +52,7 @@ The container works without a kernel module: it falls back to the bundled usersp
 - **Which datapath is in use:** the log says either `AmneziaWG kernel module is active` or `using userspace amneziawg-go`.
 - **`SYS_MODULE` is not needed.** The container never calls `modprobe`; it only checks whether the module is already loaded. Keep `SYS_MODULE` only on minimal hosts that don't load the iptables NAT modules on their own.
 - **Keep the module and the image on the same feature generation.** An older module still works with a newer image, but the kernel datapath only applies the options that module knows about. A module older than 3.1 rejects `RandomTrailers` and `DisableCookies` outright: the tunnel fails with `Unable to modify interface: Invalid argument`. The container warns about this at start-up when it can read `/sys/module/amneziawg/version`.
-- **With `RandomTrailers`, use a module built from upstream `4569c4c6` (2026-09-06) or newer.** Earlier 3.1 modules also appended trailers to I1-I5 and junk packets, which produced occasional oversized handshake datagrams that fragment on narrow paths.
-  - The fixed build still reports `3.1.20260812`, so check the package version (`dpkg -l amneziawg-dkms` should show `…+4569c4c…` or newer) instead of the version string.
-  - See [docs/awg-performance.md](docs/awg-performance.md#checking-whether-your-module-has-the-fix). The bundled `amneziawg-go` never had this bug.
+- **With `RandomTrailers`, use a module built from upstream `4569c4c6` (2026-09-06) or newer**; older 3.1 modules send occasional oversized handshake packets. The version string does not show the fix, see [how to check](docs/awg-performance.md#checking-whether-your-module-has-the-fix).
 
 ## Modes
 
@@ -85,9 +83,7 @@ This fork also adds:
 - protocol-version migration
 - archiving of removed peers
 - hardened secrets and DNS defaults
-- per-build image tags (`<amneziawg-tools>-r<N>`, for example `3.1.20260812-r2`)
-
-See the [changelog](CHANGELOG.md).
+- per-build image tags (`<amneziawg-tools>-r<N>`, for example `3.1.20260812-r2`); each has a [release](https://github.com/lqflqf/docker-amneziawg/releases) with its changes
 
 ## DNS (Unbound)
 
@@ -192,23 +188,13 @@ docker exec amneziawg cat /build_version      # bundled versions and commits
 
 ## Security
 
-- Keys, configs, QR codes and `awg_params` are mode `600`.
-- **Treat write access to `/config` as root access.** `PostUp` lines and the templates in `/config/templates/` (shell heredocs) run as root. World-writable templates are refused.
-- See [SECURITY.md](SECURITY.md) to report a vulnerability.
-
-## Building locally
-
-```bash
-docker build -t amneziawg .
-docker buildx build --platform linux/amd64,linux/arm64 -t amneziawg .
-.github/scripts/smoke-test.sh amneziawg   # the CI smoke tests
-```
+Keys, configs and QR codes are mode `600`. **Treat write access to `/config` as root access**: `PostUp` lines and the templates run as root. Details and vulnerability reporting: [SECURITY.md](SECURITY.md).
 
 ## Links
 
 - [AmneziaVPN documentation](https://docs.amnezia.org/) · [kernel module](https://github.com/amnezia-vpn/amneziawg-linux-kernel-module) · [AmneziaWG Architect](https://architect.vai-rice.space/)
 - [LinuxServer docker-wireguard](https://github.com/linuxserver/docker-wireguard), the project this one is modeled on
-- [CONTRIBUTING.md](CONTRIBUTING.md) · [CHANGELOG.md](CHANGELOG.md)
+- [CONTRIBUTING.md](CONTRIBUTING.md) (building and testing locally) · [releases](https://github.com/lqflqf/docker-amneziawg/releases)
 
 ## Credits
 

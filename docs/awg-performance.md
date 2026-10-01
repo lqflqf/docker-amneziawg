@@ -2,7 +2,7 @@
 
 How each obfuscation parameter costs throughput, why, and which values to pick. Everything here is traced to upstream source and confirmed by measurement over a real internet path.
 
-Short version: **`RandomTrailers` combined with unequal `S1`-`S4` costs 98% of upload throughput.** Container versions before the generator fix produced exactly that combination under `AWG_VERSION=3.1`; current versions draw one shared `S` value, but configs and saved `awg_params` from older versions still carry the broken shape. See [Recommended parameters](#recommended-parameters).
+Short version: **`RandomTrailers` combined with unequal `S1`-`S4` costs 98% of upload throughput.** The container now draws one shared `S` value whenever trailers are on, and drops saved unequal values on the next start; hand-written configs and other generators can still produce the broken shape. See [Recommended parameters](#recommended-parameters).
 
 ## Which parameters cost anything
 
@@ -42,7 +42,7 @@ random_trailers ? skb->len >= expected_len : skb->len == expected_len
 
 The receiver then tries init, response, cookie and transport in order. For each it reads a 4-byte type field at that type's own padding offset (`S1`, `S2`, `S3`, `S4`) and tests it against the matching `H` range.
 
-Once `>=` always passes, the type check is the only thing left separating the branches. And because the container's generator drew `S1`-`S4` independently at the time, they differed — so the init/response/cookie branches read the type field at the **wrong offset** and get garbage. Garbage lands inside a 50,000,000-wide `H` range with probability 50e6 / 2³² = 1.16% per branch, three branches, so:
+Once `>=` always passes, the type check is the only thing left separating the branches. With independently drawn `S1`-`S4` the values differ, so the init/response/cookie branches read the type field at the **wrong offset** and get garbage. Garbage lands inside a 50,000,000-wide `H` range with probability 50e6 / 2³² = 1.16% per branch, three branches, so:
 
 **≈3.49% of data packets are misclassified as handshake messages and dropped.**
 
@@ -60,7 +60,7 @@ Setting `H1`-`H4` to `1,2,3,4` fixes it too, by shrinking each range to a single
 bool random_trailers = wg->random_trailers;   // not gated on CPA
 ```
 
-Setting both gives you the loose matching and its misclassification risk with none of the trailer obfuscation. It is the worst of the two, which is why the container now leaves `ContentPaddingAddition` at `0` whenever trailers are on.
+Setting both gives you the loose matching and its misclassification risk with none of the trailer obfuscation. It is the worst of the two, which is why the container leaves `ContentPaddingAddition` at `0` whenever trailers are on.
 
 ## Measurements
 
@@ -74,7 +74,7 @@ Path: 22ms RTT, client path MTU 1280, tunnel MTU 1180. Without the tunnel the li
 | `HeaderProtectionKey` + `S=12`, no CPA/RT | 99.7 | 131.6 | 182 |
 | ↑ plus `RandomTrailers` | 99.7 | 125.3 | 537 |
 | ↑ plus `ContentPaddingAddition 1-16` | 99.7 | 102.4 | 186 |
-| **pre-fix container `AWG_VERSION=3.1` default** | **1.7** | 115.0 | 258 |
+| **unequal `S`, `RandomTrailers` + CPA (old container 3.1 default)** | **1.7** | 115.0 | 258 |
 | ↑ at `awg-quick`'s default MTU 1420 | **0.5** | 75.5 | 263 |
 
 The small-packet column is measured *after* a bulk transfer, so the trailer window has grown to full MTU — which is the realistic case for mixed traffic.
@@ -83,7 +83,7 @@ Each of these independently repairs the collapse, confirming the mechanism:
 
 | Variant | ↑ Mbit/s |
 |---|---:|
-| unequal `S`, wide `H`, `RandomTrailers=on` (the broken default) | 1.7 / 2.4 |
+| unequal `S`, wide `H`, `RandomTrailers=on` | 1.7 / 2.4 |
 | same but `RandomTrailers` off | 98.0 / 98.6 |
 | same but `S1=S2=S3=S4` | 95.1 / 99.4 |
 | same but `H1..H4 = 1,2,3,4` | 98.5 / 95.3 |
@@ -109,9 +109,11 @@ with CPA:  4421 of 1232, 4416 of 1235, 4406 of 1233, ...  <- smeared over ~16 si
 
 The 22% figure is measured directly and reproduced. The GRO attribution is inference from the size distributions plus the code — it was not isolated by toggling `UDP_GRO`.
 
-> The per-packet table in [mtu.md](mtu.md) (formerly in the README) previously said `ContentPaddingAddition` adds nothing to a full-size packet because it is capped at the MTU. That is not right: the cap is `udp_window - packet_len` (`peer.h:110-124`), where `udp_window` is a high-water mark over every datagram sent *and received* (`send.c:243`, `receive.c:571`). Receiving padded packets raises it, so full-size sends do get padded — 1228 becomes 1229-1244 above.
+The padding cap is `udp_window - packet_len` (`peer.h:110-124`), not the MTU: `udp_window` is a high-water mark over every datagram sent *and received* (`send.c:243`, `receive.c:571`). Receiving padded packets raises it, so full-size sends do get padded — 1228 becomes 1229-1244 above.
 
-## MTU
+## Per-packet overhead and the handshake-burst fix
+
+Choosing a tunnel MTU is covered in [mtu.md](mtu.md); this section is the evidence behind it.
 
 Per-packet overhead is `20 (IPv4) + 8 (UDP) + 32 (AWG header + tag) + S4` = **`60 + S4`**.
 
@@ -170,12 +172,7 @@ This does not affect the container's `check_awg31_kernel_support()`: that only
 compares the `3.1` major/minor to decide whether the module understands the 3.1
 switches at all, and upstream does maintain those two components.
 
-`awg-quick` writes `route MTU − 80` = 1420 and knows nothing about `S4`, so on a 1500-byte IPv4 path:
-
-- `S4 ≤ 20` → 1420 fits. **Keep `S4` at or below 20 and the default MTU is safe.**
-- `S4 = 27` (a value the container picks often) → ceiling is 1413, so every full-size packet fragments. That is the 75.5 Mbit/s row above.
-
-See [MTU](mtu.md) for choosing a value; nothing in this document changes that guidance.
+With `S4 = 27` (older images drew up to that) a 1420-MTU packet is 1507 bytes over IPv4 and fragments — the 75.5 Mbit/s row above.
 
 ## Recommended parameters
 
@@ -202,9 +199,7 @@ MTU = 1280       # or path MTU − 60 − S4; awg-quick's 1420 ignores S4
 # gives up WireGuard's DoS mitigation, so enable it only for DPI reasons
 ```
 
-`MTU` is per-endpoint and does not have to match. 1280 assumes a 1500-byte path;
-a client that is itself behind a 1280-byte path needs `1280 − 60 − S4` = 1208
-instead, so measure rather than assume — see [MTU](#mtu) above.
+`MTU` is per-endpoint and does not have to match; a client behind a constrained path needs a lower value — see [mtu.md](mtu.md).
 
 Cost against plain WireGuard: **−1% upload, −5% download, +0.3ms RTT.**
 

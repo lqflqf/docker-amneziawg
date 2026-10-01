@@ -1,90 +1,23 @@
-# Security Policy
+# Security policy
 
-## Supported Versions
+## Supported versions
 
-We support the latest version of this Docker image. Security updates are applied to the `latest` tag and new releases.
+Only the newest release (`:latest`, or the highest `<amneziawg-tools>-r<N>` tag) receives fixes. Older `-r<N>` tags are immutable and are not patched; upgrade instead.
 
-| Version | Supported          |
-| ------- | ------------------ |
-| latest  | ✅ Yes             |
-| < 1.0   | ❌ No              |
+## Reporting a vulnerability
 
-## Reporting a Vulnerability
+Do **not** open a public issue. Report privately through GitHub: the repository's **Security** tab → **Report a vulnerability**. Include what is affected, steps to reproduce, the impact and, if you have one, a fix. You will get an answer and credit if you want it; fixes ship as a new release.
 
-If you discover a security vulnerability, please follow these steps:
+## What the image does
 
-1. **Do NOT** open a public issue
-2. Include the following information:
-   - Description of the vulnerability
-   - Steps to reproduce
-   - Potential impact
-   - Suggested fix (if any)
+- **Pinned supply chain**: base images pinned by digest, upstream sources by commit. Images carry SLSA provenance and an SBOM, and CI fails on fixable critical vulnerabilities.
+- **Private secrets**: keys, peer confs, QR codes and saved AWG parameters are mode `600` in `700` directories. QR codes reach the logs only with `LOG_CONFS=true`.
+- **Least-privilege DNS**: the default Unbound config drops to the unprivileged `abc` user, listens only on loopback and the tunnel address, and answers only the VPN subnet.
+- **Fail closed**: if no tunnel comes up, every IPv4 and IPv6 default route is removed and the container reports `unhealthy`.
+- **Validated configs**: generated configs are checked with `awg`'s own parser and installed all-or-nothing; auto-detected addresses are fetched over HTTPS and validated.
 
-## Security Best Practices
+The container runs as root because it needs `NET_ADMIN`.
 
-When using this Docker image:
+## Trust boundary: `/config`
 
-### Configuration Security
-- **Never** commit configuration files with real keys to version control
-- Use strong, randomly generated private keys
-- Regularly rotate keys
-- Limit `AllowedIPs` to necessary ranges only
-
-### Container Security
-- Run containers with minimal required privileges
-- Use Docker secrets for sensitive configuration
-- Regularly update the container image
-- Monitor container logs for suspicious activity
-
-### Network Security
-- Use firewall rules to restrict access to WireGuard ports
-- Consider using non-standard ports
-- Enable logging for connection monitoring
-- Use strong authentication for server access
-
-### Host Security
-- Keep the Docker host system updated
-- Use container runtime security tools
-- Implement proper backup strategies for configurations
-- Monitor system resources and network traffic
-
-## Security Features
-
-- **Minimal attack surface**: Alpine Linux base, base images pinned by digest and upstream sources pinned by commit; images carry SLSA provenance and an SBOM, and CI fails on fixable critical vulnerabilities
-- **Secrets stay private**: keys, peer confs, QR codes and the saved AWG parameters are created mode `600` in `700` directories. QR codes (which contain private keys) are only written to the logs when `LOG_CONFS=true`
-- **Least privilege for DNS**: on new installs Unbound drops to the unprivileged `abc` user after binding, and only listens on loopback and the tunnel address, answering the VPN subnet only
-- **Fail closed**: if no tunnel comes up, every IPv4 and IPv6 default route is removed and the container reports `unhealthy`
-- **Validated configs**: generated configs are checked by `awg`'s own parser and installed transactionally; auto-detected addresses are fetched over HTTPS and validated
-- **AmneziaWG obfuscation**: built-in traffic obfuscation to evade detection
-
-The container itself runs as root: it needs `NET_ADMIN` to create interfaces and firewall rules.
-
-### Trust boundary: `/config`
-
-Treat write access to the `/config` volume as root access to the container. `PostUp`/`PostDown` lines in any conf under `/config/wg_confs/` run as root, and the templates in `/config/templates/` are shell heredocs expanded as root. The container refuses world-writable templates, but anyone who can write the volume as its owner can run code. Keep the volume owned by `PUID` and not writable by other users.
-
-## Vulnerability Response
-
-- Security issues will be addressed with high priority
-- Fixes will be released as soon as possible
-- Security advisories will be published for significant vulnerabilities
-- Users will be notified through GitHub releases and repository updates
-
-## Security Updates
-
-Stay informed about security updates:
-
-1. Watch this repository for releases
-2. Subscribe to GitHub security advisories
-3. Follow the project's release notes
-4. Check for updates regularly using `docker pull`
-
-## Responsible Disclosure
-
-We appreciate security researchers who help keep our users safe. If you report a vulnerability responsibly, we will:
-
-- Work with you to understand and resolve the issue
-- Provide credit for the discovery (if desired)
-- Keep you informed of our progress
-
-Thank you for helping keep Docker AmneziaWG secure! 🔒
+Treat write access to the `/config` volume as root access to the container. `PostUp`/`PostDown` lines in any conf under `/config/wg_confs/` run as root, and the templates in `/config/templates/` are shell heredocs expanded as root. World-writable templates are refused, but anyone who can write the volume as its owner can run code. Keep it owned by `PUID` and not writable by other users.
