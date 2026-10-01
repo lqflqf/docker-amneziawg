@@ -208,10 +208,12 @@ echo "- Health check: OK" >> "$summary"
 echo "### dnsmasq at runtime"
 echo "### dnsmasq at runtime" >> "$summary"
 dx() { docker exec "$container" "$@"; }
-# Listeners on port 53 other than loopback and the given tunnel address.
-# interface=wg0 makes dnsmasq add loopback, which only this container reaches.
+# Listeners on port 53 other than loopback, the given tunnel address and
+# addresses scoped to wg0. interface=wg0 makes dnsmasq add loopback, which only
+# this container reaches, and bind every wg0 address: a userspace (TUN) wg0
+# gets an IPv6 link-local one ([fe80::...]%wg0), reachable through wg0 only.
 foreign_listeners() {
-    grep -vE "(127\.0\.0\.1|\[::1\]|${1//./\\.}):53 " <<<"$2" || true
+    grep -vE "(127\.0\.0\.1|\[::1\]|%wg0|${1//./\\.}):53 " <<<"$2" || true
 }
 for _ in $(seq 1 20); do
     [[ "$(dx cat /run/dnsmasq-state 2>/dev/null)" == running ]] && dx pgrep -x dnsmasq >/dev/null && break
