@@ -1311,9 +1311,13 @@ if [[ -n "$PEERS" ]]; then
         mapfile -t PERSISTENTKEEPALIVE_PEERS_ARRAY < <(echo "${PERSISTENTKEEPALIVE_PEERS}" | tr ',' '\n')
     fi
 
-    if [[ -z "$SERVERURL" ]] || [[ "$SERVERURL" = "auto" ]]; then
+    if [[ "$SERVERURL" == auto ]]; then
+        echo "**** WARNING: SERVERURL=auto is deprecated, remove it: an unset SERVERURL detects the public IPv4 ****"
+        SERVERURL=""
+    fi
+    if [[ -z "$SERVERURL" ]]; then
         if SERVERURL=$(detect_public_ipv4); then
-            echo "**** SERVERURL var is either not set or is set to \"auto\", setting external IP to auto detected value of $SERVERURL ****"
+            echo "**** SERVERURL not set, detected public IPv4: $SERVERURL ****"
         elif [[ -n "${ORIG[SERVERURL]:-}" ]] && valid_endpoint_host "${ORIG[SERVERURL]}"; then
             SERVERURL=${ORIG[SERVERURL]}
             echo "**** WARNING: could not detect the external IP, keeping the previous value ${SERVERURL} ****"

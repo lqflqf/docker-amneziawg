@@ -41,14 +41,18 @@ fi
     fatal "abc is $(id -u abc):$(id -g abc), expected PUID:PGID ${puid}:${pgid}"
 
 cat /etc/s6-overlay/s6-rc.d/init-adduser/branding
-echo "
-User UID:    ${puid}
-User GID:    ${pgid}
-───────────────────────────────────────"
+banner_line() {
+    printf '  ▸ %-8s %s\n' "$1" "$2"
+}
+banner_line uid:gid "${puid}:${pgid}"
+# The bundled component versions stay in /build_version, out of the log.
 if [[ -f /build_version ]]; then
-    cat /build_version
-    echo '───────────────────────────────────────'
+    build_version=$(sed -n 's/^AmneziaWG version: *//p' /build_version)
+    build_date=$(sed -n 's/^Build-date: *//p' /build_version)
+    [[ -n "${build_version}" ]] && banner_line version "${build_version}"
+    [[ -n "${build_date}" ]] && banner_line built "${build_date}"
 fi
+echo
 
 # Features of the LinuxServer.io base image, which this image no longer uses.
 lsio_warn() {

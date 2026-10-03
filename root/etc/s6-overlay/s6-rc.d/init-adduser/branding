@@ -1,13 +1,10 @@
-───────────────────────────────────────
+ ██╗ █╗  █╗█╗ █╗████╗████╗█╗ ██╗ █╗  █╗ ███╗
+█╔═█╗██╗██║██╗█║█╔══╝╚═█╔╝█║█╔═█╗█║  █║█╔══╝
+████║█╚█╔█║█╚██║███╗  █╔╝ █║████║█║█╗█║█║██╗
+█╔═█║█║╚╝█║█║╚█║█╔═╝ █╔╝  █║█╔═█║██╔██║█║╚█║
+█║ █║█║  █║█║ █║████╗████╗█║█║ █║█╔╝╚█║╚██╔╝
+╚╝ ╚╝╚╝  ╚╝╚╝ ╚╝╚═══╝╚═══╝╚╝╚╝ ╚╝╚╝  ╚╝ ╚═╝
 
-      ╔═╗╔╦╗╔╗╔╔═╗╔═╗╦╔═╗╦ ╦╔═╗
-      ╠═╣║║║║║║║╣ ╔═╝║╠═╣║║║║ ╦
-      ╩ ╩╩ ╩╝╚╝╚═╝╚═╝╩╩ ╩╚╩╝╚═╝
-
-      AmneziaWG VPN Container
-      github.com/lqflqf/docker-amneziawg
-      Forked from github.com/AYastrebov/docker-amneziawg
-
-      Alpine Linux + s6-overlay
-
-───────────────────────────────────────
+  ▸ repo     lqflqf/docker-amneziawg
+  ▸ fork of  AYastrebov/docker-amneziawg
+  ▸ base     Alpine Linux · s6-overlay
