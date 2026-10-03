@@ -603,6 +603,9 @@ start -e PEERS=1 -e PUID=1234 -e PGID=2345 -e TZ=Asia/Shanghai \
     -v "$tmpdir/custom-init":/custom-cont-init.d:ro
 wait_tunnels "$container"
 logs_have '▸ uid:gid  1234:2345' || fail "the banner does not show PUID/PGID"
+box_widths=$(docker logs "$container" 2>&1 | sed -n '/^╭/,/^╰/p' |
+    python3 -c 'import sys; print(sorted({len(l) for l in sys.stdin.buffer.read().decode().splitlines()}))')
+[[ "$box_widths" == "[50]" ]] || fail "banner box lines are not all 50 columns wide: $box_widths"
 order=$(docker logs "$container" 2>&1 | grep -nE '▸ repo |Config initialization finished|All tunnels are now' | cut -d: -f1 | tr '\n' ' ')
 read -r l_banner l_init l_tunnels <<<"$order"
 (( l_banner < l_init && l_init < l_tunnels )) || fail "init order is not banner, configs, tunnels (lines: $order)"
