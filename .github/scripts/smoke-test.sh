@@ -410,6 +410,17 @@ logs_have 'is not a valid host name' || fail "invalid SERVERURL accepted"
 [[ "$(wg0_sum)" == "$sum" ]] || fail "invalid SERVERURL changed wg0.conf"
 ok "invalid SERVERURL is rejected"
 
+# "auto" is a valid host name: it must never reach a peer's Endpoint. Detection
+# needs the internet; without it the previous value is kept.
+run_new -e SERVERURL=auto
+logs_have 'WARNING: SERVERURL=auto is deprecated' || fail "SERVERURL=auto did not warn"
+{ logs_have 'SERVERURL not set, detected public IPv4: ' || logs_have 'keeping the previous value ci.example.com'; } \
+    || fail "SERVERURL=auto was not treated as unset"
+endpoint=$(iface_value /config/peer1/peer1.conf Endpoint)
+[[ -n "$endpoint" && "$endpoint" != auto:* ]] || fail "SERVERURL=auto gave Endpoint '$endpoint'"
+sum=$(wg0_sum)
+ok "SERVERURL=auto warns and is treated as unset"
+
 docker exec "$container" sh -c 'echo "# ci" >> /config/templates/server.conf && chmod 666 /config/templates/server.conf'
 run_new
 logs_have "is world-writable" || fail "world-writable template was used"
@@ -591,8 +602,8 @@ start -e PEERS=1 -e PUID=1234 -e PGID=2345 -e TZ=Asia/Shanghai \
     -e FILE__SERVERURL=/run/secrets/serverurl -e DOCKER_MODS=linuxserver/mods:x -e UMASK=022 \
     -v "$tmpdir/custom-init":/custom-cont-init.d:ro
 wait_tunnels "$container"
-{ logs_have 'User UID:    1234' && logs_have 'User GID:    2345'; } || fail "the banner does not show PUID/PGID"
-order=$(docker logs "$container" 2>&1 | grep -nE 'AmneziaWG VPN Container|Config initialization finished|All tunnels are now' | cut -d: -f1 | tr '\n' ' ')
+logs_have '▸ uid:gid  1234:2345' || fail "the banner does not show PUID/PGID"
+order=$(docker logs "$container" 2>&1 | grep -nE '▸ repo |Config initialization finished|All tunnels are now' | cut -d: -f1 | tr '\n' ' ')
 read -r l_banner l_init l_tunnels <<<"$order"
 (( l_banner < l_init && l_init < l_tunnels )) || fail "init order is not banner, configs, tunnels (lines: $order)"
 for w in 'FILE__SERVERURL is no longer supported' 'DOCKER_MODS is a LinuxServer.io base image option' \

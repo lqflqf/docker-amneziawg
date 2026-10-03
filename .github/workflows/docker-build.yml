@@ -436,7 +436,7 @@ jobs:
           logs=$(docker logs arm64-boot 2>&1)
           echo "$logs" | tail -n 40
           [ "$booted" = true ]
-          grep -q 'User UID:    1234' <<<"$logs"
+          grep -q '▸ uid:gid  1234:2345' <<<"$logs"
           grep -q 'Config initialization finished' <<<"$logs"
           docker exec arm64-boot test -s /config/peer1/peer1.png
           [ "$(docker exec arm64-boot id -u abc)" = 1234 ]
