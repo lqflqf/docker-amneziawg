@@ -40,9 +40,20 @@ fi
 [[ "$(id -u abc):$(id -g abc)" == "${puid}:${pgid}" ]] ||
     fatal "abc is $(id -u abc):$(id -g abc), expected PUID:PGID ${puid}:${pgid}"
 
+echo
+echo
 cat /etc/s6-overlay/s6-rc.d/init-adduser/branding
+# One row of the box that branding opens: 44 columns between "│  " and "  │".
+# The value must be ASCII (${#} counts bytes in the C locale); a long one is cut.
 banner_line() {
-    printf '  ▸ %-8s %s\n' "$1" "$2"
+    local text ellipsis="" pad=42
+    text=$(printf '%-8s %s' "$1" "$2")
+    if (( ${#text} > pad )); then
+        text=${text:0:pad-1}
+        ellipsis="…"
+        pad=$((pad - 1))
+    fi
+    printf '│  ▸ %s%s%*s  │\n' "${text}" "${ellipsis}" $((pad - ${#text})) ''
 }
 banner_line uid:gid "${puid}:${pgid}"
 # The bundled component versions stay in /build_version, out of the log.
@@ -52,7 +63,7 @@ if [[ -f /build_version ]]; then
     [[ -n "${build_version}" ]] && banner_line version "${build_version}"
     [[ -n "${build_date}" ]] && banner_line built "${build_date}"
 fi
-echo
+printf '│%48s│\n╰%s╯\n\n\n' '' '────────────────────────────────────────────────'
 
 # Features of the LinuxServer.io base image, which this image no longer uses.
 lsio_warn() {
