@@ -179,7 +179,7 @@ With `network_mode: host`, use `interface: 127.0.0.1@5335` and `access-control: 
 | Parameter | Function |
 |-----------|----------|
 | `-e PUID=911` / `-e PGID=911` / `-e TZ` | Owner of `/config` (dnsmasq also runs as this user) and timezone. An invalid `PUID`/`PGID` stops the container |
-| `-e SERVERURL=` | Host or IP written into peer configs. Unset (or `auto`) detects the public IPv4 over HTTPS (and keeps the previous value if detection fails) |
+| `-e SERVERURL=` | Host or IP written into peer configs. Unset detects the public IPv4 over HTTPS (and keeps the previous value if detection fails). `auto` is deprecated: it warns and is treated as unset |
 | `-e SERVERPORT=51820` | Port advertised to peers. The container always listens on 51820, so map `SERVERPORT:51820/udp` (**not** `SERVERPORT:SERVERPORT`) |
 | `-e PEERS=` | Number or comma-separated alphanumeric names. Enables server mode |
 | `-e INTERNAL_SUBNET=10.13.13.0` | VPN subnet (`.1` is the server, `.2` and up are peers) |
