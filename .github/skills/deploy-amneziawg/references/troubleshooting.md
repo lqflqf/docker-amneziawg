@@ -14,7 +14,7 @@ Start with `docker compose logs --tail=200` and `docker exec amneziawg /app/heal
 
 | Log line / healthcheck output | Cause and fix |
 |---|---|
-| `Config generation failed` | The preceding line names the bad input (duplicate peers, more than 253 peers, invalid `SERVERURL`/`SERVERPORT`/`INTERNAL_SUBNET`, public IPv4 detection (`SERVERURL` unset or `auto`) failed on a fresh install, S < 12 under 3.x, broken template). Previous configs stay in use; fix and `docker compose up -d` |
+| `Config generation failed` | The preceding line names the bad input (duplicate peers, more than 253 peers, invalid `SERVERURL`/`SERVERPORT`/`INTERNAL_SUBNET`, public IPv4 detection (`SERVERURL` unset) failed on a fresh install, S < 12 under 3.x, broken template). Previous configs stay in use; fix and `docker compose up -d` |
 | `Peer … contains non-alphanumeric characters and thus will be skipped` | Rename the peer in `PEERS` to letters and digits only |
 | `Tunnel /config/wg_confs/wg0.conf failed` / `no active tunnels` | Read the `awg-quick` error above it. `Unable to modify interface: Invalid argument` with 3.1 switches = host kernel module < 3.1: upgrade it or set `AWG_RANDOM_TRAILERS=off` and `AWG_DISABLE_COOKIES=off` (removing the variables reuses the saved value) |
 | `dnsmasq has no valid config` / `dnsmasq does not answer …` | The log shows `DNS config generation failed` (bad `DNS_UPSTREAM` or template) or `No valid dnsmasq config` (a hand edit dnsmasq rejects). Fix `config/templates/dnsmasq.conf` or `DNS_UPSTREAM`, or delete `config/dnsmasq/dnsmasq.conf` to render it again |
