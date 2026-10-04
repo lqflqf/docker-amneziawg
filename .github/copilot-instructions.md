@@ -12,6 +12,8 @@ Write all text (this file, `README.md`, `docs/`, `SECURITY.md`, skills, comments
 - Do not use a verb "-ing" form as a noun or an adjective. Do not remove articles to make text shorter.
 - Write technical names (variables, files, functions, commands) as they are, in backticks. Headings, table cells and list labels can be short phrases.
 
+The `asd-ste100` skill rewrites and audits text. Its `scripts/ste-lint.py` examines the structural rules. If the skill and this list do not agree, use this list. Do not add the ASD-STE100 dictionary to the repository: ASD does not let this project copy it.
+
 ## Where to find documentation
 
 Each topic has one file. Link to that file. Do not copy its content.
@@ -25,6 +27,7 @@ Each topic has one file. Link to that file. Do not copy its content.
 | AWG parameter semantics, CPS tag syntax, `<r N>` size | `.github/skills/amneziawg-config/references/parameters.md` |
 | Generate or lint standalone AWG confs | `.github/skills/amneziawg-config/` |
 | Deploy this container to a host | `.github/skills/deploy-amneziawg/` |
+| Rewrite or lint text in ASD-STE100 (from `danyuchn/asd-ste100-skill` at `32511c6`, MIT) | `.github/skills/asd-ste100/` |
 | Architecture, invariants, CI | this file |
 
 ## Build and test
