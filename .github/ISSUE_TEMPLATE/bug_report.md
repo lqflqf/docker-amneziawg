@@ -7,10 +7,10 @@ assignees: ''
 ---
 
 **Describe the bug**
-What happened, and what you expected instead.
+Tell us what occurred and what you expected.
 
 **To reproduce**
-Your `docker-compose.yml` (or `docker run` command) and the steps that trigger it.
+Give your `docker-compose.yml` (or `docker run` command) and the steps that cause the bug.
 
 **Environment**
 - Host OS and kernel (`uname -r`):
@@ -26,7 +26,7 @@ docker exec amneziawg /app/healthcheck
 docker logs amneziawg
 ```
 
-Paste the output here, with keys and public IPs removed.
+Paste the output here. Remove keys and public IPs first.
 
 **Configuration**
-Relevant `[Interface]`/`[Peer]` sections with **private and preshared keys removed**.
+Give the related `[Interface]`/`[Peer]` sections. **Remove the private and preshared keys.**

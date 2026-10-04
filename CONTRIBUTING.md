@@ -1,11 +1,11 @@
 # Contributing
 
-Issues and pull requests are welcome. Use the issue templates; for security problems follow [SECURITY.md](SECURITY.md) instead.
+We accept issues and pull requests. Use the issue templates. For security problems, use the procedure in [SECURITY.md](SECURITY.md).
 
 ## Workflow
 
-1. Fork, then branch: `feature/<name>`.
-2. Make the change. Architecture, invariants and conventions are in [`.github/copilot-instructions.md`](.github/copilot-instructions.md) — read it before touching `root/` or CI.
+1. Fork the repository, then make a branch: `feature/<name>`.
+2. Make the change. [`.github/copilot-instructions.md`](.github/copilot-instructions.md) gives the architecture, the invariants and the conventions. Read it before you change `root/` or CI.
 3. Build and test:
 
    ```bash
@@ -15,16 +15,16 @@ Issues and pull requests are welcome. Use the issue templates; for security prob
    .github/scripts/next-version.test.sh && .github/scripts/release-tags.test.sh
    ```
 
-   For a multi-arch build: `docker buildx build --platform linux/amd64,linux/arm64 .`
-4. Update the user docs the change affects (`README.md`, `docker-compose.yml`, `docs/`). Each topic has one home, listed in `.github/copilot-instructions.md`.
-5. Commit with [conventional commits](https://www.conventionalcommits.org/) (`feat:`, `fix:`, `docs:`, `chore:`) and open a PR against `master`.
+   To build for more than one architecture, use `docker buildx build --platform linux/amd64,linux/arm64 .`
+4. Update the user documents that the change affects (`README.md`, `docker-compose.yml`, `docs/`). Each topic has one file. `.github/copilot-instructions.md` gives the list.
+5. Write [conventional commits](https://www.conventionalcommits.org/) (`feat:`, `fix:`, `docs:`, `chore:`). Then open a PR against `master`.
 
 ## Style
 
-- Shell and s6 scripts: 4-space indent, `#!/usr/bin/with-contenv bash` plus `# shellcheck shell=bash`, executable bit set.
+- Shell and s6 scripts: 4-space indent, `#!/usr/bin/with-contenv bash` and `# shellcheck shell=bash`, executable bit set.
 - Dockerfile and YAML: 2-space indent (see `.editorconfig`).
-- Comment only what needs explaining.
+- Write a comment only if the code needs an explanation.
 
 ## Releases
 
-Merging to `master` publishes a new image automatically when image content changed (`Dockerfile`, `root/`, `.dockerignore`, the build workflow or `.github/scripts/`). Do not create `v*` tags by hand — they are the build counter.
+If a merge to `master` changes the image content, CI publishes a new image automatically. The image content is `Dockerfile`, `root/`, `.dockerignore`, the build workflow and `.github/scripts/`. Do not create `v*` tags manually: they are the build counter.
