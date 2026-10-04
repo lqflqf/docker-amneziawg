@@ -1,6 +1,6 @@
 # System setup
 
-Run each block on the target host (over SSH if remote).
+Run each block on the target host. Use SSH if the host is remote.
 
 ## Docker
 
@@ -23,7 +23,7 @@ sudo apk add --no-cache docker docker-cli-compose && sudo rc-update add docker d
 sudo zypper install -y docker docker-compose
 ```
 
-Then `sudo systemctl enable --now docker` (systemd distros) and `sudo usermod -aG docker $USER` (`addgroup` on Alpine). Group membership needs a new login (`newgrp docker` for the current shell). Verify with `docker compose version && docker run --rm hello-world`.
+Then run `sudo systemctl enable --now docker` on systemd distros. Run `sudo usermod -aG docker $USER`, or `addgroup` on Alpine. Group membership needs a new login. Use `newgrp docker` for the current shell. Verify with `docker compose version && docker run --rm hello-world`.
 
 ## Sysctl
 
@@ -34,7 +34,7 @@ sudo sysctl --system
 
 ## Firewall
 
-Open UDP `SERVERPORT` (default 51820). With the default bridge network no NAT rule is needed on the host: the server conf's `PostUp` masquerades out of the container's `eth+` interface, and Docker's bridge NAT does the rest. With `network_mode: host` that rule applies to the host's interfaces, so it only works if the uplink is named `eth*`; on `ens*`/`enp*` hosts add a `PostUp` masquerade for the real uplink in `/config/templates/server.conf` (or a host rule for the VPN subnet).
+Open UDP `SERVERPORT`, which defaults to 51820. With the default bridge network, no NAT rule is necessary on the host. The server conf `PostUp` masquerades out of the container `eth+` interface. Docker bridge NAT then handles the rest. With `network_mode: host`, that rule applies to host interfaces. It works only if the uplink is named `eth*`. On `ens*` or `enp*` hosts, add a `PostUp` masquerade for the real uplink in `/config/templates/server.conf`. Alternatively, add a host rule for the VPN subnet.
 
 ```bash
 sudo ufw allow 51820/udp            # ufw: allow SSH first before any `ufw enable`, or you lock yourself out
@@ -43,9 +43,9 @@ sudo nft add rule inet filter input udp dport 51820 accept                      
 sudo iptables -A INPUT -p udp --dport 51820 -j ACCEPT                              # iptables (persist with iptables-persistent)
 ```
 
-Docker publishes ports through its own chains, so a host firewall that is closed may still pass traffic — open it anyway for clarity and for `network_mode: host`.
+Docker publishes ports through its own chains. Thus, a closed host firewall can still pass traffic. Open it anyway for clarity and for `network_mode: host`.
 
-**Cloud firewalls are separate and usually the real blocker.** Always remind the user to allow inbound UDP on the port in AWS Security Groups, GCP VPC firewall, Hetzner Cloud Firewalls, DigitalOcean Cloud Firewalls, or their provider's equivalent.
+**Cloud firewalls are separate and usually the real blocker.** Always remind the user to allow inbound UDP on the port. Do this in AWS Security Groups, GCP VPC firewall, Hetzner Cloud Firewalls, DigitalOcean Cloud Firewalls, or the provider equivalent.
 
 ## TUN device
 
@@ -54,4 +54,4 @@ sudo modprobe tun && echo tun | sudo tee /etc/modules-load.d/tun.conf
 ls -l /dev/net/tun        # crw-rw-rw- … 10, 200
 ```
 
-`modprobe tun: Operation not permitted` means an LXC/OpenVZ plan without TUN support: the user must ask the provider to enable it or move to a KVM plan.
+`modprobe tun: Operation not permitted` means an LXC/OpenVZ plan without TUN support. The user must ask the provider to enable it or move to a KVM plan.

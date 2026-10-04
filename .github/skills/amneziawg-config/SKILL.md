@@ -5,7 +5,7 @@ description: Generate, lint and debug AmneziaWG (AWG 1.5/2.0/3.0/3.1) configs an
 
 # AmneziaWG configuration
 
-AmneziaWG is WireGuard plus obfuscation. Hand-written parameters usually fail *quietly*: the tunnel connects and runs at 2% speed. Use the bundled scripts; they encode the constraints.
+AmneziaWG is WireGuard with obfuscation. Hand-written parameters usually fail *quietly*. The tunnel connects, but it runs at 2% speed. Use the bundled scripts because they encode the constraints.
 
 ## Scripts (in this skill's `scripts/`)
 
@@ -18,9 +18,9 @@ awg-genconf.sh --params-only --version 2.0 [--format conf|compose|env]
 awg-lint.py wg0.conf peer1.conf peer2.conf
 ```
 
-Lint after every hand edit and first when troubleshooting. `awg-genconf.sh --help` lists all options. The generator needs only bash; key derivation uses `awg`/`wg`, else Python `cryptography`.
+After each hand edit, run the linter. If you troubleshoot, run it first. `awg-genconf.sh --help` lists all options. The generator needs only bash. Key derivation uses `awg`/`wg`. If these are not available, it uses Python `cryptography`.
 
-When debugging, start with `references/troubleshooting.md`. For every parameter's range and the CPS tag syntax, read `references/parameters.md`. For *why* a value costs speed, read `docs/awg-performance.md` at the repository root.
+When you debug, start with `references/troubleshooting.md`. For each parameter range and the CPS tag syntax, read `references/parameters.md`. To know why a value costs speed, read `docs/awg-performance.md` at repository root.
 
 ## Choosing a version
 
@@ -31,15 +31,15 @@ When debugging, start with `references/troubleshooting.md`. For every parameter'
 | `3.0` | `HeaderProtectionKey`, `ContentPaddingAddition`, randomized timers |
 | `3.1` | 3.0 + `RandomTrailers = on` |
 
-Default to **2.0** unless the user says their endpoints are newer. Newer modes fail closed: a client that cannot parse a key does not connect (an old kernel module reports `Unable to modify interface: Invalid argument`). Do not invent per-app version support — upstream publishes none except AWG 2.0 needing AmneziaVPN ≥ 4.8.12.9. Ask what the user runs, or give 2.0 and say 3.x is cheap to try. Server side, `cat /sys/module/amneziawg/version` shows the kernel module generation. `RandomTrailers`/`DisableCookies` are independent switches valid with any version.
+Default to **2.0** unless the user says their endpoints are newer. Newer modes fail closed. A client that cannot parse a key does not connect. An old kernel module reports `Unable to modify interface: Invalid argument`. Do not invent per-app version support. Upstream publishes none except AWG 2.0 needs AmneziaVPN ≥ 4.8.12.9. Ask what the user runs. Or give 2.0 and say 3.x is cheap to try. On the server, `cat /sys/module/amneziawg/version` shows the kernel module generation. `RandomTrailers`/`DisableCookies` are independent switches valid with any version.
 
 ## Constraints that cause real damage
 
-1. **`RandomTrailers = on` requires `S1 = S2 = S3 = S4`** (2.0+ ranges). Otherwise ~3.5% of data packets are dropped and upload collapses (~100 → ~2 Mbit/s).
-2. **Never combine `ContentPaddingAddition` with `RandomTrailers`** — padding suppresses trailers on send but the receiver still uses loose matching.
-3. **`ContentPaddingAddition` costs ~22% of download** (defeats `UDP_GRO`). Use `0` unless explicitly wanted.
+1. **`RandomTrailers = on` requires `S1 = S2 = S3 = S4`** (2.0+ ranges). If this is false, about 3.5% of data packets are dropped, and upload collapses (~100 → ~2 Mbit/s).
+2. **Never combine `ContentPaddingAddition` with `RandomTrailers`**. Padding suppresses trailers on send, but the receiver still uses loose matching.
+3. **`ContentPaddingAddition` costs about 22% of download** (defeats `UDP_GRO`). Use `0` unless the user explicitly wants it.
 4. **`HeaderProtectionKey` forces `S1`-`S4` ≥ 12.**
-5. **MTU**: `awg-quick` derives 1420 and ignores `S4`; keep `S4 ≤ 20` and write an explicit `MTU` (1280 on ordinary paths, `path − 60 − S4` / `path − 80 − S4` on constrained ones). Details: `docs/mtu.md`.
+5. **MTU**: `awg-quick` derives 1420 and ignores `S4`. Keep `S4 ≤ 20`. Write an explicit `MTU`. Use 1280 on ordinary paths. On constrained paths, use `path − 60 − S4` or `path − 80 − S4`. Details: `docs/mtu.md`.
 
 ## Which values must match
 
@@ -47,8 +47,8 @@ Default to **2.0** unless the user says their endpoints are newer. Newer modes f
 |---|---|
 | `S1`-`S4`, `H1`-`H4`, `I1`-`I5`, `HeaderProtectionKey`, `RandomTrailers` | `Jc`/`Jmin`/`Jmax`, 3.x timer ranges, `DisableCookies`, `MTU` |
 
-Changing a shared value invalidates every distributed peer conf — warn before regenerating. `I1`-`I5` belong in `[Interface]` above any `[Peer]`.
+If a shared value changes, every distributed peer conf becomes invalid. Warn before you regenerate. Put `I1`-`I5` in `[Interface]` above any `[Peer]`.
 
 ## Scope
 
-This skill deals in `.conf` content. For this repository's container, `--format compose` emits its `AWG_*` variables, and the container auto-generates valid values anyway (see the README). For other wrappers (routers, other images) give `.conf` content or ask — never invent environment variable names.
+This skill deals with `.conf` content. For this repository's container, `--format compose` emits its `AWG_*` variables. The container auto-generates valid values anyway; see the README. For other wrappers, such as routers and other images, give `.conf` content or ask. Do not invent environment variable names.

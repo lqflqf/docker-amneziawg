@@ -1,6 +1,6 @@
 # docker-compose.yml template
 
-Fill the `<<…>>` placeholders from Phases 3-4. Every variable is described in `README.md` "Parameters"; the repository's `docker-compose.yml` shows all optional ones and a client-mode example.
+Fill the `<<…>>` placeholders from Phases 3-4. `README.md` "Parameters" describes every variable. The repository `docker-compose.yml` shows all optional variables and a client-mode example.
 
 ```yaml
 services:
@@ -41,9 +41,9 @@ services:
 
 ## Rules
 
-- **Port**: the container always listens on 51820. A custom `SERVERPORT=32948` maps as `"32948:51820/udp"`, never `"32948:32948/udp"`.
-- **Capabilities**: `NET_ADMIN` only. `SYS_MODULE` is not needed (the container never runs `modprobe`; keep it only on minimal hosts that do not auto-load the iptables NAT modules), and a `/lib/modules` mount does nothing.
-- **`PUID`/`PGID`**: `id -u` / `id -g` of the user owning the deploy directory. Recommend a non-root user over `0`.
-- **`PEERS`**: letters and digits only — names with `-`, `_` or spaces are skipped with a log message. A single number means a count (`3` → `peer1`…`peer3`).
-- **`SERVER_ALLOWEDIPS_PEER_<x>`**: `<x>` is the name as written in `PEERS` (or the number).
-- **`LOG_CONFS`**: leave unset; QR codes contain private keys. Use `/app/show-peer`.
+- **Port**: the container always listens on 51820. A custom `SERVERPORT=32948` maps as `"32948:51820/udp"`. Never map it as `"32948:32948/udp"`.
+- **Capabilities**: use `NET_ADMIN` only. `SYS_MODULE` is not necessary. The container never runs `modprobe`. Keep it only on minimal hosts that do not auto-load the iptables NAT modules. A `/lib/modules` mount does nothing.
+- **`PUID`/`PGID`**: use `id -u` and `id -g` of the user that owns the deploy directory. Recommend a non-root user instead of `0`.
+- **`PEERS`**: use letters and digits only. Names with `-`, `_`, or spaces are skipped with a log message. A single number means a count (`3` → `peer1`…`peer3`).
+- **`SERVER_ALLOWEDIPS_PEER_<x>`**: `<x>` is the name as written in `PEERS`, or the number.
+- **`LOG_CONFS`**: leave it unset. QR codes contain private keys. Use `/app/show-peer`.
