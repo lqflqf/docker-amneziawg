@@ -2,7 +2,9 @@
 
 The short version is in the [README](../README.md#performance-and-mtu). This page explains where the numbers come from.
 
-The container does not write an `MTU` line. Therefore, `awg-quick` uses the same rule as plain WireGuard. It takes the MTU of the route to the endpoint and subtracts 80. Most links have an MTU of 1500. On these links, the tunnel MTU is 1420. That 80 covers an IPv6 header, UDP, and the 32-byte WireGuard transport framing. It does **not** cover the extra bytes that AmneziaWG adds. This is why users on AWG 3.x report that MTU 1280 makes the tunnel faster, sometimes dramatically.
+The default templates set `MTU = 1280` in the `[Interface]` section of `wg0.conf` and of each peer conf. Volumes from older releases keep their old templates, which have no `MTU` line. To add the line, see [How to set it](#how-to-set-it).
+
+Without an `MTU` line, `awg-quick` uses the same rule as plain WireGuard. It takes the MTU of the route to the endpoint and subtracts 80. Most links have an MTU of 1500. On these links, the tunnel MTU is 1420. That 80 covers an IPv6 header, UDP, and the 32-byte WireGuard transport framing. It does **not** cover the extra bytes that AmneziaWG adds. This is why users on AWG 3.x report that MTU 1280 makes the tunnel faster, sometimes dramatically.
 
 ## What AmneziaWG adds to every transport packet
 
@@ -20,7 +22,7 @@ compared with plain WireGuard, where `S4` and `ContentPadding` are both zero. Th
 | `ContentPaddingAddition` (3.x) | random `lo-hi` (container: 16-128, or 0 with trailers) | A few bytes | Capped at the largest datagram seen, sent or received. Thus, full-size packets grow slightly. This is not enough to fragment, but it costs ~22% of download ([why](awg-performance.md#contentpaddingaddition-costs-22-of-download)). Set `AWG_CONTENT_PADDING=0` |
 | `RandomTrailers` (3.1) on transport | random `0 … window − packet` | Nothing — capped at the largest datagram already seen | Only active on transport packets when `ContentPaddingAddition = 0`. With it, a 52-byte TCP ACK can become a ~1400-byte datagram |
 
-With the default 1420 tunnel MTU, a full-size packet becomes `1420 + 60 + S4` bytes over IPv4. It becomes `1420 + 80 + S4` over IPv6. Over IPv4, that exceeds 1500 when `S4 > 20`. Over an IPv6 endpoint, it exceeds 1500 for any `S4 > 0`. The container draws `S4` at 20 or below. Older images drew up to 27, and saved parameters are reused. On an older deployment, check `AWG_S4` in `/config/server/awg_params`.
+If a conf has no `MTU` line, a full-size packet becomes `1420 + 60 + S4` bytes over IPv4. It becomes `1420 + 80 + S4` over IPv6. Over IPv4, that exceeds 1500 when `S4 > 20`. Over an IPv6 endpoint, it exceeds 1500 for any `S4 > 0`. The container draws `S4` at 20 or below, but older images drew up to 27. The container reuses saved parameters, so on an older deployment, check `AWG_S4` in `/config/server/awg_params`.
 
 ## Why an oversized packet is slow rather than broken
 
@@ -28,7 +30,7 @@ A UDP datagram larger than the path MTU is not rejected. The kernel fragments it
 
 The client side has the same problem in the other direction. Usually, it has a *smaller* path MTU than the server. Examples include PPPoE (1492), LTE/5G, IPv6-over-IPv4 transitions, and corporate Wi-Fi. LTE/5G is often 1400 or less, and iOS enforces path MTU strictly. `awg-quick` on the server cannot know this.
 
-1280 leaves 220 bytes of headroom on a 1500-byte IPv4 path. That is enough for `S4`, UDP, IP, and a few hops of extra encapsulation. Its wire packets, `1280 + 60 + S4`, clear PPPoE (1492), LTE (~1400), and every ordinary path. This is why people converge on it. It is also why Amnezia's installers and the 3.1 upgrade guides set it by default.
+1280 leaves 220 bytes of headroom on a 1500-byte IPv4 path. That is enough for `S4`, UDP, IP, and a few hops of extra encapsulation. Its wire packets, `1280 + 60 + S4`, clear PPPoE (1492), LTE (~1400), and every ordinary path. This is why people converge on it. It is also why Amnezia's installers, the 3.1 upgrade guides, and the default templates of this container set it.
 
 Be precise about the "IPv6 minimum" argument. The 1280-byte floor applies to the packet **on the wire**. A tunnel MTU of 1280 produces wire packets of `1340 + S4` bytes over an IPv4 endpoint. It produces `1360 + S4` over an IPv6 one. On a path whose own MTU really is 1280, those packets still fragment. Examples are DS-Lite, some LTE, and tunnel-in-tunnel setups. The truly-safe-everywhere tunnel MTU is `1280 − 60 − S4` for an IPv4 endpoint. It is `1280 − 80 − S4` for IPv6. These values keep the outer packet at or below 1280. At `S4 = 12`, the values are 1208 and 1188. A capture verified this on such a path ([measurement](awg-performance.md#per-packet-overhead-and-the-handshake-burst-fix)). Measure your path with a `ping -M do` binary search. Use 1280 when the path is normal or unknown-but-probably-normal. Use `path − 60 − S4` (IPv4) or `path − 80 − S4` (IPv6) when you know the path is constrained.
 
@@ -48,7 +50,7 @@ Some setups use `RandomTrailers` without `ContentPaddingAddition`, for example 3
 
 ## How to set it
 
-For an existing deployment, add an `MTU` line to the `[Interface]` section of the generated confs. Then restart the container. For new deployments, put the line in `/config/templates/server.conf` and `/config/templates/peer.conf` instead. Do the same before the next regeneration. Templates are only read when configs are generated or regenerated. This happens on first start, or when a server-side or `AWG_*` variable changes:
+On a new volume, the container copies the default templates to `/config/templates/`. These templates already set `MTU = 1280` for the server and for each peer:
 
 ```ini
 [Interface]
@@ -56,4 +58,13 @@ Address = ...
 MTU = 1280
 ```
 
-Set it on both the server conf (`/config/wg_confs/wg0.conf`) and every peer conf. Peer conf examples are `/config/peerN/peerN.conf`. Then re-import on the device. QR codes and `.conf` files are regenerated from the templates only. Thus, hand-edited peer confs must be distributed again. The two sides do not have to agree. Each side's MTU only limits what *it* sends. But a peer left at 1420 still fragments its uploads. The AmneziaVPN app exposes MTU in the connection settings. On Windows, the WinTUN adapter ignores the config value and uses 1280 regardless.
+To use a different value, edit the `MTU` line in `/config/templates/server.conf` and `/config/templates/peer.conf`. Then restart the container. To use the `awg-quick` default, delete the line from the two templates.
+
+The container copies a template only if it is missing. Thus, volumes from older releases keep their old templates without an `MTU` line. Do one of these steps:
+
+- Add the `MTU` line to the `[Interface]` section of the two templates. Then restart the container.
+- If you did not change the two templates, delete them. Then restart the container. It copies the new defaults.
+
+A template change regenerates the server conf (`/config/wg_confs/wg0.conf`) and each peer conf. Peer conf examples are `/config/peerN/peerN.conf`. Keys and addresses do not change. Re-import each new peer conf or QR code on the device. Do not edit the generated confs: the next regeneration replaces them.
+
+The two sides do not have to agree. Each side's MTU only limits what *it* sends. But a peer left at 1420 still fragments its uploads. The AmneziaVPN app exposes MTU in the connection settings. On Windows, the WinTUN adapter ignores the config value and uses 1280 regardless.
