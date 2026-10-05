@@ -120,7 +120,7 @@ The `amneziawg-config` skill gives the semantics. `README.md` gives the defaults
 - **Validation**: a pinned S < 12 under 3.x is an error (amneziawg-go rejects it). Other violations only give a warning.
 - **Writers**: `append_awg_signatures`, `append_awg3_params`, `append_awg31_options` write before the first `[Peer]`. In peer confs, I1-I5 must be in `[Interface]` (the Amnezia app ignores them under `[Peer]`). Never write an empty I value (`awg` rejects `I2 =`). `awg31_options_block` returns in `BLOCK_OUT`, not on stdout: command substitution removes the last newline.
 - **Kernel module**: `check_awg31_kernel_support` reads only major/minor from `/sys/module/amneziawg/version`. The trailer fix `4569c4c6` did not change the date, so never use the date as a gate.
-- **MTU**: the container never writes `MTU`. Keep `S4 ≤ 20`, so the `awg-quick` default 1420 does not fragment.
+- **MTU**: only the templates write `MTU` (`root/defaults/server.conf` and `peer.conf` set 1280). The script never writes `MTU`. Old volumes keep templates without `MTU`, so keep `S4 ≤ 20`: then the `awg-quick` default 1420 does not fragment.
 
 ## Development rules
 

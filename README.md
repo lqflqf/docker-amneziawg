@@ -194,6 +194,7 @@ With `network_mode: host`, use `interface: 127.0.0.1@5335` and `access-control: 
 ### Changed defaults
 
 - `PERSISTENTKEEPALIVE_PEERS` now defaults to `all`. It used to be off. On a volume that never set it, the first start regenerates the configs once. This adds the keepalive lines to `wg0.conf`. Keys and peer configs stay the same, so peers need no re-import. Set `none` to keep the old behaviour, for example to spare phone batteries.
+- The default `server.conf` and `peer.conf` templates now set `MTU = 1280`. Before, `awg-quick` used 1420. A new volume gets the new templates. An existing volume keeps its templates, so its configs do not change. To add the line, see [Performance and MTU](#performance-and-mtu).
 - `HEALTHCHECK_DNS_NAME` has been removed and is ignored with a note in the log. The health check only tests that dnsmasq answers on the tunnel address. It does not test if `DNS_UPSTREAM` is reachable. Check that with `docker exec amneziawg nslookup example.com <tunnel address>`.
 
 ## Protocol versions and obfuscation
@@ -233,7 +234,9 @@ Tags: `<b 0xHEX>` static bytes, `<r N>` random bytes, `<rd N>` random digits, `<
 
 Most obfuscation affects only handshakes. `S4`, `HeaderProtectionKey`, `ContentPaddingAddition`, and `RandomTrailers` have a cost on each packet. [docs/awg-performance.md](docs/awg-performance.md) has measurements for each.
 
-`awg-quick` sets the tunnel MTU to 1420 without an allowance for `S4`. Thus full-size packets fragment when `S4 > 20` or when the endpoint is IPv6. Tunnels then connect but become very slow. Add `MTU = 1280` to `[Interface]` for mobile, PPPoE, and unknown paths. On a path that is limited to 1280 bytes, use `path − 60 − S4` (IPv4) or `path − 80 − S4` (IPv6). To apply it to future configs, put the line in `/config/templates/server.conf` and `peer.conf`. [docs/mtu.md](docs/mtu.md) explains the numbers.
+Without an `MTU` line, `awg-quick` sets the tunnel MTU to 1420 without an allowance for `S4`. Thus full-size packets fragment when `S4 > 20` or when the endpoint is IPv6. Tunnels then connect but become very slow. The default templates set `MTU = 1280` in `[Interface]` for the server and for each peer. Use this value for mobile, PPPoE, and unknown paths. On a path that is limited to 1280 bytes, use `path − 60 − S4` (IPv4) or `path − 80 − S4` (IPv6).
+
+To change the value, edit the `MTU` line in `/config/templates/server.conf` and `peer.conf`. Then restart the container. Volumes from older releases keep their old templates without an `MTU` line. [docs/mtu.md](docs/mtu.md#how-to-set-it) tells how to add the line and explains the numbers.
 
 ## Managing peers
 
