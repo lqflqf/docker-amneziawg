@@ -2,7 +2,7 @@
 
 This page shows the throughput cost of each obfuscation parameter, the reason for the cost, and the recommended values. Each statement comes from upstream source code. A measurement on a real internet path confirms each statement.
 
-Short version: **`RandomTrailers` combined with unequal `S1`-`S4` costs 98% of upload throughput.** The container now draws one shared `S` value when trailers are on. On the next start, it also drops saved unequal values. Hand-written configs and other generators can still make this broken shape. See [Recommended parameters](#recommended-parameters).
+Short version: **`RandomTrailers` combined with unequal `S1`-`S4` costs 98% of upload throughput.** The container draws one shared `S` value when trailers are on. `awgctl` refuses unequal `S` values with `RandomTrailers`. Hand-written configs and other generators can still make this broken shape. See [Recommended parameters](#recommended-parameters).
 
 ## Which parameters cost anything
 
@@ -143,7 +143,7 @@ cat /sys/module/amneziawg/srcversion
 modinfo amneziawg | grep -E '^(filename|srcversion)'   # must match
 ```
 
-This does not affect the container's `check_awg31_kernel_support()`. That only compares the `3.1` major/minor to decide if the module understands the 3.1 switches at all. Upstream does maintain those two components.
+This does not affect the kernel check of `awgctl init`. That check only compares the `3.1` major/minor to decide if the module understands the 3.1 switches at all. Upstream does maintain those two components.
 
 Older images drew `S4` values up to 27. With `S4 = 27`, a 1420-MTU packet is 1507 bytes over IPv4. That packet fragments and causes the 75.5 Mbit/s row above.
 

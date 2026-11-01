@@ -178,7 +178,7 @@ smoke            (contents: read)          any failure stops the run
   1. update-pins.test.sh
   2. download and examine candidate.json
   3. update-pins.sh candidate.json
-  4. build linux/amd64 -> smoke-test.sh
+  4. build linux/amd64 -> integration-test.sh, smoke-test.sh
   5. Trivy: fixable CRITICAL fails (as docker-build.yml:272-279)
   6. build linux/arm64 under QEMU -> arm64-check.sh
 
@@ -268,7 +268,7 @@ The workflow can update an open PR after a person reviews it, as it does now. Th
 
 ### 10.2 The PR that implements this design
 
-The release gate (`docker-build.yml:94`) builds when one of these paths changes: `Dockerfile`, `root/`, `.dockerignore`, `docker-build.yml`, `.github/scripts/`.
+The release gate (`IMAGE_PATHS` in `docker-build.yml`) builds when one of these paths changes: `Dockerfile`, `root/`, `cmd/`, `internal/`, `go.mod`, `go.sum`, `.golangci.yml`, `.dockerignore`, `docker-build.yml`, `.github/scripts/`. A change to Go tests alone does not publish.
 
 | File | Release on merge |
 |---|---|

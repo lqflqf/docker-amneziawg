@@ -1,6 +1,6 @@
 ---
 name: deploy-amneziawg
-description: End-to-end deployment of the docker-amneziawg AmneziaWG VPN container to a VPS or Linux host (Ubuntu/Debian/Fedora/RHEL clones/Arch/Alpine; Hetzner, DigitalOcean, AWS, etc.). Use whenever the user wants to deploy, install, set up or "go live" with this container — including "set this up on my server", "I have a VPS, what now?" or just "deploy". Checks host requirements, installs Docker, opens the firewall, gathers settings, writes docker-compose.yml, starts the stack and hands out peer configs/QR codes.
+description: End-to-end deployment of the docker-amneziawg AmneziaWG VPN container to a VPS or Linux host (Ubuntu/Debian/Fedora/RHEL clones/Arch/Alpine; Hetzner, DigitalOcean, AWS, etc.). Use whenever the user wants to deploy, install, set up or "go live" with this container — including "set this up on my server", "I have a VPS, what now?" or just "deploy". Checks host requirements, installs Docker, opens the firewall, gathers settings, writes docker-compose.yml, starts the stack, adds the peers and hands out their configs/QR codes.
 ---
 
 # Deploy docker-amneziawg
@@ -10,7 +10,7 @@ Goal: guide the user from a VPS to a phone on the VPN by QR code. The user refer
 ## Behaviour
 
 - You are on a real machine. Before each *category* of system change (packages, firewall, sysctls, ports), show the exact commands and confirm.
-- Ask for important values (`SERVERURL`, port, peer names). Use defaults for the rest and summarize them before deploy.
+- Ask for important values (`SERVERURL`, port, peer names). The container reads the environment only on the first start. Use defaults for the rest and summarize them before deploy.
 - Explain each check or question in one phrase.
 - If a step fails, stop and diagnose it. Do not continue as if it worked.
 
@@ -28,57 +28,59 @@ Install and verify each missing item in this order. Install Docker plus the Comp
 
 ## Phase 3 — Settings
 
-Ask in one batch. Use the `ask_user` tool with several fields.
+Ask in one batch. Use the `ask_user` tool with several fields. The container reads these variables only on the first start, when `config/` has no database. Later changes need `awgctl`, so get them right now.
 
 | Setting | Default | Notes |
 |---|---|---|
-| `SERVERURL` | unset | Always set it, preferably to a DNS name. If unset, the container detects the public IPv4. A changed address then re-issues each peer conf |
-| `SERVERPORT` | `51820` | For a non-default port, map `SERVERPORT:51820/udp`. Use 443/udp or a port ≤ 9999 if carriers block high UDP ports |
-| `PEERS` | — | Prefer names (`laptop,phone` → `peer_laptop`…). Use letters and digits only; other names are skipped |
+| `SERVERURL` | detected | Always set it, preferably to a DNS name. If it is not set, the container detects the public IPv4 once. If detection fails, the container stops |
+| `SERVERPORT` | `51820` | For a non-default port, map `SERVERPORT:51820/udp`. If carriers block high UDP ports, use 443/udp or a port ≤ 9999 |
+| Peer names | — | One name for each device, for example `laptop`, `phone`. 1-32 of `A-Z a-z 0-9 . _ -`, starting with a letter or digit. The peers come in Phase 6, not from the environment |
 | `TZ` | `Etc/UTC` | This controls log timestamps only |
 
-Ask these optional settings only if the user wants them. Use `INTERNAL_SUBNET` for a LAN conflict. Use `DNS_UPSTREAM` for the peer dnsmasq forwarder. Its default is `1.1.1.1,1.0.0.1`. Use `ALLOWEDIPS` for split tunnel. Use `PERSISTENTKEEPALIVE_PEERS` for keepalive control. Its default is `all`; `none` saves phone battery. Use `SERVER_ALLOWEDIPS_PEER_<name>` for site-to-site. For meanings and defaults, see README "Parameters".
+Ask these optional settings only if the user wants them. Use `INTERNAL_SUBNET` (a `/24`) for a LAN conflict. Use `DNS_UPSTREAM` for the peer dnsmasq forwarder (default `1.1.1.1,1.0.0.1`). Use `ALLOWEDIPS` for a split tunnel. Use `MTU` (default 1280) only for a known constrained path. For meanings and defaults, see README "First start" and "Settings".
 
 Offer encrypted, DNSSEC-validated DNS for peers. Use Unbound on the host as in README "Recommended: Unbound on the host". Use a fixed Compose network. Bind Unbound only to the gateway address of that network. Add a host-firewall rule for the bridge. Set `DNS_UPSTREAM` to the gateway. Never bind it to `0.0.0.0` or a public address.
 
 ## Phase 4 — Obfuscation
 
-**Recommend that all `AWG_*` values stay unset.** The container generates valid values on first start. This includes equal `S1`-`S4` values when `RandomTrailers` is on. It also includes `ContentPaddingAddition = 0` when `RandomTrailers` is on. The container persists the values in `/config/server/awg_params`. Ask only these questions:
+**Recommend that all `AWG_*` values stay unset.** On the first start, `awgctl` generates a valid set and saves it in `config/amneziawg.db`. This includes equal `S1`-`S4` values and `ContentPaddingAddition = 0` when `RandomTrailers` is on. Ask only these questions:
 
-1. **`AWG_VERSION`**: `2.0` is the default. It needs AmneziaVPN ≥ 4.8.12.9. Other values are `3.0`, `3.1`, and `1.5` (for legacy clients). `3.1` means 3.0 plus `RandomTrailers`. Use 2.0 unless you know that every client supports 3.x. Newer modes fail closed. `AWG_DISABLE_COOKIES=on` is a separate opt-in. It gives up DoS mitigation.
+1. **`AWG_VERSION`**: `3.1` is the default. It needs AWG 3.1 support in each peer app. Other values are `3.0`, `2.0` (AmneziaVPN ≥ 4.8.12.9) and `1.5` (legacy clients). Newer modes fail closed, so use `2.0` for an older client app. `AWG_DISABLE_COOKIES=on` is a separate opt-in. It gives up DoS mitigation.
 2. **Kernel datapath + 3.1 switches**: the host module must be ≥ 3.1. Check it with `cat /sys/module/amneziawg/version`. Otherwise the tunnel fails with `Unable to modify interface: Invalid argument`. The start-up warning is best-effort. Thus, check the module version yourself. The userspace fallback always works.
-3. **Pin values?** Pin values only to match an existing deploy, or to make the compose file self-contained. Generate them with the `amneziawg-config` skill: `../amneziawg-config/scripts/awg-genconf.sh --params-only --version <v> --format compose`. Validate user-supplied values with its `awg-lint.py`.
+3. **Pin values?** Pin values only to match an existing deploy, or to make the compose file self-contained. Generate them with the `amneziawg-config` skill: `../amneziawg-config/scripts/awg-genconf.sh --params-only --version <v> --format compose`. Validate user-supplied values with its `awg-lint.py`. `awgctl` refuses a set that breaks a rule, and the container then stops.
 
-Shared values (`S`, `H`, `I`, `HeaderProtectionKey`, `RandomTrailers`) must be identical on every peer. If you change any shared value later, redistribute every peer conf.
+Shared values (version, `S`, `H`, `I`, `HeaderProtectionKey`, `RandomTrailers`) must be identical on every peer. To change them later, use `awgctl awg version|set|regenerate` and restart the container. Then give each peer its new conf.
 
 ## Phase 5 — Write compose and start
 
 1. Confirm the deploy directory. The default is `/opt/amneziawg/`, with a `config/` subdirectory.
 2. Write `docker-compose.yml` from `references/compose-template.md`.
 3. Run `docker compose pull && docker compose up -d`.
-4. Check `docker compose logs --tail=100`. It should show `AmneziaWG kernel module is active` or `using userspace amneziawg-go`. It should then show `Config initialization finished`, `Activating tunnel /config/wg_confs/wg0.conf`, and `All tunnels are now active`. `Config generation failed` names the bad input. Previous configs are kept.
-5. Run `docker exec amneziawg /app/healthcheck`. It prints `tunnels up: wg0`. Docker reports `healthy` after its start period. Run `docker exec amneziawg awg show` to list peers.
+4. Check `docker compose logs --tail=100`. Look for `AmneziaWG kernel module is active` or `using userspace amneziawg-go`.
+5. Then look for `Config initialization finished` and `Tunnel wg0 is up`.
+6. If the container exits with code 1, read the `ERROR` line. See `references/troubleshooting.md`.
+7. Run `docker exec amneziawg awgctl health`. It prints `healthy`. Docker reports `healthy` after its start period.
 
-On failure, see `references/troubleshooting.md`.
+## Phase 6 — Add peers and hand off configs
 
-## Phase 6 — Hand off peer configs
+For each peer name, run `docker exec -it amneziawg awgctl peer add <name> --qr`. It prints a terminal QR code for the Amnezia app. Tell the user:
 
-`docker exec amneziawg /app/show-peer <name-or-number>` prints a terminal QR code for the Amnezia app. Tell the user:
-
-- Configs are in `<deploy-dir>/config/peer_<name>/peer_<name>.conf`, or `peer<N>` for numeric peers. Back up all of `config/`. It holds the server keys and peer keys.
-- To add peers, edit `PEERS` and then run `docker compose up -d`. Existing peers keep keys and addresses. Removed peers are archived in `config/removed_peers/`.
+- To show a QR code again, run `docker exec -it amneziawg awgctl peer export <name> --qr`.
+- To get a file, run `docker exec amneziawg awgctl peer export <name> > <name>.conf`. The file holds the private key of the peer.
+- The container does not keep peer confs on disk. Back up `config/amneziawg.db`: it holds the server key and all peer keys. Stop the container before the copy.
+- To add a peer later, run `awgctl peer add`. To remove one, run `awgctl peer rm <name> --yes`. Peer changes apply at once.
 - Client app: https://amnezia.org/.
 
 ## Phase 7 — Verify from a client
 
-Import the conf, connect, and run `curl https://api.ipify.org`. It should show the server IP. On the server, `awg show` should show a recent handshake. If it never completes, check the cloud firewall first. Then check client version support. Then check the logs.
+Import the conf, connect, and run `curl https://api.ipify.org`. It should show the server IP. On the server, `docker exec amneziawg awgctl peer list` should show a recent handshake. If it never completes, check the cloud firewall first. Then check client version support. Then check the logs.
 
 ## Don'ts
 
 - Do not run compose in the foreground. Do not publish 51820 over TCP.
 - Do not run `chmod 777` on `config/`. Set `PUID`/`PGID` to the user that owns it.
-- Do not re-randomize `AWG_*` from config management. The values must stay stable.
-- Do not skip Phase 1. Without `/dev/net/tun`, the container starts but no tunnel comes up. It reports `unhealthy` and removes its default routes.
+- Do not change `SERVERURL`, `AWG_*` or other first-start variables to change a running server. The container ignores them and logs a `WARNING`. Use the `awgctl` command in the warning.
+- Do not skip Phase 1. Without `/dev/net/tun` and without a kernel module, no tunnel comes up, and the container reports `unhealthy`.
 
 ## Files
 
