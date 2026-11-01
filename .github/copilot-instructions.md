@@ -144,14 +144,15 @@ The `amneziawg-config` skill gives the semantics. `README.md` gives the defaults
 
 ## CI/CD
 
-**`docker-build.yml`**: `changes` → `version`, and `lint` in parallel. Then `smoke` + `smoke-nerdctl` → `build` → `release`.
+**`docker-build.yml`**: `changes` → `version`, and `lint` in parallel. Then `smoke` (matrix: `docker`, `nerdctl`) → `build` → `release`.
 
 - Only `Dockerfile`, `root/**`, `.dockerignore`, `docker-build.yml` and `.github/scripts/` change the image (output `image`). Other changes never publish. A change to `tests/**` also runs the tests (output `validate`), but it does not publish.
 - `lint` runs on each event: shellcheck on each bash script and the bats tests, hadolint, actionlint. Each linter has a pinned version and sha256.
 - `BUILD_DATE` is the UTC time that `version` calculates once. Each build of the run uses it. The Dockerfile declares `BUILD_DATE` and `VERSION` after the package layers, so a new date does not stop the cache.
 - On the default branch, the gate compares with the **last release tag**, so a failed run does not lose a change. Manual runs always build.
-- `smoke`: amd64 build, `unit-test.sh`, `smoke-test.sh`, Trivy (fails on fixable CRITICAL findings). PRs run only the lint, test and script-test jobs.
-- `smoke-nerdctl`: the same build, unit and smoke tests under rootful containerd + nerdctl (pinned `nerdctl-full`, sha256). It stops Docker first, so that one containerd owns the socket. `build` needs it.
+- `smoke`: one job for each engine in `matrix.engine`, in parallel, with `fail-fast: false`. Each builds the amd64 image and runs `unit-test.sh` and `smoke-test.sh`. PRs run only the lint, test and script-test jobs.
+  - `docker`: then Trivy (fails on fixable CRITICAL findings).
+  - `nerdctl`: rootful containerd + nerdctl (pinned `nerdctl-full`, sha256). It stops Docker first, so that one containerd owns the socket. The tests run with `sudo env`, which passes `ENGINE`, `BUILD_DATE` and the GitHub variables.
 - Release (push to the default branch, or `workflow_dispatch` without overrides): boots arm64 under QEMU. Then it pushes amd64+arm64 with provenance and SBOM as `:<tools>-r<N>` (immutable), `:<tools>`, `:latest`, `:sha-<short>`. It creates the tag `v<tools>-r<N>` and a GitHub Release. A superseded run publishes only its immutable tag.
 - `workflow_dispatch` with version overrides publishes only `:dispatch-<run>`.
 - Never push `v*-r*` tags manually. They are the build counter.

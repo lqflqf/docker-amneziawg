@@ -238,7 +238,7 @@ jobs:
             echo "amneziawg_tools_commit=${TOOLS_COMMIT}"
             echo "tools_version=${TOOLS_VERSION}"
             echo "version=${VERSION}"
-            # One timestamp for every build of this run (smoke, nerdctl,
+            # One timestamp for every build of this run (both smoke jobs,
             # arm64 check, push), so they all record the same date.
             echo "build_date=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           } >> "$GITHUB_OUTPUT"
@@ -249,7 +249,7 @@ jobs:
             echo "- amneziawg-tools: \`${AWG_TOOLS}\` ${TOOLS_COMMIT:+(\`${TOOLS_COMMIT}\`)}"
           } >> "$GITHUB_STEP_SUMMARY"
 
-  # Static checks on every event. smoke and smoke-nerdctl need this job, so
+  # Static checks on every event. Both smoke jobs need this job, so
   # nothing is tested or published while a script, the Dockerfile or a
   # workflow has a finding. The linters are pinned and their checksums checked.
   lint:
@@ -303,65 +303,28 @@ jobs:
       - name: actionlint
         run: actionlint -color
 
-  # Every run: build one platform locally, smoke-test it and scan it. Nothing is
+  # Every run: build one platform locally, test it and scan it. Nothing is
   # published unless this passes. Kept apart from `build` so it never holds a
   # package-write token.
+  # One job for each engine, in parallel, with its own result:
+  #   docker   unit and smoke tests under Docker, then the Trivy scan.
+  #   nerdctl  the same tests under containerd + nerdctl, for hosts such as
+  #            Alpine. The runner is Ubuntu, so this tests the image under
+  #            containerd, runc and CNI, not the Alpine host packages. Docker
+  #            is stopped first: only nerdctl's containerd may own the
+  #            containerd socket. nerdctl needs root, so the tests run with
+  #            sudo.
   smoke:
     needs: [changes, version, lint]
     runs-on: ubuntu-24.04
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-
-      - name: Build test image (linux/amd64)
-        env:
-          IMAGE_VERSION: ${{ needs.version.outputs.version }}
-          BUILD_DATE: ${{ needs.version.outputs.build_date }}
-          AWG_GO: ${{ needs.version.outputs.amneziawg_go }}
-          AWG_TOOLS: ${{ needs.version.outputs.amneziawg_tools }}
-          AWG_GO_COMMIT: ${{ needs.version.outputs.amneziawg_go_commit }}
-          AWG_TOOLS_COMMIT: ${{ needs.version.outputs.amneziawg_tools_commit }}
-        run: |
-          docker build -t test-image \
-            --build-arg VERSION="$IMAGE_VERSION" \
-            --build-arg BUILD_DATE="$BUILD_DATE" \
-            --build-arg AMNEZIAWG_GO_VERSION="$AWG_GO" \
-            --build-arg AMNEZIAWG_GO_COMMIT="$AWG_GO_COMMIT" \
-            --build-arg AMNEZIAWG_TOOLS_VERSION="$AWG_TOOLS" \
-            --build-arg AMNEZIAWG_TOOLS_COMMIT="$AWG_TOOLS_COMMIT" \
-            .
-
-      - name: Unit tests
-        run: .github/scripts/unit-test.sh test-image
-
-      - name: Smoke tests
-        env:
-          BUILD_DATE: ${{ needs.version.outputs.build_date }}
-        run: .github/scripts/smoke-test.sh test-image
-
-      # Fails on critical vulnerabilities that already have a fix, so a
-      # release never ships one that a rebuild would remove.
-      - name: Vulnerability scan
-        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
-        with:
-          image-ref: test-image
-          format: table
-          severity: CRITICAL
-          ignore-unfixed: true
-          exit-code: '1'
-
-  # The same unit and smoke tests under containerd + nerdctl instead of Docker,
-  # for hosts such as Alpine that run the image with nerdctl. The runner is
-  # Ubuntu, so this tests the image under containerd, runc and CNI, not the
-  # Alpine host packages. Docker is stopped first: only nerdctl's containerd
-  # may own the containerd socket. nerdctl needs root, so the tests run with
-  # sudo.
-  smoke-nerdctl:
-    needs: [changes, version, lint]
-    runs-on: ubuntu-24.04
+    strategy:
+      # A failure under one engine must not hide the result of the other.
+      fail-fast: false
+      matrix:
+        engine: [docker, nerdctl]
     env:
+      ENGINE: ${{ matrix.engine }}
+      BUILD_DATE: ${{ needs.version.outputs.build_date }}
       NERDCTL_VERSION: 2.4.2
       NERDCTL_SHA256: 1f12c1a5840744fdf7029483c55a69813d44aa2ec1ef879d52d81ff6a3049ecd
     steps:
@@ -373,7 +336,6 @@ jobs:
       - name: Build test image (linux/amd64)
         env:
           IMAGE_VERSION: ${{ needs.version.outputs.version }}
-          BUILD_DATE: ${{ needs.version.outputs.build_date }}
           AWG_GO: ${{ needs.version.outputs.amneziawg_go }}
           AWG_TOOLS: ${{ needs.version.outputs.amneziawg_tools }}
           AWG_GO_COMMIT: ${{ needs.version.outputs.amneziawg_go_commit }}
@@ -387,10 +349,11 @@ jobs:
             --build-arg AMNEZIAWG_TOOLS_VERSION="$AWG_TOOLS" \
             --build-arg AMNEZIAWG_TOOLS_COMMIT="$AWG_TOOLS_COMMIT" \
             .
-          docker save -o "${RUNNER_TEMP}/test-image.tar" test-image
 
       - name: Replace Docker with containerd + nerdctl
+        if: matrix.engine == 'nerdctl'
         run: |
+          docker save -o "${RUNNER_TEMP}/test-image.tar" test-image
           curl -fsSLo "${RUNNER_TEMP}/nerdctl-full.tar.gz" \
             "https://github.com/containerd/nerdctl/releases/download/v${NERDCTL_VERSION}/nerdctl-full-${NERDCTL_VERSION}-linux-amd64.tar.gz"
           echo "${NERDCTL_SHA256}  ${RUNNER_TEMP}/nerdctl-full.tar.gz" | sha256sum -c -
@@ -404,19 +367,33 @@ jobs:
           sudo nerdctl load -i "${RUNNER_TEMP}/test-image.tar"
           sudo nerdctl image ls
 
-      - name: Unit tests (nerdctl)
-        run: sudo env ENGINE=nerdctl .github/scripts/unit-test.sh test-image
-
-      # sudo resets the environment: pass what smoke-test.sh reads.
-      - name: Smoke tests (nerdctl)
-        env:
-          BUILD_DATE: ${{ needs.version.outputs.build_date }}
+      # nerdctl needs root. sudo resets the environment, so pass what the test
+      # scripts read.
+      - name: Unit and smoke tests
         run: |
-          sudo env ENGINE=nerdctl BUILD_DATE="$BUILD_DATE" GITHUB_ACTIONS="$GITHUB_ACTIONS" \
-            GITHUB_STEP_SUMMARY="$GITHUB_STEP_SUMMARY" .github/scripts/smoke-test.sh test-image
+          as_root=()
+          if [[ "$ENGINE" == nerdctl ]]; then
+            as_root=(sudo env ENGINE="$ENGINE" BUILD_DATE="$BUILD_DATE" \
+              GITHUB_ACTIONS="$GITHUB_ACTIONS" GITHUB_STEP_SUMMARY="$GITHUB_STEP_SUMMARY")
+          fi
+          "${as_root[@]}" .github/scripts/unit-test.sh test-image
+          "${as_root[@]}" .github/scripts/smoke-test.sh test-image
+
+      # Fails on critical vulnerabilities that already have a fix, so a
+      # release never ships one that a rebuild would remove. The image is the
+      # same for both engines, so it is scanned once.
+      - name: Vulnerability scan
+        if: matrix.engine == 'docker'
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: test-image
+          format: table
+          severity: CRITICAL
+          ignore-unfixed: true
+          exit-code: '1'
 
   build:
-    needs: [changes, version, smoke, smoke-nerdctl]
+    needs: [changes, version, smoke]
     if: needs.changes.outputs.image == 'true' && needs.changes.outputs.mode != 'pr'
     runs-on: ubuntu-24.04
     permissions:
