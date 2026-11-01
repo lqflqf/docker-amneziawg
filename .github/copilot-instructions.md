@@ -155,6 +155,7 @@ The `amneziawg-config` skill gives the semantics. `README.md` gives the defaults
 - Release (push to the default branch, or `workflow_dispatch` without overrides): boots arm64 under QEMU. Then it pushes amd64+arm64 with provenance and SBOM as `:<tools>-r<N>` (immutable), `:<tools>`, `:latest`, `:sha-<short>`. It creates the tag `v<tools>-r<N>` and a GitHub Release. A superseded run publishes only its immutable tag.
 - `workflow_dispatch` with version overrides publishes only `:dispatch-<run>`.
 - Never push `v*-r*` tags manually. They are the build counter.
+- Jobs use `runs-on: ubuntu-24.04`, not `ubuntu-latest`. Thus the runner changes only in a PR of its own, after CI passes on the new image.
 
 **Version numbers**: `<amneziawg-tools>-r<N>`. `N` starts again for each tools version. `.github/scripts/next-version.sh` calculates it from the tags. The tag annotation records `run-id:`, so a re-run uses the same number. The upstream pins are the `AMNEZIAWG_{GO,TOOLS}_{VERSION,COMMIT}` `ARG` defaults in the Dockerfile.
 

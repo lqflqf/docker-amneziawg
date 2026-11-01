@@ -71,14 +71,14 @@ jobs:
   # `validate` also covers tests/: a change to the unit tests alone must run
   # the tests, but it does not publish.
   changes:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     outputs:
       image: ${{ steps.filter.outputs.image }}
       validate: ${{ steps.filter.outputs.validate }}
       mode: ${{ steps.filter.outputs.mode }}
     steps:
       - name: Checkout code
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -165,7 +165,7 @@ jobs:
   version:
     needs: changes
     if: needs.changes.outputs.validate == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     outputs:
       amneziawg_go: ${{ steps.versions.outputs.amneziawg_go }}
       amneziawg_tools: ${{ steps.versions.outputs.amneziawg_tools }}
@@ -176,7 +176,7 @@ jobs:
       build_date: ${{ steps.versions.outputs.build_date }}
     steps:
       - name: Checkout code
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # the build counter is read from the release tags
           fetch-depth: 0
@@ -253,7 +253,7 @@ jobs:
   # nothing is tested or published while a script, the Dockerfile or a
   # workflow has a finding. The linters are pinned and their checksums checked.
   lint:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     env:
       SHELLCHECK_VERSION: v0.11.0
       SHELLCHECK_SHA256: 8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198
@@ -263,7 +263,7 @@ jobs:
       ACTIONLINT_SHA256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
     steps:
       - name: Checkout code
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
@@ -308,10 +308,10 @@ jobs:
   # package-write token.
   smoke:
     needs: [changes, version, lint]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout code
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
@@ -360,13 +360,13 @@ jobs:
   # sudo.
   smoke-nerdctl:
     needs: [changes, version, lint]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     env:
       NERDCTL_VERSION: 2.4.2
       NERDCTL_SHA256: 1f12c1a5840744fdf7029483c55a69813d44aa2ec1ef879d52d81ff6a3049ecd
     steps:
       - name: Checkout code
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
@@ -418,7 +418,7 @@ jobs:
   build:
     needs: [changes, version, smoke, smoke-nerdctl]
     if: needs.changes.outputs.image == 'true' && needs.changes.outputs.mode != 'pr'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
       packages: write
@@ -431,7 +431,7 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # release tags decide whether this run has been superseded
           fetch-depth: 0
@@ -647,7 +647,7 @@ jobs:
   release:
     needs: [changes, version, build]
     if: needs.changes.outputs.mode == 'release'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: write
     env:
@@ -661,7 +661,7 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # the release tags are the build counter; credentials push the new one
           fetch-depth: 0
