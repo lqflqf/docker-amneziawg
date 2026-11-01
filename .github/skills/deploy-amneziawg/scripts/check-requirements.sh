@@ -39,6 +39,7 @@ if [ "$(uname -s)" != "Linux" ]; then
     row FAIL "OS" "$(uname -s) — only Linux is supported"
 else
     if [ -r /etc/os-release ]; then
+        # shellcheck source=/dev/null # the host file, not in this repository
         . /etc/os-release
         case "${ID:-}" in
             ubuntu|debian|fedora|rocky|almalinux|centos|arch|manjaro|alpine|opensuse-tumbleweed|opensuse-leap)
@@ -83,19 +84,15 @@ fi
 # --- Docker ---
 if ! command -v docker &>/dev/null; then
     row MISS "Docker" "not installed"
-    docker_ok=0
 else
     if docker info &>/dev/null; then
         dv=$(docker --version | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
         row OK "Docker" "$dv (daemon reachable)"
-        docker_ok=1
     elif sudo -n docker info &>/dev/null; then
         dv=$(docker --version | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
         row WARN "Docker" "$dv installed but current user needs sudo — add to docker group"
-        docker_ok=1
     else
         row FAIL "Docker" "installed but daemon not reachable (not running? permission denied?)"
-        docker_ok=0
     fi
 fi
 

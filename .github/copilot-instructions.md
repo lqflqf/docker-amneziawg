@@ -34,11 +34,20 @@ Each topic has one file. Link to that file. Do not copy its content.
 
 ```bash
 docker build -t amneziawg-test .
+.github/scripts/unit-test.sh amneziawg-test       # bats unit tests in the image
 .github/scripts/smoke-test.sh amneziawg-test      # approximately 1 min, the CI gate
 .github/scripts/next-version.test.sh && .github/scripts/release-tags.test.sh
 ```
 
-There is no unit test suite. `smoke-test.sh` examines the binaries, services, DNS, config generation and state, client mode, identity, an upgrade from the last LinuxServer.io release and an end-to-end tunnel. Read the script for the full list.
+Set `ENGINE=nerdctl` to run `unit-test.sh` and `smoke-test.sh` with nerdctl. Use only commands and flags that docker and nerdctl both accept.
+
+**Unit tests** (`tests/*.bats`): `unit-test.sh` runs them in a throwaway container of the image, with `bats` added by `apk`. They source the installed scripts and call their functions.
+
+- Each script under `root/` keeps its side effects in `main()`. The last lines are `if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then main "$@"; fi`. Do not use the `&&` form: it returns 1 when sourced.
+- Do not put `umask`, `set` or other side effects at the top level. Declare top-level associative arrays with `declare -gA`.
+- A bare `! cmd` or a failing `a && b` does not fail a bats test. Use `run ! cmd` and one condition for each line.
+
+**Smoke tests**: `smoke-test.sh` examines the binaries, services, DNS, config generation and state, client mode, identity, an upgrade from the last LinuxServer.io release and an end-to-end tunnel. Read the script for the full list.
 
 - Each check must fail by itself. Do not use `test ... && echo`: errexit ignores the left side of `&&`.
 - Do not use `cmd | grep -q` (SIGPIPE + pipefail). Use `grep -q ... <<<"$(cmd)"`.
@@ -59,13 +68,13 @@ There is no unit test suite. `smoke-test.sh` examines the binaries, services, DN
 ### s6-overlay services (`root/etc/s6-overlay/s6-rc.d/`)
 
 ```
-init-adduser → init-config → init-amneziawg-module → init-amneziawg-confs → svc-dnsmasq
-                           → init-services → svc-dnsmasq                  → svc-amneziawg
+init-adduser → init-amneziawg-module → init-amneziawg-confs → svc-dnsmasq
+                                                            → svc-amneziawg
 ```
 
-A dependency is an empty file in `<svc>/dependencies.d/`. A registration is an empty file in `user/contents.d/`. `init-config` and `init-services` are empty markers.
+A dependency is an empty file in `<svc>/dependencies.d/`. A registration is an empty file in `user/contents.d/`.
 
-- **init-adduser**: applies `PUID`/`PGID` (default 911) with `groupmod -o`/`usermod -o`. The home moves off `/config` during `usermod -u`, because `usermod` changes the owner of the home. If an ID is not valid or does not apply, halt with exit 1 (`/run/s6/basedir/bin/halt`). A failed oneshot alone keeps the container on without `svc-amneziawg`, and a client keeps its default routes.
+- **init-adduser**: applies `PUID`/`PGID` (default 911) with `groupmod -o`/`usermod -o`. It refuses `0` (root) with its own message: `abc` owns `/config` and runs dnsmasq. The home moves off `/config` during `usermod -u`, because `usermod` changes the owner of the home. If an ID is not valid or does not apply, halt with exit 1 (`/run/s6/basedir/bin/halt`). A failed oneshot alone keeps the container on without `svc-amneziawg`, and a client keeps its default routes.
 - **Banner**: a 50-column box for phone terminals. `branding` holds the top, the logo and the repo rows. `run` adds `uid:gid`, the version, the build date and the bottom. Pad values to keep the right border straight; cut long values with `…`. Then `run` writes a `WARNING` for each LinuxServer.io option that is still set. The container does not implement these options.
 - **init-amneziawg-module**: runs `ip link add awgprobe<pid> type amneziawg`. If it fails, it writes `WG_QUICK_USERSPACE_IMPLEMENTATION` to `/run/s6/container_environment` (userspace `amneziawg-go`). It never uses a plain `wireguard` module and never calls `modprobe`.
 - **init-amneziawg-confs** (`umask 077`): generates the confs, runs `configure_dns` (server mode) and `harden_permissions`. The last line is `Config initialization finished`; the smoke test waits for it. `PEERDNS`/`USE_DNS`/`HEALTHCHECK_DNS_NAME` and an old `/config/unbound` get a NOTE.
@@ -87,10 +96,11 @@ A dependency is an empty file in `<svc>/dependencies.d/`. A registration is an e
 - **Transactions**: `render_confs` writes to `/config/.awg-staging.*`. `validate_confs` runs an awk structure check and `parse_check_conf` (`awg setconf` with Endpoint 127.0.0.1; "Unable to modify interface" means a correct parse). `install_confs` installs `wg0.conf` first and the pngs last; `rollback_install` restores the backups. There is no rollback for a failed activation.
 - **Refusals** (`GENERATION_BLOCKED`/`AWG_PARAMS_INVALID`): keep the previous confs and log `Config generation failed`. Causes: duplicate peers, more than 253 peers, an invalid `SERVERURL`/`SERVERPORT`/`INTERNAL_SUBNET`, IP detection failure with no saved value, a pinned 3.x S value less than 12.
 - **Peers** (`assign_peer_addresses`): existing peers keep their address (translated if `INTERNAL_SUBNET` changes). A new peer gets the lowest free address among the *current* peers. `archive_removed_peers` moves removed peers to `/config/removed_peers/`.
-- **`SERVERURL`**: if not set, `detect_public_ipv4` tries 3 HTTPS services, then the saved value. Clear `auto` first, with a warning. Never let it through: it is a valid host name and gives `Endpoint = auto:`. Put brackets around a bare IPv6 address.
+- **`SERVERURL`**: if not set, `detect_public_ipv4` asks 3 HTTPS services at the same time (5 s maximum) and takes the first valid answer in list order. Then it uses the saved value. Start each `curl` with no pipeline, so `$!` is the `curl` PID. Clear `auto` first, with a warning. Never let it through: it is a valid host name and gives `Endpoint = auto:`. Put brackets around a bare IPv6 address.
 - **Templates** (`root/defaults/*.conf`, copied to `/config/templates/` if missing): rendered with eval + heredoc. `check_template` refuses world-writable templates. `/config` is a root-equivalent trust boundary (`PostUp` runs as root). Never call templates "data". `harden_permissions` sets 700/600 on `server/`, `wg_confs/`, `peer*/` and `removed_peers/`. Do not add `templates/`: that hides the mode `check_template` examines.
 - **DNS** (`configure_dns`): `render_dnsmasq` makes `/config/dnsmasq/dnsmasq.conf` only if it is missing or `DNS_STATE_VARS` changed. DNS has a separate state file, so DNS and tunnel inputs never regenerate each other. It runs `dnsmasq --test` before it installs the file. `/run/dnsmasq/base.conf` is written at each start. `/run/dnsmasq/address` comes from the installed `wg0.conf`, not from `INTERNAL_SUBNET`. Do not add `strict-order`: a dead first upstream adds approximately 2.5 s to each query.
 - **Keepalive**: the script changes `PERSISTENTKEEPALIVE_PEERS=none` to empty before it saves the state. Thus the state agrees with volumes that never had keepalive. `wants_keepalive` matches a `PEERS` entry or a peer ID.
+- **Validation**: `valid_port` refuses a leading zero, because bash arithmetic reads it as octal. `is_ipv6` counts the groups and allows one `::`. `valid_endpoint_host` removes the brackets before it calls `is_ipv6`. `DNS_UPSTREAM` takes raw IPv6 addresses with an optional `#port`, not brackets.
 - **Port**: the container always listens on 51820. `SERVERPORT` is only advertised. `INTERFACE` comes from `INTERNAL_SUBNET` (`10.13.13.0` → `10.13.13`); `PEERDNS` is `${INTERFACE}.1`.
 
 ### Volume layout
@@ -124,7 +134,8 @@ The `amneziawg-config` skill gives the semantics. `README.md` gives the defaults
 
 ## Development rules
 
-- s6 scripts start with `#!/usr/bin/with-contenv bash` and `# shellcheck shell=bash`, and are executable. Use `local` only in functions.
+- s6 scripts start with `#!/usr/bin/with-contenv bash` and `# shellcheck shell=bash`, and are executable. Use `local` only in functions. Put side effects in `main()` behind the guard (see "Unit tests").
+- Do not recommend `network_mode: host`. In that namespace, `drop_default_routes` and the `PostUp` rules change the host network.
 - The final `chown` uses `find /config ! -type l`, so it never follows symlinks. A failure only gives a warning.
 - The runtime is busybox plus GNU `coreutils` and `grep`. `find` has no `-uid`/`-xtype`; use `-user`/`-group`.
 - **New env var**: set the default in the main section of `init-amneziawg-confs/run`. If it changes confs, add it to `STATE_VARS` (and `STATE_VARS_OPTIONAL` for older state files). Add AWG params to `AWG_PARAM_NAMES` (and `AWG_VERSIONED_PARAMS`). Write output through the templates or the `append_*` writers. Document it in `README.md` and `docker-compose.yml`.
@@ -133,15 +144,18 @@ The `amneziawg-config` skill gives the semantics. `README.md` gives the defaults
 
 ## CI/CD
 
-**`docker-build.yml`**: `changes` → `version` → `smoke` → `build` → `release`.
+**`docker-build.yml`**: `changes` → `version`, and `lint` in parallel. Then `smoke` + `smoke-nerdctl` → `build` → `release`.
 
-- Only `Dockerfile`, `root/**`, `.dockerignore`, `docker-build.yml` and `.github/scripts/` change the image. Other changes never publish.
+- Only `Dockerfile`, `root/**`, `.dockerignore`, `docker-build.yml` and `.github/scripts/` change the image (output `image`). Other changes never publish. A change to `tests/**` also runs the tests (output `validate`), but it does not publish.
+- `lint` runs on each event: shellcheck on each bash script and the bats tests, hadolint, actionlint. Each linter has a pinned version and sha256.
+- `BUILD_DATE` is the UTC time that `version` calculates once. Each build of the run uses it. The Dockerfile declares `BUILD_DATE` and `VERSION` after the package layers, so a new date does not stop the cache.
 - On the default branch, the gate compares with the **last release tag**, so a failed run does not lose a change. Manual runs always build.
-- `smoke`: amd64 build, `smoke-test.sh`, Trivy (fails on fixable CRITICAL findings). PRs run only this job and the script tests.
+- `smoke`: amd64 build, `unit-test.sh`, `smoke-test.sh`, Trivy (fails on fixable CRITICAL findings). PRs run only the lint, test and script-test jobs.
+- `smoke-nerdctl`: the same build, unit and smoke tests under rootful containerd + nerdctl (pinned `nerdctl-full`, sha256). It stops Docker first, so that one containerd owns the socket. `build` needs it.
 - Release (push to the default branch, or `workflow_dispatch` without overrides): boots arm64 under QEMU. Then it pushes amd64+arm64 with provenance and SBOM as `:<tools>-r<N>` (immutable), `:<tools>`, `:latest`, `:sha-<short>`. It creates the tag `v<tools>-r<N>` and a GitHub Release. A superseded run publishes only its immutable tag.
 - `workflow_dispatch` with version overrides publishes only `:dispatch-<run>`.
 - Never push `v*-r*` tags manually. They are the build counter.
 
 **Version numbers**: `<amneziawg-tools>-r<N>`. `N` starts again for each tools version. `.github/scripts/next-version.sh` calculates it from the tags. The tag annotation records `run-id:`, so a re-run uses the same number. The upstream pins are the `AMNEZIAWG_{GO,TOOLS}_{VERSION,COMMIT}` `ARG` defaults in the Dockerfile.
 
-**`upstream-check.yml`** (daily, 06:00 UTC): selects the highest strict `vX.Y.Z` upstream release (no prereleases, no downgrades). It builds and smoke-tests it with `update-pins.sh`, then opens or updates a PR. Set `UPSTREAM_PR_TOKEN`, so that this PR starts the normal checks.
+**`upstream-check.yml`** (daily, 06:00 UTC): selects the highest strict `vX.Y.Z` upstream release (no prereleases, no downgrades). It builds it with `update-pins.sh`, then runs the unit and smoke tests, then opens or updates a PR. Set `UPSTREAM_PR_TOKEN`, so that this PR starts the normal checks.

@@ -13,36 +13,20 @@ fatal() {
 }
 
 # Sets ID_OUT (no command substitution: fatal must stop this script).
+# 0 is refused on purpose: abc owns /config and runs dnsmasq, and must not be
+# root. usermod would also fail on it, because PID 1 runs as root.
 parse_id() {
-    local name=$1 value=$2
+    local name=$1 value=$2 flag=u
+    [[ "${name}" == PGID ]] && flag=g
     if [[ ! "${value}" =~ ^[0-9]{1,10}$ ]] || (( 10#${value} > 4294967294 )); then
-        fatal "${name}='${value}' is not a numeric ID between 0 and 4294967294"
+        fatal "${name}='${value}' is not a numeric ID between 1 and 4294967294"
+    fi
+    if (( 10#${value} == 0 )); then
+        fatal "${name}=${value} (root) is not supported. Set ${name} to the owner of the /config volume, for example the output of 'id -${flag}'"
     fi
     ID_OUT=$((10#${value}))
 }
 
-parse_id PUID "${PUID:-911}"
-puid=${ID_OUT}
-parse_id PGID "${PGID:-911}"
-pgid=${ID_OUT}
-
-# -o: the ID may belong to another account already (e.g. 100 = users).
-if [[ "$(id -g abc)" != "${pgid}" ]]; then
-    groupmod -o -g "${pgid}" abc || fatal "could not set the abc group to PGID ${pgid}"
-fi
-if [[ "$(id -u abc)" != "${puid}" ]]; then
-    # Point the home away from /config while changing the UID: usermod
-    # re-owns everything under the home directory.
-    if ! { usermod -d /root abc && usermod -o -u "${puid}" abc && usermod -d /config abc; }; then
-        fatal "could not set the abc user to PUID ${puid}"
-    fi
-fi
-[[ "$(id -u abc):$(id -g abc)" == "${puid}:${pgid}" ]] ||
-    fatal "abc is $(id -u abc):$(id -g abc), expected PUID:PGID ${puid}:${pgid}"
-
-echo
-echo
-cat /etc/s6-overlay/s6-rc.d/init-adduser/branding
 # One row of the box that branding opens: 44 columns between "│  " and "  │".
 # The value must be ASCII (${#} counts bytes in the C locale); a long one is cut.
 banner_line() {
@@ -55,34 +39,71 @@ banner_line() {
     fi
     printf '│  ▸ %s%s%*s  │\n' "${text}" "${ellipsis}" $((pad - ${#text})) ''
 }
-banner_line uid:gid "${puid}:${pgid}"
-# The bundled component versions stay in /build_version, out of the log.
-if [[ -f /build_version ]]; then
-    build_version=$(sed -n 's/^AmneziaWG version: *//p' /build_version)
-    build_date=$(sed -n 's/^Build-date: *//p' /build_version)
-    [[ -n "${build_version}" ]] && banner_line version "${build_version}"
-    [[ -n "${build_date}" ]] && banner_line built "${build_date}"
-fi
-printf '│%48s│\n╰%s╯\n\n\n' '' '────────────────────────────────────────────────'
 
 # Features of the LinuxServer.io base image, which this image no longer uses.
 lsio_warn() {
     echo "**** WARNING: $* ****"
 }
-for var in $(compgen -e | grep '^FILE__' || :); do
-    target=${var#FILE__}
-    lsio_warn "${var} is no longer supported: ${target} is not read from the file. Set ${target} directly."
-    if [[ "${target}" == PEERS && -z "${PEERS:-}" ]]; then
-        lsio_warn "PEERS is not set, so the container runs in client mode."
+
+warn_lsio_options() {
+    local var target dir
+    for var in $(compgen -e | grep '^FILE__' || :); do
+        target=${var#FILE__}
+        lsio_warn "${var} is no longer supported: ${target} is not read from the file. Set ${target} directly."
+        if [[ "${target}" == PEERS && -z "${PEERS:-}" ]]; then
+            lsio_warn "PEERS is not set, so the container runs in client mode."
+        fi
+    done
+    for var in DOCKER_MODS UMASK ATTACHED_DEVICES_PERMS LSIO_READ_ONLY_FS LSIO_NON_ROOT_USER; do
+        if [[ -n "$(printenv "${var}")" ]]; then
+            lsio_warn "${var} is a LinuxServer.io base image option and is ignored by this image."
+        fi
+    done
+    for dir in /custom-cont-init.d /custom-services.d; do
+        if [[ -n "$(ls -A "${dir}" 2>/dev/null)" ]]; then
+            lsio_warn "${dir} is no longer run (it was a LinuxServer.io base image feature)."
+        fi
+    done
+}
+
+main() {
+    local puid pgid build_version build_date
+    parse_id PUID "${PUID:-911}"
+    puid=${ID_OUT}
+    parse_id PGID "${PGID:-911}"
+    pgid=${ID_OUT}
+
+    # -o: the ID may belong to another account already (e.g. 100 = users).
+    if [[ "$(id -g abc)" != "${pgid}" ]]; then
+        groupmod -o -g "${pgid}" abc || fatal "could not set the abc group to PGID ${pgid}"
     fi
-done
-for var in DOCKER_MODS UMASK ATTACHED_DEVICES_PERMS LSIO_READ_ONLY_FS LSIO_NON_ROOT_USER; do
-    if [[ -n "$(printenv "${var}")" ]]; then
-        lsio_warn "${var} is a LinuxServer.io base image option and is ignored by this image."
+    if [[ "$(id -u abc)" != "${puid}" ]]; then
+        # Point the home away from /config while changing the UID: usermod
+        # re-owns everything under the home directory.
+        if ! { usermod -d /root abc && usermod -o -u "${puid}" abc && usermod -d /config abc; }; then
+            fatal "could not set the abc user to PUID ${puid}"
+        fi
     fi
-done
-for dir in /custom-cont-init.d /custom-services.d; do
-    if [[ -n "$(ls -A "${dir}" 2>/dev/null)" ]]; then
-        lsio_warn "${dir} is no longer run (it was a LinuxServer.io base image feature)."
+    [[ "$(id -u abc):$(id -g abc)" == "${puid}:${pgid}" ]] ||
+        fatal "abc is $(id -u abc):$(id -g abc), expected PUID:PGID ${puid}:${pgid}"
+
+    echo
+    echo
+    cat /etc/s6-overlay/s6-rc.d/init-adduser/branding
+    banner_line uid:gid "${puid}:${pgid}"
+    # The bundled component versions stay in /build_version, out of the log.
+    if [[ -f /build_version ]]; then
+        build_version=$(sed -n 's/^AmneziaWG version: *//p' /build_version)
+        build_date=$(sed -n 's/^Build-date: *//p' /build_version)
+        [[ -n "${build_version}" ]] && banner_line version "${build_version}"
+        [[ -n "${build_date}" ]] && banner_line built "${build_date}"
     fi
-done
+    printf '│%48s│\n╰%s╯\n\n\n' '' '────────────────────────────────────────────────'
+
+    warn_lsio_options
+}
+
+# Sourced (unit tests): define the functions only.
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    main "$@"
+fi

@@ -157,7 +157,7 @@ esac
 
 # ---------------------------------------------------------------- randomness
 rand_range() {   # inclusive [min,max]; $RANDOM is 15 bits so chain two
-    local min=$1 max=$2 span=$(( $2 - $1 + 1 ))
+    local min=$1 span=$(( $2 - $1 + 1 ))
     echo $(( min + ( ( (RANDOM << 15) | RANDOM ) % span ) ))
 }
 rand_b64_32() { head -c 32 /dev/urandom | base64 | tr -d '\n'; }

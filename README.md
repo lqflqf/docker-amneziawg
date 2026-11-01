@@ -24,7 +24,7 @@ services:
       - PUID=1000
       - PGID=1000
       - TZ=Etc/UTC
-      - SERVERURL=vpn.example.com   # or leave out to detect the public IPv4
+      - SERVERURL=vpn.example.com   # recommended. Leave it out to detect the public IPv4
       - PEERS=laptop,phone,tablet   # or a number
     volumes:
       - ./config:/config
@@ -43,7 +43,14 @@ docker exec amneziawg /app/show-peer laptop   # QR code for the Amnezia app
 
 Each named peer has its config at `./config/peer_laptop/peer_laptop.conf`. If `PEERS` is a number, the peer config is at `./config/peer1/peer1.conf`. [`docker-compose.yml`](docker-compose.yml) lists each option with comments.
 
-**Requirements:** Use a Docker host on amd64 or arm64. The host must have `/dev/net/tun` and the `NET_ADMIN` capability. A kernel module is optional; see below.
+**Requirements:** Use a Docker or containerd host on amd64 or arm64. The host must have `/dev/net/tun` and the `NET_ADMIN` capability. A kernel module is optional; see below. For containerd and nerdctl, see [containerd and nerdctl (Alpine)](#containerd-and-nerdctl-alpine).
+
+**Do not use host networking** (`network_mode: host`). The container changes the network namespace that it runs in. With host networking, that namespace is the host:
+- If no tunnel starts, the container removes each default route. The host then loses its internet connection.
+- The `PostUp` lines add `iptables` FORWARD and NAT rules to the host firewall.
+- dnsmasq and the port 51820 listener use the host network stack.
+
+Use the default bridge network and publish `51820/udp`.
 
 ## Kernel module
 
@@ -97,7 +104,7 @@ The extras of the LinuxServer.io base image are gone. If you still set one of th
 | `UMASK` | Not needed: configs and keys are always written `600` |
 | `ATTACHED_DEVICES_PERMS`, `LSIO_READ_ONLY_FS`, `LSIO_NON_ROOT_USER` | None; the container runs as root and needs a writable root filesystem |
 
-If `PUID` or `PGID` is not a number from 0 to 4294967294, the container now stops. If it cannot be applied, the container also stops. The exit code is 1, and no config is touched.
+If `PUID` or `PGID` is not a number from 1 to 4294967294, the container now stops. The container refuses `0` (root), because `abc` owns `/config` and runs dnsmasq. If it cannot be applied, the container also stops. The exit code is 1, and no config is touched.
 
 ## DNS (dnsmasq)
 
@@ -172,15 +179,15 @@ Let the container dnsmasq forward to a validating resolver on the host. Peer loo
 
 4. Recreate the container (`docker compose up -d`). Check it with `docker exec amneziawg nslookup example.com 172.31.53.1`.
 
-With `network_mode: host`, use `interface: 127.0.0.1@5335` and `access-control: 127.0.0.0/8 allow` instead. Skip the firewall step, and set `DNS_UPSTREAM=127.0.0.1#5335`.
+Do not change to `network_mode: host` for this setup. See [Requirements](#quick-start).
 
 ## Parameters
 
 | Parameter | Function |
 |-----------|----------|
-| `-e PUID=911` / `-e PGID=911` / `-e TZ` | Owner of `/config` and timezone. dnsmasq also runs as this user. An invalid `PUID`/`PGID` stops the container |
-| `-e SERVERURL=` | Host or IP written into peer configs. Unset detects the public IPv4 over HTTPS. If detection fails, it keeps the previous value. `auto` is deprecated: it warns and is treated as unset |
-| `-e SERVERPORT=51820` | Port advertised to peers. The container always listens on 51820, so map `SERVERPORT:51820/udp` (**not** `SERVERPORT:SERVERPORT`) |
+| `-e PUID=911` / `-e PGID=911` / `-e TZ` | Owner of `/config` and timezone. dnsmasq also runs as this user. An invalid `PUID`/`PGID`, or `0` (root), stops the container |
+| `-e SERVERURL=` | Host or IP written into peer configs. **Set it** to a DNS name or a fixed IP. Unset detects the public IPv4 over HTTPS. The container asks 3 services at the same time, and detection takes 5 s or less. If the detected address changes, each peer needs its new config. If detection fails, it keeps the previous value. `auto` is deprecated: it warns and is treated as unset |
+| `-e SERVERPORT=51820` | Port advertised to peers, 1-65535 without a leading zero. The container always listens on 51820, so map `SERVERPORT:51820/udp` (**not** `SERVERPORT:SERVERPORT`) |
 | `-e PEERS=` | Number or comma-separated alphanumeric names. Enables server mode |
 | `-e INTERNAL_SUBNET=10.13.13.0` | VPN subnet (`.1` is the server, `.2` and up are peers) |
 | `-e ALLOWEDIPS=0.0.0.0/0, ::/0` | What peers route into the tunnel. The tunnel is IPv4-only. `::/0` sinks peer IPv6 to prevent leaks. Narrow it for split tunnelling |
@@ -269,7 +276,35 @@ docker exec amneziawg cat /build_version      # bundled versions and commits
 | Client: `Tunnel ... failed` after `sysctl: permission denied on key "net.ipv4.conf.all.src_valid_mark"` | Add the `net.ipv4.conf.all.src_valid_mark=1` sysctl to the container |
 | Connects, pings fine, downloads crawl | Fragmentation. See [Performance and MTU](#performance-and-mtu) |
 | Container exits with code 1 right after start, log says `PUID=... is not a numeric ID` | Set `PUID`/`PGID` to numeric IDs. Examples are the output of `id -u` and `id -g` |
+| Container exits with code 1, log says `PUID=0 (root) is not supported` | Set `PUID`/`PGID` to the owner of the volume, not to root |
+| The host loses its internet connection when the container starts | You use `network_mode: host`. Remove it. See [Requirements](#quick-start) |
 | `WARNING: ... LinuxServer.io base image option` | See [Upgrading from the LinuxServer.io-based releases](#upgrading-from-the-linuxserverio-based-releases) |
+
+## containerd and nerdctl (Alpine)
+
+The image also runs under containerd with [nerdctl](https://github.com/containerd/nerdctl). CI runs the same unit and smoke tests under nerdctl for each change. Example host setup on Alpine:
+
+```bash
+apk add containerd nerdctl cni-plugins iptables ip6tables
+rc-update add containerd default
+rc-service containerd start
+modprobe tun
+echo tun >> /etc/modules
+echo 'net.ipv4.ip_forward=1' > /etc/sysctl.d/99-amneziawg.conf
+sysctl -p /etc/sysctl.d/99-amneziawg.conf
+```
+
+Use cgroup v2: set `rc_cgroup_mode="unified"` in `/etc/rc.conf` and restart the host. Then use the [Quick start](#quick-start) file:
+
+```bash
+nerdctl compose up -d
+nerdctl exec amneziawg /app/show-peer laptop
+nerdctl logs amneziawg
+```
+
+- **Health check:** nerdctl runs the image `HEALTHCHECK` only through systemd timers. OpenRC has no systemd, so the status does not update by itself. Run `nerdctl exec amneziawg /app/healthcheck` from your monitoring.
+- **Restart policy:** containerd applies `restart: unless-stopped`. Thus containerd must start at boot (the `rc-update` line above).
+- **Root:** run nerdctl as root. CI tests only rootful nerdctl.
 
 ## Security
 

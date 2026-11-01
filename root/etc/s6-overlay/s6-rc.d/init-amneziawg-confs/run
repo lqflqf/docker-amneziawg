@@ -2,46 +2,6 @@
 # shellcheck shell=bash
 # shellcheck disable=SC2016,SC1091,SC2183
 
-# Everything this script writes under /config (keys, confs, QR pngs, the saved
-# AWG params including HeaderProtectionKey) is secret, so nothing it creates may
-# be group or world readable. harden_permissions fixes files from older images.
-umask 077
-
-# /run is on the container layer and survives docker restart. svc-dnsmasq and
-# svc-amneziawg start after this script, so a stale marker is gone before
-# either reads or writes it.
-rm -f /run/amneziawg-settled
-
-mkdir -p /config/wg_confs
-
-# migration to subfolder for wg confs
-if [[ -z "$(ls -A /config/wg_confs)" ]]; then
-    if [[ -f /config/awg0.conf ]]; then
-        echo "**** Migrating legacy config /config/awg0.conf -> /config/wg_confs/wg0.conf ****"
-        cp /config/awg0.conf /config/wg_confs/wg0.conf
-        rm -rf /config/awg0.conf || :
-    elif [[ -f /config/wg0.conf ]]; then
-        echo "**** Migrating legacy config /config/wg0.conf -> /config/wg_confs/wg0.conf ****"
-        cp /config/wg0.conf /config/wg_confs/wg0.conf
-        rm -rf /config/wg0.conf || :
-    fi
-fi
-
-# prepare templates
-if [[ ! -f /config/templates/server.conf ]]; then
-    cp /defaults/server.conf /config/templates/server.conf
-fi
-if [[ ! -f /config/templates/peer.conf ]]; then
-    cp /defaults/peer.conf /config/templates/peer.conf
-fi
-if [[ ! -f /config/templates/dnsmasq.conf ]]; then
-    cp /defaults/dnsmasq.conf /config/templates/dnsmasq.conf
-fi
-# add preshared key to user templates (backwards compatibility)
-if ! grep -q 'PresharedKey' /config/templates/peer.conf; then
-    sed -i 's|^Endpoint|PresharedKey = \$\(cat /config/\${PEER_ID}/presharedkey-\${PEER_ID}\)\nEndpoint|' /config/templates/peer.conf
-fi
-
 # ============================================================================
 # AWG obfuscation parameter helpers
 # ============================================================================
@@ -68,7 +28,8 @@ fi
 # awg_params fallback dead code and silently rewrite every peer conf as 2.0.
 AWG_VERSION=${AWG_VERSION:-}
 
-# Every AWG parameter saved to /config/server/awg_params.
+AWG_PARAMS_FILE=/config/server/awg_params
+# Every AWG parameter saved to AWG_PARAMS_FILE.
 AWG_PARAM_NAMES=(
     AWG_VERSION AWG_JC AWG_JMIN AWG_JMAX
     AWG_S1 AWG_S2 AWG_S3 AWG_S4 AWG_H1 AWG_H2 AWG_H3 AWG_H4
@@ -90,7 +51,7 @@ AWG_VERSIONED_PARAMS=(
 )
 # Filled by load_awg_params: which parameters came from the environment (those
 # are never dropped or regenerated) and the version the saved set was built for.
-declare -A AWG_FROM_ENV=()
+declare -gA AWG_FROM_ENV=()
 SAVED_AWG_VERSION=""
 # Set by generate_awg_params when a value the user pinned makes the config
 # unloadable; generation is then refused and the previous configs stay.
@@ -432,7 +393,7 @@ generate_awg_params() {
 # override the environment, and it is data, not code. Values set in the
 # environment win and are recorded in AWG_FROM_ENV.
 load_awg_params() {
-    local name value file=/config/server/awg_params
+    local name value file=${AWG_PARAMS_FILE}
     for name in "${AWG_PARAM_NAMES[@]}"; do
         [[ -n "${!name:-}" ]] && AWG_FROM_ENV[$name]=1
     done
@@ -461,7 +422,7 @@ drop_saved_awg_params() {
 # explicitly set 3.1 switches are saved, see generate_awg_params.
 save_awg_params() {
     local name value
-    mkdir -p /config/server || return 1
+    mkdir -p "${AWG_PARAMS_FILE%/*}" || return 1
     {
         for name in "${AWG_PARAM_NAMES[@]}"; do
             case "${name}" in
@@ -471,7 +432,7 @@ save_awg_params() {
             esac
             printf '%s=%s\n' "${name}" "${value//$'\n'/ }"
         done
-    } > /config/server/awg_params.tmp && mv -f /config/server/awg_params.tmp /config/server/awg_params
+    } > "${AWG_PARAMS_FILE}.tmp" && mv -f "${AWG_PARAMS_FILE}.tmp" "${AWG_PARAMS_FILE}"
 }
 
 # Append I1-I5 to a config file if set (used for server conf, which has no [Peer] section yet)
@@ -592,6 +553,7 @@ awg31_options_block() {
     BLOCK_OUT=""
     [[ "${AWG_RANDOM_TRAILERS}" == "on" ]] && BLOCK_OUT+="RandomTrailers = on"$'\n'
     [[ "${AWG_DISABLE_COOKIES}" == "on" ]] && BLOCK_OUT+="DisableCookies = on"$'\n'
+    return 0
 }
 
 # Append the AWG 3.1 options to the server conf (called before any [Peer] exists)
@@ -990,7 +952,7 @@ STATE_VARS=(
 # Added after the file format existed. Missing from an older file means
 # "unknown", which must not force a regeneration on upgrade.
 STATE_VARS_OPTIONAL=(SERVER_ALLOWEDIPS_ALL TEMPLATES_HASH)
-declare -A ORIG=()
+declare -gA ORIG=()
 
 # The state file is data. It used to be sourced, which turned any value in it,
 # an auto-detected SERVERURL included, into code run as root on the next start.
@@ -1065,25 +1027,87 @@ is_ipv4 () {
     [[ "$1" =~ ^${octet}\.${octet}\.${octet}\.${octet}$ ]]
 }
 
+# An IPv6 address without brackets or zone id: 1-4 hex digits per group, at
+# most one "::", and 8 groups (fewer only with "::"). A dotted IPv4 address
+# can only be the last part, and it counts as 2 groups.
+is_ipv6 () {
+    local addr=$1 last groups=0 group
+    local -a parts
+    [[ "${addr}" == *:* ]] || return 1
+    [[ "${addr}" =~ ^[0-9A-Fa-f:.]+$ ]] || return 1
+    [[ "${addr}" != *::*::* ]] || return 1
+    [[ "${addr}" != *:::* ]] || return 1
+    # A single ":" at either end is not valid; "::" there is.
+    [[ "${addr}" == :* && "${addr}" != ::* ]] && return 1
+    [[ "${addr}" == *: && "${addr}" != *:: ]] && return 1
+    last=${addr##*:}
+    if [[ "${last}" == *.* ]]; then
+        is_ipv4 "${last}" || return 1
+        addr=${addr%"${last}"}
+        groups=2
+        # "::192.0.2.1" leaves "::"; "64:ff9b::192.0.2.1" leaves "64:ff9b::".
+        [[ "${addr}" == *:: ]] || addr=${addr%:}
+    fi
+    [[ "${addr}" != *.* ]] || return 1
+    IFS=: read -ra parts <<< "${addr}"
+    for group in "${parts[@]}"; do
+        [[ -z "${group}" ]] && continue
+        [[ "${group}" =~ ^[0-9A-Fa-f]{1,4}$ ]] || return 1
+        groups=$((groups + 1))
+    done
+    if [[ "${addr}" == *::* ]]; then
+        (( groups <= 7 ))
+    else
+        (( groups == 8 ))
+    fi
+}
+
+# A port number 1-65535, decimal, no leading zero: bash arithmetic reads "08"
+# as an invalid octal and "0100000" as octal 32768.
+valid_port () {
+    [[ "$1" =~ ^[1-9][0-9]{0,4}$ ]] && (( 10#$1 <= 65535 ))
+}
+
 # A valid Endpoint host: a DNS name, an IPv4 address or a bracketed IPv6 address.
 valid_endpoint_host () {
     local host=$1 label='[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?'
     is_ipv4 "${host}" && return 0
-    [[ "${host}" =~ ^\[[0-9A-Fa-f:.]+\]$ ]] && return 0
+    if [[ "${host}" == \[*\] ]]; then
+        is_ipv6 "${host:1:${#host}-2}"
+        return
+    fi
     (( ${#host} <= 253 )) && [[ "${host}" =~ ^(${label}\.)*${label}\.?$ ]]
 }
 
-# The server's public IPv4 over HTTPS, from the first service that returns a
-# well-formed address. A plain-HTTP answer could be rewritten on the way.
+# The services that detect_public_ipv4 asks, in order of preference.
+IP_DETECT_URLS=(https://ipv4.icanhazip.com https://api.ipify.org https://ifconfig.me/ip)
+
+# The server's public IPv4 over HTTPS. A plain-HTTP answer could be rewritten
+# on the way. All services are asked at the same time, so the worst case is one
+# timeout (5 s), not one per service. The first well-formed answer in the order
+# of IP_DETECT_URLS wins.
 detect_public_ipv4 () {
-    local url ip
-    for url in https://ipv4.icanhazip.com https://api.ipify.org https://ifconfig.me/ip; do
-        ip=$(curl -fsS -4 --max-time 10 "${url}" 2>/dev/null | tr -d '[:space:]')
+    local dir n ip
+    local -a pids=()
+    dir=$(mktemp -d /tmp/ipdetect.XXXXXX) || return 1
+    for n in "${!IP_DETECT_URLS[@]}"; do
+        # No pipeline: $! must be the curl process itself.
+        curl -fsS -4 --connect-timeout 3 --max-time 5 -o "${dir}/${n}" \
+            "${IP_DETECT_URLS[$n]}" 2>/dev/null &
+        pids+=("$!")
+    done
+    wait "${pids[@]}" 2>/dev/null
+    for n in "${!IP_DETECT_URLS[@]}"; do
+        # A failed curl may write no file at all.
+        [[ -s "${dir}/${n}" ]] || continue
+        ip=$(tr -d '[:space:]' < "${dir}/${n}")
         if is_ipv4 "${ip}"; then
+            rm -rf "${dir}"
             printf '%s' "${ip}"
             return 0
         fi
     done
+    rm -rf "${dir}"
     return 1
 }
 
@@ -1102,10 +1126,6 @@ DNS_STATE_VARS=(DNS_UPSTREAM DNS_TEMPLATE_HASH)
 DNSMASQ_CONF=/config/dnsmasq/dnsmasq.conf
 DNSMASQ_BASE=/run/dnsmasq/base.conf
 DNSMASQ_ADDRESS=/run/dnsmasq/address
-
-is_ipv6 () {
-    [[ "$1" == *:* ]] && [[ "$1" =~ ^[0-9A-Fa-f:.]+$ ]]
-}
 
 # DNS_UPSTREAM is a comma-separated list of IPv4/IPv6 addresses, each with an
 # optional #port (dnsmasq's server= takes no host names). Normalizes
@@ -1262,168 +1282,221 @@ harden_permissions () {
 # Main
 # ============================================================================
 
-if [[ -n "$PEERS" ]]; then
-    echo "**** Server mode is selected ****"
-    GENERATION_BLOCKED=""
-    load_state
-    ORIG_INTERFACE=${ORIG[INTERFACE]:-}
+# Runs first in main: the /config layout and templates the rest relies on.
+prepare_config_dir() {
+    # /run is on the container layer and survives docker restart. svc-dnsmasq and
+    # svc-amneziawg start after this script, so a stale marker is gone before
+    # either reads or writes it.
+    rm -f /run/amneziawg-settled
 
-    if [[ "$PEERS" =~ ^[0-9]+$ ]] && ! [[ "$PEERS" = *,* ]]; then
-        mapfile -t PEERS_ARRAY < <(seq 1 "${PEERS}")
-    else
-        mapfile -t PEERS_ARRAY < <(echo "${PEERS}" | tr ',' '\n')
+    mkdir -p /config/wg_confs
+
+    # migration to subfolder for wg confs
+    if [[ -z "$(ls -A /config/wg_confs)" ]]; then
+        if [[ -f /config/awg0.conf ]]; then
+            echo "**** Migrating legacy config /config/awg0.conf -> /config/wg_confs/wg0.conf ****"
+            cp /config/awg0.conf /config/wg_confs/wg0.conf
+            rm -rf /config/awg0.conf || :
+        elif [[ -f /config/wg0.conf ]]; then
+            echo "**** Migrating legacy config /config/wg0.conf -> /config/wg_confs/wg0.conf ****"
+            cp /config/wg0.conf /config/wg_confs/wg0.conf
+            rm -rf /config/wg0.conf || :
+        fi
     fi
-    PEER_IDS=()
-    PEER_LABELS=()
-    declare -A SEEN_PEERS=()
-    for i in "${PEERS_ARRAY[@]}"; do
-        if [[ ! "${i}" =~ ^[[:alnum:]]+$ ]]; then
-            echo "**** Peer ${i} contains non-alphanumeric characters and thus will be skipped. No config for peer ${i} will be generated. ****"
-            continue
-        fi
-        if [[ "${i}" =~ ^[0-9]+$ ]]; then
-            PEER_ID="peer${i}"
+
+    # prepare templates
+    if [[ ! -f /config/templates/server.conf ]]; then
+        cp /defaults/server.conf /config/templates/server.conf
+    fi
+    if [[ ! -f /config/templates/peer.conf ]]; then
+        cp /defaults/peer.conf /config/templates/peer.conf
+    fi
+    if [[ ! -f /config/templates/dnsmasq.conf ]]; then
+        cp /defaults/dnsmasq.conf /config/templates/dnsmasq.conf
+    fi
+    # add preshared key to user templates (backwards compatibility)
+    if ! grep -q 'PresharedKey' /config/templates/peer.conf; then
+        sed -i 's|^Endpoint|PresharedKey = \$\(cat /config/\${PEER_ID}/presharedkey-\${PEER_ID}\)\nEndpoint|' /config/templates/peer.conf
+    fi
+}
+
+main() {
+    # Everything this script writes under /config (keys, confs, QR pngs, the saved
+    # AWG params including HeaderProtectionKey) is secret, so nothing it creates may
+    # be group or world readable. harden_permissions fixes files from older images.
+    umask 077
+
+    prepare_config_dir
+
+    if [[ -n "$PEERS" ]]; then
+        echo "**** Server mode is selected ****"
+        GENERATION_BLOCKED=""
+        load_state
+        ORIG_INTERFACE=${ORIG[INTERFACE]:-}
+
+        if [[ "$PEERS" =~ ^[0-9]+$ ]] && ! [[ "$PEERS" = *,* ]]; then
+            mapfile -t PEERS_ARRAY < <(seq 1 "${PEERS}")
         else
-            PEER_ID="peer_${i}"
+            mapfile -t PEERS_ARRAY < <(echo "${PEERS}" | tr ',' '\n')
         fi
-        if [[ -n "${SEEN_PEERS[${PEER_ID}]:-}" ]]; then
-            echo "**** ERROR: peer ${i} is listed more than once in PEERS ****"
+        PEER_IDS=()
+        PEER_LABELS=()
+        declare -A SEEN_PEERS=()
+        for i in "${PEERS_ARRAY[@]}"; do
+            if [[ ! "${i}" =~ ^[[:alnum:]]+$ ]]; then
+                echo "**** Peer ${i} contains non-alphanumeric characters and thus will be skipped. No config for peer ${i} will be generated. ****"
+                continue
+            fi
+            if [[ "${i}" =~ ^[0-9]+$ ]]; then
+                PEER_ID="peer${i}"
+            else
+                PEER_ID="peer_${i}"
+            fi
+            if [[ -n "${SEEN_PEERS[${PEER_ID}]:-}" ]]; then
+                echo "**** ERROR: peer ${i} is listed more than once in PEERS ****"
+                GENERATION_BLOCKED=1
+                continue
+            fi
+            SEEN_PEERS[${PEER_ID}]=1
+            PEER_IDS+=("${PEER_ID}")
+            PEER_LABELS+=("${i}")
+        done
+        if [[ ${#PEER_IDS[@]} -gt 253 ]]; then
+            echo "**** ERROR: Too many peers (${#PEER_IDS[@]}). Maximum is 253 for a /24 subnet ****"
             GENERATION_BLOCKED=1
-            continue
         fi
-        SEEN_PEERS[${PEER_ID}]=1
-        PEER_IDS+=("${PEER_ID}")
-        PEER_LABELS+=("${i}")
-    done
-    if [[ ${#PEER_IDS[@]} -gt 253 ]]; then
-        echo "**** ERROR: Too many peers (${#PEER_IDS[@]}). Maximum is 253 for a /24 subnet ****"
-        GENERATION_BLOCKED=1
-    fi
-    # s6 drops empty variables, so "off" needs a value of its own. It is saved as
-    # empty, matching volumes that never had keepalive.
-    PERSISTENTKEEPALIVE_PEERS=${PERSISTENTKEEPALIVE_PEERS:-all}
-    if [[ "${PERSISTENTKEEPALIVE_PEERS}" == none ]]; then
-        PERSISTENTKEEPALIVE_PEERS=""
-        PERSISTENTKEEPALIVE_PEERS_ARRAY=()
-        echo "**** PersistentKeepalive is disabled for all peers ****"
-    else
-        echo "**** PersistentKeepalive will be set for: ${PERSISTENTKEEPALIVE_PEERS//,/ } ****"
-        mapfile -t PERSISTENTKEEPALIVE_PEERS_ARRAY < <(echo "${PERSISTENTKEEPALIVE_PEERS}" | tr ',' '\n')
-    fi
-
-    if [[ "$SERVERURL" == auto ]]; then
-        echo "**** WARNING: SERVERURL=auto is deprecated, remove it: an unset SERVERURL detects the public IPv4 ****"
-        SERVERURL=""
-    fi
-    if [[ -z "$SERVERURL" ]]; then
-        if SERVERURL=$(detect_public_ipv4); then
-            echo "**** SERVERURL not set, detected public IPv4: $SERVERURL ****"
-        elif [[ -n "${ORIG[SERVERURL]:-}" ]] && valid_endpoint_host "${ORIG[SERVERURL]}"; then
-            SERVERURL=${ORIG[SERVERURL]}
-            echo "**** WARNING: could not detect the external IP, keeping the previous value ${SERVERURL} ****"
+        # s6 drops empty variables, so "off" needs a value of its own. It is saved as
+        # empty, matching volumes that never had keepalive.
+        PERSISTENTKEEPALIVE_PEERS=${PERSISTENTKEEPALIVE_PEERS:-all}
+        if [[ "${PERSISTENTKEEPALIVE_PEERS}" == none ]]; then
+            PERSISTENTKEEPALIVE_PEERS=""
+            PERSISTENTKEEPALIVE_PEERS_ARRAY=()
+            echo "**** PersistentKeepalive is disabled for all peers ****"
         else
+            echo "**** PersistentKeepalive will be set for: ${PERSISTENTKEEPALIVE_PEERS//,/ } ****"
+            mapfile -t PERSISTENTKEEPALIVE_PEERS_ARRAY < <(echo "${PERSISTENTKEEPALIVE_PEERS}" | tr ',' '\n')
+        fi
+
+        if [[ "$SERVERURL" == auto ]]; then
+            echo "**** WARNING: SERVERURL=auto is deprecated, remove it: an unset SERVERURL detects the public IPv4 ****"
             SERVERURL=""
-            echo "**** ERROR: could not detect the external IP. Set SERVERURL to this server's public address or DNS name. ****"
+        fi
+        if [[ -z "$SERVERURL" ]]; then
+            if SERVERURL=$(detect_public_ipv4); then
+                echo "**** SERVERURL not set, detected public IPv4: $SERVERURL ****"
+                echo "**** NOTE: set SERVERURL to a DNS name or a fixed IP. If the detected address changes, every peer needs its new conf. ****"
+            elif [[ -n "${ORIG[SERVERURL]:-}" ]] && valid_endpoint_host "${ORIG[SERVERURL]}"; then
+                SERVERURL=${ORIG[SERVERURL]}
+                echo "**** WARNING: could not detect the external IP, keeping the previous value ${SERVERURL} ****"
+            else
+                SERVERURL=""
+                echo "**** ERROR: could not detect the external IP. Set SERVERURL to this server's public address or DNS name. ****"
+                GENERATION_BLOCKED=1
+            fi
+        else
+            # A bare IPv6 address is not a valid Endpoint host; bracket it.
+            if [[ "$SERVERURL" == *:* ]] && [[ "$SERVERURL" != \[* ]]; then
+                SERVERURL="[${SERVERURL}]"
+            fi
+            echo "**** External server address is set to $SERVERURL ****"
+        fi
+        if [[ -n "$SERVERURL" ]] && ! valid_endpoint_host "$SERVERURL"; then
+            echo "**** ERROR: SERVERURL \"${SERVERURL}\" is not a valid host name or IP address ****"
             GENERATION_BLOCKED=1
         fi
-    else
-        # A bare IPv6 address is not a valid Endpoint host; bracket it.
-        if [[ "$SERVERURL" == *:* ]] && [[ "$SERVERURL" != \[* ]]; then
-            SERVERURL="[${SERVERURL}]"
+        SERVERPORT=${SERVERPORT:-51820}
+        if ! valid_port "$SERVERPORT"; then
+            echo "**** ERROR: SERVERPORT \"${SERVERPORT}\" is not a port number (1-65535) ****"
+            GENERATION_BLOCKED=1
         fi
-        echo "**** External server address is set to $SERVERURL ****"
-    fi
-    if [[ -n "$SERVERURL" ]] && ! valid_endpoint_host "$SERVERURL"; then
-        echo "**** ERROR: SERVERURL \"${SERVERURL}\" is not a valid host name or IP address ****"
-        GENERATION_BLOCKED=1
-    fi
-    SERVERPORT=${SERVERPORT:-51820}
-    if [[ ! "$SERVERPORT" =~ ^[0-9]+$ ]] || (( SERVERPORT < 1 || SERVERPORT > 65535 )); then
-        echo "**** ERROR: SERVERPORT \"${SERVERPORT}\" is not a port number (1-65535) ****"
-        GENERATION_BLOCKED=1
-    fi
-    echo "**** External server port is set to ${SERVERPORT}. Make sure that port is properly forwarded to port 51820 inside this container ****"
-    INTERNAL_SUBNET=${INTERNAL_SUBNET:-10.13.13.0}
-    # The subnet is always a /24; older images accepted "10.13.13.0/24" too.
-    if [[ "$INTERNAL_SUBNET" == */* ]]; then
-        [[ "${INTERNAL_SUBNET#*/}" == 24 ]] || echo "**** WARNING: INTERNAL_SUBNET ${INTERNAL_SUBNET}: only /24 is supported, using ${INTERNAL_SUBNET%%/*}/24 ****"
-        INTERNAL_SUBNET=${INTERNAL_SUBNET%%/*}
-    fi
-    echo "**** Internal subnet is set to $INTERNAL_SUBNET ****"
-    if ! is_ipv4 "$INTERNAL_SUBNET"; then
-        echo "**** ERROR: INTERNAL_SUBNET \"${INTERNAL_SUBNET}\" is not an IPv4 address such as 10.13.13.0 ****"
-        GENERATION_BLOCKED=1
-    fi
-    INTERFACE=$(echo "$INTERNAL_SUBNET" | awk 'BEGIN{FS=OFS="."} NF--')
-    ALLOWEDIPS=${ALLOWEDIPS:-0.0.0.0/0, ::/0}
-    echo "**** AllowedIPs for peers $ALLOWEDIPS ****"
-    if [[ -n "${PEERDNS:-}" ]]; then
-        echo "**** NOTE: PEERDNS is no longer supported and is ignored. Peers always use the container's dnsmasq at ${INTERFACE}.1; set DNS_UPSTREAM to choose where it forwards. ****"
-    fi
-    # Not a setting any more, but kept in the templates and the saved state.
-    PEERDNS="${INTERFACE}.1"
+        echo "**** External server port is set to ${SERVERPORT}. Make sure that port is properly forwarded to port 51820 inside this container ****"
+        INTERNAL_SUBNET=${INTERNAL_SUBNET:-10.13.13.0}
+        # The subnet is always a /24; older images accepted "10.13.13.0/24" too.
+        if [[ "$INTERNAL_SUBNET" == */* ]]; then
+            [[ "${INTERNAL_SUBNET#*/}" == 24 ]] || echo "**** WARNING: INTERNAL_SUBNET ${INTERNAL_SUBNET}: only /24 is supported, using ${INTERNAL_SUBNET%%/*}/24 ****"
+            INTERNAL_SUBNET=${INTERNAL_SUBNET%%/*}
+        fi
+        echo "**** Internal subnet is set to $INTERNAL_SUBNET ****"
+        if ! is_ipv4 "$INTERNAL_SUBNET"; then
+            echo "**** ERROR: INTERNAL_SUBNET \"${INTERNAL_SUBNET}\" is not an IPv4 address such as 10.13.13.0 ****"
+            GENERATION_BLOCKED=1
+        fi
+        INTERFACE=$(echo "$INTERNAL_SUBNET" | awk 'BEGIN{FS=OFS="."} NF--')
+        ALLOWEDIPS=${ALLOWEDIPS:-0.0.0.0/0, ::/0}
+        echo "**** AllowedIPs for peers $ALLOWEDIPS ****"
+        if [[ -n "${PEERDNS:-}" ]]; then
+            echo "**** NOTE: PEERDNS is no longer supported and is ignored. Peers always use the container's dnsmasq at ${INTERFACE}.1; set DNS_UPSTREAM to choose where it forwards. ****"
+        fi
+        # Not a setting any more, but kept in the templates and the saved state.
+        PEERDNS="${INTERFACE}.1"
 
-    # Load saved AWG params as fallback, then generate/validate
-    load_awg_params
-    generate_awg_params
-    check_awg31_kernel_support
+        # Load saved AWG params as fallback, then generate/validate
+        load_awg_params
+        generate_awg_params
+        check_awg31_kernel_support
 
-    # shellcheck disable=SC2034 # read through STATE_VARS
-    SERVER_ALLOWEDIPS_ALL=$(server_allowedips_all)
-    # shellcheck disable=SC2034
-    TEMPLATES_HASH=$(cat /config/templates/server.conf /config/templates/peer.conf | sha256sum | cut -d' ' -f1)
+        # shellcheck disable=SC2034 # read through STATE_VARS
+        SERVER_ALLOWEDIPS_ALL=$(server_allowedips_all)
+        # shellcheck disable=SC2034
+        TEMPLATES_HASH=$(cat /config/templates/server.conf /config/templates/peer.conf | sha256sum | cut -d' ' -f1)
 
-    if [[ -n "${GENERATION_BLOCKED}" ]] || [[ -n "${AWG_PARAMS_INVALID}" ]]; then
-        config_generation_failed
-    elif [[ ! -f /config/wg_confs/wg0.conf ]]; then
-        echo "**** No wg0.conf found (maybe an initial install), generating 1 server and ${#PEER_IDS[@]} peer/client confs ****"
-        if generate_confs; then
+        if [[ -n "${GENERATION_BLOCKED}" ]] || [[ -n "${AWG_PARAMS_INVALID}" ]]; then
+            config_generation_failed
+        elif [[ ! -f /config/wg_confs/wg0.conf ]]; then
+            echo "**** No wg0.conf found (maybe an initial install), generating 1 server and ${#PEER_IDS[@]} peer/client confs ****"
+            if generate_confs; then
+                save_awg_params
+                save_vars
+            else
+                config_generation_failed
+            fi
+        elif state_changed; then
+            echo "**** Server related settings changed (${CHANGED_VAR} and possibly others), regenerating 1 server and ${#PEER_IDS[@]} peer/client confs ****"
+            if generate_confs; then
+                save_awg_params
+                save_vars
+            else
+                config_generation_failed
+            fi
+        else
+            echo "**** No changes to parameters. Existing configs are used. ****"
+            # Nothing changed, so recording the current values is safe; it also
+            # fills in keys an older state file lacks, which would otherwise never
+            # be compared (see STATE_VARS_OPTIONAL).
             save_awg_params
             save_vars
-        else
-            config_generation_failed
         fi
-    elif state_changed; then
-        echo "**** Server related settings changed (${CHANGED_VAR} and possibly others), regenerating 1 server and ${#PEER_IDS[@]} peer/client confs ****"
-        if generate_confs; then
-            save_awg_params
-            save_vars
-        else
-            config_generation_failed
-        fi
+
+        configure_dns
     else
-        echo "**** No changes to parameters. Existing configs are used. ****"
-        # Nothing changed, so recording the current values is safe; it also
-        # fills in keys an older state file lacks, which would otherwise never
-        # be compared (see STATE_VARS_OPTIONAL).
-        save_awg_params
-        save_vars
+        echo "**** Client mode selected. ****"
     fi
 
-    configure_dns
-else
-    echo "**** Client mode selected. ****"
-fi
+    if [[ -n "${USE_DNS:-}" ]]; then
+        echo "**** NOTE: USE_DNS is no longer supported and is ignored. dnsmasq always runs in server mode and never in client mode. ****"
+    fi
+    if [[ -n "${HEALTHCHECK_DNS_NAME:-}" ]]; then
+        echo "**** NOTE: HEALTHCHECK_DNS_NAME is no longer supported and is ignored. The health check only tests that dnsmasq answers on the tunnel address. ****"
+    fi
+    if [[ -d /config/unbound ]]; then
+        echo "**** NOTE: /config/unbound is no longer used (this image runs dnsmasq instead of Unbound) and can be deleted. ****"
+    fi
 
-if [[ -n "${USE_DNS:-}" ]]; then
-    echo "**** NOTE: USE_DNS is no longer supported and is ignored. dnsmasq always runs in server mode and never in client mode. ****"
-fi
-if [[ -n "${HEALTHCHECK_DNS_NAME:-}" ]]; then
-    echo "**** NOTE: HEALTHCHECK_DNS_NAME is no longer supported and is ignored. The health check only tests that dnsmasq answers on the tunnel address. ****"
-fi
-if [[ -d /config/unbound ]]; then
-    echo "**** NOTE: /config/unbound is no longer used (this image runs dnsmasq instead of Unbound) and can be deleted. ****"
-fi
+    # let openresolv take control of resolv.conf
+    resolvconf -a control 2>/dev/null < /etc/resolv.conf
+    resolvconf -u
 
-# let openresolv take control of resolv.conf
-resolvconf -a control 2>/dev/null < /etc/resolv.conf
-resolvconf -u
+    # permissions
+    harden_permissions
+    # Only what is not abc:abc already. ! -type l: never follow a symlink out of
+    # /config.
+    find /config ! -type l \( ! -user abc -o ! -group abc \) -exec chown abc:abc {} + 2>/dev/null ||
+        echo "**** WARNING: could not set the owner of everything in /config (read-only or remote volume?) ****"
 
-# permissions
-harden_permissions
-# Only what is not abc:abc already. ! -type l: never follow a symlink out of
-# /config.
-find /config ! -type l \( ! -user abc -o ! -group abc \) -exec chown abc:abc {} + 2>/dev/null ||
-    echo "**** WARNING: could not set the owner of everything in /config (read-only or remote volume?) ****"
+    echo "**** Config initialization finished ****"
+}
 
-echo "**** Config initialization finished ****"
+# Sourced (unit tests): define the functions only.
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    main "$@"
+fi

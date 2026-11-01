@@ -24,7 +24,7 @@ Copy `scripts/check-requirements.sh` to the host and run it (`bash check-require
 
 ## Phase 2 — Install missing pieces
 
-Install and verify each missing item in this order. Install Docker plus the Compose plugin. Persist `net.ipv4.ip_forward=1` on the host. Open the UDP port in the host firewall and the cloud provider firewall or security group. Make sure `/dev/net/tun` exists. For distro commands, see `references/system-setup.md`. With the default bridge network, a host NAT rule is not necessary. The container masquerades the VPN subnet itself. For `network_mode: host`, see `references/system-setup.md`.
+Install and verify each missing item in this order. Install Docker plus the Compose plugin. Persist `net.ipv4.ip_forward=1` on the host. Open the UDP port in the host firewall and the cloud provider firewall or security group. Make sure `/dev/net/tun` exists. For distro commands, see `references/system-setup.md`. With the default bridge network, a host NAT rule is not necessary. The container masquerades the VPN subnet itself. Never use `network_mode: host`. See `references/system-setup.md`.
 
 ## Phase 3 — Settings
 
@@ -32,7 +32,7 @@ Ask in one batch. Use the `ask_user` tool with several fields.
 
 | Setting | Default | Notes |
 |---|---|---|
-| `SERVERURL` | unset | Prefer a DNS name. If unset, the container detects the public IPv4 |
+| `SERVERURL` | unset | Always set it, preferably to a DNS name. If unset, the container detects the public IPv4. A changed address then re-issues each peer conf |
 | `SERVERPORT` | `51820` | For a non-default port, map `SERVERPORT:51820/udp`. Use 443/udp or a port ≤ 9999 if carriers block high UDP ports |
 | `PEERS` | — | Prefer names (`laptop,phone` → `peer_laptop`…). Use letters and digits only; other names are skipped |
 | `TZ` | `Etc/UTC` | This controls log timestamps only |
