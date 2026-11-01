@@ -172,8 +172,8 @@ jobs:
       - name: Build test image (linux/amd64)
         run: docker build -t test-image --build-arg VERSION=upstream-check .
 
-      - name: Unit tests
-        run: .github/scripts/unit-test.sh test-image
+      - name: Integration tests
+        run: .github/scripts/integration-test.sh test-image
 
       - name: Smoke tests
         run: .github/scripts/smoke-test.sh test-image

@@ -13,6 +13,8 @@ SECURITY.md
 # Configuration files (potentially sensitive)
 *.conf
 !*.conf.example
+# ...but the Go test fixtures (old-volume samples) hold no real keys
+!internal/**/testdata/**
 
 # Development files
 .DS_Store

@@ -65,11 +65,11 @@ env:
 
 jobs:
   # Decide the mode, and whether this event touches the image at all. Only
-  # Dockerfile, root/, .dockerignore and the CI that versions the image end up
-  # in (or shape) the published image — docs, skills and compose examples do
-  # not, so a push that changes only those must not publish a new release.
-  # `validate` also covers tests/: a change to the unit tests alone must run
-  # the tests, but it does not publish.
+  # Dockerfile, root/, the Go code (cmd/, internal/, go.mod, go.sum),
+  # .dockerignore and the CI that versions the image end up in (or shape) the
+  # published image — docs, skills and compose examples do not, so a push that
+  # changes only those must not publish a new release. `validate` also covers
+  # the Go tests: a change to tests alone must run them, but it does not publish.
   changes:
     runs-on: ubuntu-24.04
     outputs:
@@ -94,8 +94,8 @@ jobs:
           PR_HEAD: ${{ github.event.pull_request.head.sha }}
           PUSH_BEFORE: ${{ github.event.before }}
         run: |
-          IMAGE_PATHS='^(Dockerfile$|root/|\.dockerignore$|\.github/workflows/docker-build\.yml$|\.github/scripts/)'
-          TEST_PATHS='^tests/'
+          IMAGE_PATHS='^(Dockerfile$|root/|cmd/|internal/|go\.(mod|sum)$|\.golangci\.yml$|\.dockerignore$|\.github/workflows/docker-build\.yml$|\.github/scripts/)'
+          TEST_PATHS='(_test\.go$|^internal/integration/|^internal/sys/systest/)'
 
           if [[ "$EVENT" == "pull_request" ]]; then
             MODE="pr"
@@ -152,13 +152,14 @@ jobs:
 
           CHANGED=$(git diff --name-only "$BASE" "$HEAD")
           echo "changed files since ${BASE}:"; awk '{print "  " $0}' <<<"$CHANGED"
-          if grep -qE "$IMAGE_PATHS" <<<"$CHANGED"; then
+          # grep without -q: an early exit would SIGPIPE the left side.
+          if grep -E "$IMAGE_PATHS" <<<"$CHANGED" | grep -vE "$TEST_PATHS" >/dev/null; then
             decide true true "yes (image-affecting paths changed since ${BASE})"
           fi
           if grep -qE "$TEST_PATHS" <<<"$CHANGED"; then
-            decide false true "tests only (tests/ changed since ${BASE}), nothing is published"
+            decide false true "tests only (Go tests changed since ${BASE}), nothing is published"
           fi
-          decide false false "skipped — no changes to Dockerfile, root/, .dockerignore or image CI since ${BASE}"
+          decide false false "skipped — no changes to Dockerfile, root/, the Go code, .dockerignore or image CI since ${BASE}"
 
   # Resolve upstream versions and the image version once; build and release
   # both consume these outputs so the tag, image and release cannot disagree.
@@ -261,6 +262,8 @@ jobs:
       HADOLINT_SHA256: c7187db94eeeeca956519a6af171adc31453941a1e777961f6e680f697c8c507
       ACTIONLINT_VERSION: 1.7.12
       ACTIONLINT_SHA256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+      GOLANGCI_LINT_VERSION: 2.15.0
+      GOLANGCI_LINT_SHA256: 9b7fe6a6bf6334b98decf8d86b11415ea7889afdabdd1959fdce23af2a9ebcea
     steps:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -285,14 +288,19 @@ jobs:
             "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
           echo "${ACTIONLINT_SHA256}  actionlint.tar.gz" | sha256sum -c -
           tar -xzf actionlint.tar.gz -C "$bin" actionlint
+          curl -fsSLo golangci-lint.tar.gz \
+            "https://github.com/golangci/golangci-lint/releases/download/v${GOLANGCI_LINT_VERSION}/golangci-lint-${GOLANGCI_LINT_VERSION}-linux-amd64.tar.gz"
+          echo "${GOLANGCI_LINT_SHA256}  golangci-lint.tar.gz" | sha256sum -c -
+          tar -xzf golangci-lint.tar.gz --strip-components=1 -C "$bin" \
+            "golangci-lint-${GOLANGCI_LINT_VERSION}-linux-amd64/golangci-lint"
           echo "$bin" >> "$GITHUB_PATH"
 
       # Every bash script: the s6 scripts (with-contenv bash), the CI and skill
-      # scripts, and the bats tests (tests/.shellcheckrc).
+      # scripts.
       - name: shellcheck
         run: |
-          mapfile -t files < <(grep -rlE '^#!.*\b(bash|bats)\b|^# shellcheck shell=bash' \
-            root .github/scripts .github/skills tests | sort)
+          mapfile -t files < <(grep -rlE '^#!.*\bbash\b|^# shellcheck shell=bash' \
+            root .github/scripts .github/skills | sort)
           printf '%s\n' "${files[@]}"
           shellcheck "${files[@]}"
 
@@ -302,6 +310,18 @@ jobs:
       # actionlint also runs shellcheck on each run: block.
       - name: actionlint
         run: actionlint -color
+
+      # The Go code is linted and race-tested in the golang image that the
+      # Dockerfile builds with (the runner needs no Go toolchain). The plain
+      # unit tests also run in the image build.
+      - name: golangci-lint
+        run: |
+          image=$(sed -n 's/^FROM \(golang:[^ ]*\) AS go-builder/\1/p' Dockerfile)
+          docker run --rm -v "$PWD":/src -w /src -v "$(command -v golangci-lint)":/usr/local/bin/golangci-lint:ro \
+            -e CGO_ENABLED=0 "$image" golangci-lint run --build-tags integration ./...
+
+      - name: go test -race
+        run: GO_CGO=1 .github/scripts/go.sh test -race -count=1 ./...
 
   # Every run: build one platform locally, test it and scan it. Nothing is
   # published unless this passes. Kept apart from `build` so it never holds a
@@ -376,7 +396,7 @@ jobs:
             as_root=(sudo env ENGINE="$ENGINE" BUILD_DATE="$BUILD_DATE" \
               GITHUB_ACTIONS="$GITHUB_ACTIONS" GITHUB_STEP_SUMMARY="$GITHUB_STEP_SUMMARY")
           fi
-          "${as_root[@]}" .github/scripts/unit-test.sh test-image
+          "${as_root[@]}" .github/scripts/integration-test.sh test-image
           "${as_root[@]}" .github/scripts/smoke-test.sh test-image
 
       # Fails on critical vulnerabilities that already have a fix, so a
@@ -535,15 +555,16 @@ jobs:
             dnsmasq --version | head -n1
             test "$(uname -m)" = aarch64
             awg genkey | awg pubkey >/dev/null
-            bash -n /etc/s6-overlay/s6-rc.d/init-amneziawg-confs/run
+            awgctl version
+            bash -n /etc/s6-overlay/s6-rc.d/init-amneziawg-config/run
           '
           # Boot /init too: s6 comes from Alpine's arm64 packages. No tunnel can
           # come up here (no module, no /dev/net/tun), so wait for the verdict.
           docker run -d --name arm64-boot --platform linux/arm64 --cap-add NET_ADMIN \
-            -e PEERS=1 -e SERVERURL=ci.example.com -e PUID=1234 -e PGID=2345 arm64-check
+            -e SERVERURL=ci.example.com -e PUID=1234 -e PGID=2345 arm64-check
           booted=false
           for _ in $(seq 1 90); do
-            if grep -qE 'All tunnels are now (active|down)' <<<"$(docker logs arm64-boot 2>&1)"; then
+            if grep -qE 'Tunnel wg0 is (up|down)' <<<"$(docker logs arm64-boot 2>&1)"; then
               booted=true; break
             fi
             sleep 2
@@ -553,10 +574,12 @@ jobs:
           [ "$booted" = true ]
           grep -q '▸ uid:gid  1234:2345' <<<"$logs"
           grep -q 'Config initialization finished' <<<"$logs"
-          docker exec arm64-boot test -s /config/peer1/peer1.png
+          docker exec arm64-boot test -s /config/amneziawg.db
+          docker exec arm64-boot awgctl peer add arm64 >/dev/null
+          docker exec arm64-boot awgctl peer export arm64 --qr >/dev/null
           [ "$(docker exec arm64-boot id -u abc)" = 1234 ]
           services=$(docker exec arm64-boot s6-rc -a list)
-          grep -qx init-amneziawg-confs <<<"$services"
+          grep -qx init-amneziawg-config <<<"$services"
           grep -qx svc-dnsmasq <<<"$services"
           docker rm -f arm64-boot >/dev/null
 

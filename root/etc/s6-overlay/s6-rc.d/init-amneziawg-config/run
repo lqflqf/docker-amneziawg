@@ -1,0 +1,20 @@
+#!/usr/bin/with-contenv bash
+# shellcheck shell=bash
+
+# awgctl init creates the database on the first start (from the env vars) or
+# checks it, then renders /run/amneziawg/wg0.conf and the dnsmasq config. Any
+# failure stops the container with exit code 1: a failed oneshot alone leaves
+# an idle container that the restart policy never retries.
+main() {
+    if ! awgctl init; then
+        echo "**** ERROR: awgctl init failed (see above). The container is stopping. ****"
+        echo 1 > /run/s6-linux-init-container-results/exitcode
+        /run/s6/basedir/bin/halt
+        exit 1
+    fi
+}
+
+# Sourced (tests): define the functions only.
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    main "$@"
+fi
