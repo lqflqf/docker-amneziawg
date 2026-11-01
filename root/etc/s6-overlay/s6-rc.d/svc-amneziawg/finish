@@ -1,15 +1,24 @@
 #!/usr/bin/with-contenv bash
 # shellcheck shell=bash
 
-# A restarted dnsmasq waits for the next svc-amneziawg run, not for this one.
-rm -f /run/amneziawg-settled
+main() {
+    local tunnel AWG_CONFS=()
+    # A restarted dnsmasq waits for the next svc-amneziawg run, not for this one.
+    rm -f /run/amneziawg-settled
 
-if [[ -f "/run/activeconfs" ]]; then
-    . /run/activeconfs
-    for tunnel in $(printf '%s\n' "${AWG_CONFS[@]}" | tac | tr '\n' ' '; echo); do
-        echo "**** Disabling tunnel ${tunnel} ****"
-        awg-quick down "${tunnel}" || :
-    done
-    echo "**** All tunnels are down ****"
-    rm -rf /run/activeconfs
+    if [[ -f "/run/activeconfs" ]]; then
+        # shellcheck source=/dev/null # written by svc-amneziawg with declare -p
+        . /run/activeconfs
+        for tunnel in $(printf '%s\n' "${AWG_CONFS[@]}" | tac | tr '\n' ' '; echo); do
+            echo "**** Disabling tunnel ${tunnel} ****"
+            awg-quick down "${tunnel}" || :
+        done
+        echo "**** All tunnels are down ****"
+        rm -rf /run/activeconfs
+    fi
+}
+
+# Sourced (unit tests): define the functions only.
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    main "$@"
 fi

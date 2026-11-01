@@ -9,29 +9,37 @@ set_state() {
     printf '%s\n' "$1" > /run/dnsmasq-state
 }
 
-if [[ -z "${PEERS}" ]]; then
-    set_state disabled
-    exec sleep infinity
+main() {
+    local i
+    if [[ -z "${PEERS}" ]]; then
+        set_state disabled
+        exec sleep infinity
+    fi
+
+    # Start once svc-amneziawg has brought wg0 up (or failed its first attempt):
+    # started earlier, dnsmasq races awg-quick and can miss the tunnel address.
+    # Not an s6 dependency, because dnsmasq must still run when the tunnel fails.
+    for (( i = 0; i < 300; i++ )); do
+        [[ -e /run/amneziawg-settled ]] && break
+        sleep 0.2
+    done
+    [[ -e /run/amneziawg-settled ]] \
+        || echo "**** svc-amneziawg has not finished its first attempt after 60s, starting dnsmasq anyway ****"
+
+    # Do not exec dnsmasq with a config it will reject: s6 would restart-loop the
+    # service and bury the reason in the churn. The tunnel still comes up, but the
+    # container reports unhealthy until the config is fixed.
+    if [[ ! -f "${BASE}" ]] || [[ ! -f /config/dnsmasq/dnsmasq.conf ]] || ! dnsmasq --test -C "${BASE}"; then
+        set_state invalid
+        echo "**** No valid dnsmasq config, dnsmasq will not be started. See the errors above (or the init log), fix /config/templates/dnsmasq.conf or DNS_UPSTREAM and restart. ****"
+        exec sleep infinity
+    fi
+
+    set_state running
+    exec dnsmasq -k -C "${BASE}"
+}
+
+# Sourced (unit tests): define the functions only.
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    main "$@"
 fi
-
-# Start once svc-amneziawg has brought wg0 up (or failed its first attempt):
-# started earlier, dnsmasq races awg-quick and can miss the tunnel address.
-# Not an s6 dependency, because dnsmasq must still run when the tunnel fails.
-for (( i = 0; i < 300; i++ )); do
-    [[ -e /run/amneziawg-settled ]] && break
-    sleep 0.2
-done
-[[ -e /run/amneziawg-settled ]] \
-    || echo "**** svc-amneziawg has not finished its first attempt after 60s, starting dnsmasq anyway ****"
-
-# Do not exec dnsmasq with a config it will reject: s6 would restart-loop the
-# service and bury the reason in the churn. The tunnel still comes up, but the
-# container reports unhealthy until the config is fixed.
-if [[ ! -f "${BASE}" ]] || [[ ! -f /config/dnsmasq/dnsmasq.conf ]] || ! dnsmasq --test -C "${BASE}"; then
-    set_state invalid
-    echo "**** No valid dnsmasq config, dnsmasq will not be started. See the errors above (or the init log), fix /config/templates/dnsmasq.conf or DNS_UPSTREAM and restart. ****"
-    exec sleep infinity
-fi
-
-set_state running
-exec dnsmasq -k -C "${BASE}"

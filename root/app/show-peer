@@ -4,22 +4,36 @@
 # Prints each peer's QR code. It contains the peer's private and preshared
 # keys: show it only to the person the peer belongs to.
 
-if [[ ! $# -gt 0 ]]; then
-    echo "You need to specify which peers to show"
-    exit 0
+CONFIG_DIR=/config
+
+# The peer directory name for a PEERS entry: 1 -> peer1, laptop -> peer_laptop.
+peer_id_for() {
+    if [[ "$1" =~ ^[0-9]+$ ]]; then
+        printf 'peer%s' "$1"
+    else
+        printf 'peer_%s' "${1//[^[:alnum:]_-]/}"
+    fi
+}
+
+main() {
+    local i peer_id
+    if [[ ! $# -gt 0 ]]; then
+        echo "You need to specify which peers to show"
+        exit 0
+    fi
+
+    for i in "$@"; do
+        peer_id=$(peer_id_for "${i}")
+        if grep -qx "# ${peer_id}" "${CONFIG_DIR}/wg_confs/wg0.conf"; then
+            echo "PEER ${i} QR code (conf file: ${CONFIG_DIR}/${peer_id}/${peer_id}.conf):"
+            qrencode -t ansiutf8 < "${CONFIG_DIR}/${peer_id}/${peer_id}.conf"
+        else
+            echo "PEER ${i} is not active"
+        fi
+    done
+}
+
+# Sourced (unit tests): define the functions only.
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    main "$@"
 fi
-
-for i in "$@"; do
-    if [[ "${i}" =~ ^[0-9]+$ ]]; then
-        PEER_ID="peer${i}"
-    else
-        PEER_ID="peer_${i//[^[:alnum:]_-]/}"
-    fi
-
-    if grep -qx "# ${PEER_ID}" /config/wg_confs/wg0.conf; then
-        echo "PEER ${i} QR code (conf file: /config/${PEER_ID}/${PEER_ID}.conf):"
-        qrencode -t ansiutf8 < "/config/${PEER_ID}/${PEER_ID}.conf"
-    else
-        echo "PEER ${i} is not active"
-    fi
-done

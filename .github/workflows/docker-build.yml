@@ -68,10 +68,13 @@ jobs:
   # Dockerfile, root/, .dockerignore and the CI that versions the image end up
   # in (or shape) the published image — docs, skills and compose examples do
   # not, so a push that changes only those must not publish a new release.
+  # `validate` also covers tests/: a change to the unit tests alone must run
+  # the tests, but it does not publish.
   changes:
     runs-on: ubuntu-latest
     outputs:
       image: ${{ steps.filter.outputs.image }}
+      validate: ${{ steps.filter.outputs.validate }}
       mode: ${{ steps.filter.outputs.mode }}
     steps:
       - name: Checkout code
@@ -92,6 +95,7 @@ jobs:
           PUSH_BEFORE: ${{ github.event.before }}
         run: |
           IMAGE_PATHS='^(Dockerfile$|root/|\.dockerignore$|\.github/workflows/docker-build\.yml$|\.github/scripts/)'
+          TEST_PATHS='^tests/'
 
           if [[ "$EVENT" == "pull_request" ]]; then
             MODE="pr"
@@ -102,16 +106,18 @@ jobs:
           fi
           echo "mode=${MODE}" >> "$GITHUB_OUTPUT"
 
+          # decide IMAGE VALIDATE REASON
           decide() {
             echo "image=$1" >> "$GITHUB_OUTPUT"
-            echo "mode: ${MODE}, build: $2" >> "$GITHUB_STEP_SUMMARY"
+            echo "validate=$2" >> "$GITHUB_OUTPUT"
+            echo "mode: ${MODE}, build: $3" >> "$GITHUB_STEP_SUMMARY"
             exit 0
           }
 
           # Manual runs always build. Base images are pinned by digest, so a
           # base-image refresh arrives as a (Dependabot) Dockerfile change; a
           # manual run rebuilds the same pins, e.g. to retry a release.
-          [[ "$EVENT" == "workflow_dispatch" ]] && decide true "yes (manual run)"
+          [[ "$EVENT" == "workflow_dispatch" ]] && decide true true "yes (manual run)"
 
           if [[ "$MODE" == "pr" ]]; then
             BASE="$PR_BASE"
@@ -123,14 +129,14 @@ jobs:
             # tree, a diff against an older reachable tag would miss that
             # the published image no longer matches the branch.
             BASE=$(.github/scripts/release-tags.sh latest)
-            [[ -n "$BASE" ]] || decide true "yes (no previous release)"
+            [[ -n "$BASE" ]] || decide true true "yes (no previous release)"
             # A re-run of a run that already created a release tag has to
             # finish its release (e.g. the tag was pushed but the release step
             # failed), even if a later run has released since.
             # grep without -q: an early exit would SIGPIPE git, and the step
             # shell's pipefail would turn a match into a failure.
             if git tag -l --format='%(contents)' 'v*-r*' | grep -x "run-id: ${GITHUB_RUN_ID}" >/dev/null; then
-              decide true "yes (re-run of a run that already tagged a release)"
+              decide true true "yes (re-run of a run that already tagged a release)"
             fi
             echo "last release: ${BASE}"
           else
@@ -141,21 +147,24 @@ jobs:
           # New branch or force-push where the old tip is gone: no diff to
           # inspect, so fail open and build.
           if [[ "$BASE" =~ ^0+$ ]] || ! git cat-file -e "$BASE" 2>/dev/null; then
-            decide true "yes (no comparable base commit)"
+            decide true true "yes (no comparable base commit)"
           fi
 
           CHANGED=$(git diff --name-only "$BASE" "$HEAD")
           echo "changed files since ${BASE}:"; awk '{print "  " $0}' <<<"$CHANGED"
           if grep -qE "$IMAGE_PATHS" <<<"$CHANGED"; then
-            decide true "yes (image-affecting paths changed since ${BASE})"
+            decide true true "yes (image-affecting paths changed since ${BASE})"
           fi
-          decide false "skipped — no changes to Dockerfile, root/, .dockerignore or image CI since ${BASE}"
+          if grep -qE "$TEST_PATHS" <<<"$CHANGED"; then
+            decide false true "tests only (tests/ changed since ${BASE}), nothing is published"
+          fi
+          decide false false "skipped — no changes to Dockerfile, root/, .dockerignore or image CI since ${BASE}"
 
   # Resolve upstream versions and the image version once; build and release
   # both consume these outputs so the tag, image and release cannot disagree.
   version:
     needs: changes
-    if: needs.changes.outputs.image == 'true'
+    if: needs.changes.outputs.validate == 'true'
     runs-on: ubuntu-latest
     outputs:
       amneziawg_go: ${{ steps.versions.outputs.amneziawg_go }}
@@ -164,6 +173,7 @@ jobs:
       amneziawg_tools_commit: ${{ steps.versions.outputs.amneziawg_tools_commit }}
       tools_version: ${{ steps.versions.outputs.tools_version }}
       version: ${{ steps.versions.outputs.version }}
+      build_date: ${{ steps.versions.outputs.build_date }}
     steps:
       - name: Checkout code
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -228,6 +238,9 @@ jobs:
             echo "amneziawg_tools_commit=${TOOLS_COMMIT}"
             echo "tools_version=${TOOLS_VERSION}"
             echo "version=${VERSION}"
+            # One timestamp for every build of this run (smoke, nerdctl,
+            # arm64 check, push), so they all record the same date.
+            echo "build_date=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           } >> "$GITHUB_OUTPUT"
           {
             echo "## Build versions"
@@ -236,11 +249,65 @@ jobs:
             echo "- amneziawg-tools: \`${AWG_TOOLS}\` ${TOOLS_COMMIT:+(\`${TOOLS_COMMIT}\`)}"
           } >> "$GITHUB_STEP_SUMMARY"
 
+  # Static checks on every event. smoke and smoke-nerdctl need this job, so
+  # nothing is tested or published while a script, the Dockerfile or a
+  # workflow has a finding. The linters are pinned and their checksums checked.
+  lint:
+    runs-on: ubuntu-latest
+    env:
+      SHELLCHECK_VERSION: v0.11.0
+      SHELLCHECK_SHA256: 8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198
+      HADOLINT_VERSION: v2.15.1
+      HADOLINT_SHA256: c7187db94eeeeca956519a6af171adc31453941a1e777961f6e680f697c8c507
+      ACTIONLINT_VERSION: 1.7.12
+      ACTIONLINT_SHA256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Install the linters
+        run: |
+          bin="${RUNNER_TEMP}/lint-bin"
+          mkdir -p "$bin"
+          cd "$RUNNER_TEMP"
+          curl -fsSLo shellcheck.tar.xz \
+            "https://github.com/koalaman/shellcheck/releases/download/${SHELLCHECK_VERSION}/shellcheck-${SHELLCHECK_VERSION}.linux.x86_64.tar.xz"
+          echo "${SHELLCHECK_SHA256}  shellcheck.tar.xz" | sha256sum -c -
+          tar -xJf shellcheck.tar.xz
+          mv "shellcheck-${SHELLCHECK_VERSION}/shellcheck" "$bin/"
+          curl -fsSLo "$bin/hadolint" \
+            "https://github.com/hadolint/hadolint/releases/download/${HADOLINT_VERSION}/hadolint-linux-x86_64"
+          echo "${HADOLINT_SHA256}  $bin/hadolint" | sha256sum -c -
+          chmod +x "$bin/hadolint"
+          curl -fsSLo actionlint.tar.gz \
+            "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          echo "${ACTIONLINT_SHA256}  actionlint.tar.gz" | sha256sum -c -
+          tar -xzf actionlint.tar.gz -C "$bin" actionlint
+          echo "$bin" >> "$GITHUB_PATH"
+
+      # Every bash script: the s6 scripts (with-contenv bash), the CI and skill
+      # scripts, and the bats tests (tests/.shellcheckrc).
+      - name: shellcheck
+        run: |
+          mapfile -t files < <(grep -rlE '^#!.*\b(bash|bats)\b|^# shellcheck shell=bash' \
+            root .github/scripts .github/skills tests | sort)
+          printf '%s\n' "${files[@]}"
+          shellcheck "${files[@]}"
+
+      - name: hadolint
+        run: hadolint Dockerfile
+
+      # actionlint also runs shellcheck on each run: block.
+      - name: actionlint
+        run: actionlint -color
+
   # Every run: build one platform locally, smoke-test it and scan it. Nothing is
   # published unless this passes. Kept apart from `build` so it never holds a
   # package-write token.
   smoke:
-    needs: [changes, version]
+    needs: [changes, version, lint]
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
@@ -251,6 +318,7 @@ jobs:
       - name: Build test image (linux/amd64)
         env:
           IMAGE_VERSION: ${{ needs.version.outputs.version }}
+          BUILD_DATE: ${{ needs.version.outputs.build_date }}
           AWG_GO: ${{ needs.version.outputs.amneziawg_go }}
           AWG_TOOLS: ${{ needs.version.outputs.amneziawg_tools }}
           AWG_GO_COMMIT: ${{ needs.version.outputs.amneziawg_go_commit }}
@@ -258,13 +326,19 @@ jobs:
         run: |
           docker build -t test-image \
             --build-arg VERSION="$IMAGE_VERSION" \
+            --build-arg BUILD_DATE="$BUILD_DATE" \
             --build-arg AMNEZIAWG_GO_VERSION="$AWG_GO" \
             --build-arg AMNEZIAWG_GO_COMMIT="$AWG_GO_COMMIT" \
             --build-arg AMNEZIAWG_TOOLS_VERSION="$AWG_TOOLS" \
             --build-arg AMNEZIAWG_TOOLS_COMMIT="$AWG_TOOLS_COMMIT" \
             .
 
+      - name: Unit tests
+        run: .github/scripts/unit-test.sh test-image
+
       - name: Smoke tests
+        env:
+          BUILD_DATE: ${{ needs.version.outputs.build_date }}
         run: .github/scripts/smoke-test.sh test-image
 
       # Fails on critical vulnerabilities that already have a fix, so a
@@ -278,9 +352,72 @@ jobs:
           ignore-unfixed: true
           exit-code: '1'
 
+  # The same unit and smoke tests under containerd + nerdctl instead of Docker,
+  # for hosts such as Alpine that run the image with nerdctl. The runner is
+  # Ubuntu, so this tests the image under containerd, runc and CNI, not the
+  # Alpine host packages. Docker is stopped first: only nerdctl's containerd
+  # may own the containerd socket. nerdctl needs root, so the tests run with
+  # sudo.
+  smoke-nerdctl:
+    needs: [changes, version, lint]
+    runs-on: ubuntu-latest
+    env:
+      NERDCTL_VERSION: 2.4.2
+      NERDCTL_SHA256: 1f12c1a5840744fdf7029483c55a69813d44aa2ec1ef879d52d81ff6a3049ecd
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Build test image (linux/amd64)
+        env:
+          IMAGE_VERSION: ${{ needs.version.outputs.version }}
+          BUILD_DATE: ${{ needs.version.outputs.build_date }}
+          AWG_GO: ${{ needs.version.outputs.amneziawg_go }}
+          AWG_TOOLS: ${{ needs.version.outputs.amneziawg_tools }}
+          AWG_GO_COMMIT: ${{ needs.version.outputs.amneziawg_go_commit }}
+          AWG_TOOLS_COMMIT: ${{ needs.version.outputs.amneziawg_tools_commit }}
+        run: |
+          docker build -t test-image \
+            --build-arg VERSION="$IMAGE_VERSION" \
+            --build-arg BUILD_DATE="$BUILD_DATE" \
+            --build-arg AMNEZIAWG_GO_VERSION="$AWG_GO" \
+            --build-arg AMNEZIAWG_GO_COMMIT="$AWG_GO_COMMIT" \
+            --build-arg AMNEZIAWG_TOOLS_VERSION="$AWG_TOOLS" \
+            --build-arg AMNEZIAWG_TOOLS_COMMIT="$AWG_TOOLS_COMMIT" \
+            .
+          docker save -o "${RUNNER_TEMP}/test-image.tar" test-image
+
+      - name: Replace Docker with containerd + nerdctl
+        run: |
+          curl -fsSLo "${RUNNER_TEMP}/nerdctl-full.tar.gz" \
+            "https://github.com/containerd/nerdctl/releases/download/v${NERDCTL_VERSION}/nerdctl-full-${NERDCTL_VERSION}-linux-amd64.tar.gz"
+          echo "${NERDCTL_SHA256}  ${RUNNER_TEMP}/nerdctl-full.tar.gz" | sha256sum -c -
+          sudo systemctl stop docker.socket docker.service containerd.service
+          # Installs containerd, runc, the CNI plugins and a containerd unit in
+          # /usr/local, which systemd prefers to the packaged unit.
+          sudo tar -xzf "${RUNNER_TEMP}/nerdctl-full.tar.gz" -C /usr/local
+          sudo systemctl daemon-reload
+          sudo systemctl restart containerd
+          sudo nerdctl version
+          sudo nerdctl load -i "${RUNNER_TEMP}/test-image.tar"
+          sudo nerdctl image ls
+
+      - name: Unit tests (nerdctl)
+        run: sudo env ENGINE=nerdctl .github/scripts/unit-test.sh test-image
+
+      # sudo resets the environment: pass what smoke-test.sh reads.
+      - name: Smoke tests (nerdctl)
+        env:
+          BUILD_DATE: ${{ needs.version.outputs.build_date }}
+        run: |
+          sudo env ENGINE=nerdctl BUILD_DATE="$BUILD_DATE" GITHUB_ACTIONS="$GITHUB_ACTIONS" \
+            GITHUB_STEP_SUMMARY="$GITHUB_STEP_SUMMARY" .github/scripts/smoke-test.sh test-image
+
   build:
-    needs: [changes, version, smoke]
-    if: needs.changes.outputs.mode != 'pr'
+    needs: [changes, version, smoke, smoke-nerdctl]
+    if: needs.changes.outputs.image == 'true' && needs.changes.outputs.mode != 'pr'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -403,6 +540,7 @@ jobs:
           cache-from: type=gha,scope=${{ github.workflow }}
           cache-to: type=gha,mode=max,scope=${{ github.workflow }}
           build-args: |
+            BUILD_DATE=${{ needs.version.outputs.build_date }}
             VERSION=${{ env.IMAGE_VERSION }}
             AMNEZIAWG_GO_VERSION=${{ needs.version.outputs.amneziawg_go }}
             AMNEZIAWG_GO_COMMIT=${{ needs.version.outputs.amneziawg_go_commit }}
@@ -458,13 +596,12 @@ jobs:
           cache-from: type=gha,scope=${{ github.workflow }}
           cache-to: type=gha,mode=max,scope=${{ github.workflow }}
           build-args: |
-            BUILD_DATE=${{ github.event.repository.updated_at }}
+            BUILD_DATE=${{ needs.version.outputs.build_date }}
             VERSION=${{ env.IMAGE_VERSION }}
             AMNEZIAWG_GO_VERSION=${{ needs.version.outputs.amneziawg_go }}
             AMNEZIAWG_GO_COMMIT=${{ needs.version.outputs.amneziawg_go_commit }}
             AMNEZIAWG_TOOLS_VERSION=${{ needs.version.outputs.amneziawg_tools }}
             AMNEZIAWG_TOOLS_COMMIT=${{ needs.version.outputs.amneziawg_tools_commit }}
-            BUILDKIT_INLINE_CACHE=1
           # SLSA provenance and an SBOM are attached to the image index.
           provenance: mode=max
           sbom: true

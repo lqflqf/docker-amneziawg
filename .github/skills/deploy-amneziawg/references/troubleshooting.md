@@ -9,6 +9,8 @@ Start with `docker compose logs --tail=200` and `docker exec amneziawg /app/heal
 | `error gathering device information … /dev/net/tun` | TUN is missing on the host. See `references/system-setup.md` "TUN device". LXC/OpenVZ plans may not support it |
 | `port is already allocated` | Run `sudo ss -lunp 'sport = :51820'`. Stop the other process or change `SERVERPORT` |
 | `RTNETLINK answers: Operation not permitted` | Add `NET_ADMIN` to `cap_add` |
+| Exit code 1, log says `PUID=0 (root) is not supported` | Set `PUID`/`PGID` to the owner of `./config`, for example `id -u` and `id -g` |
+| The host loses its internet connection | The compose file has `network_mode: host`. Remove it and publish `51820/udp` |
 
 ## Container runs but is `unhealthy`
 
@@ -22,8 +24,8 @@ Start with `docker compose logs --tail=200` and `docker exec amneziawg /app/heal
 ## Peer connects but nothing works
 
 - **No handshake** (`awg show` has no `latest handshake`): the cloud firewall is the usual cause. Then check that the client `Endpoint` matches `SERVERURL:SERVERPORT`. Also check that the client supports the AWG version. Run `sudo tcpdump -ni any udp port 51820` on the host to see if packets arrive.
-- **Handshake but no internet**: `sysctl net.ipv4.ip_forward` on the host must be `1`. `docker exec amneziawg iptables -t nat -S POSTROUTING` must show the `MASQUERADE` rule. If it is missing, a custom template dropped the `PostUp` lines. With `network_mode: host`, the rule only matches `eth*` uplinks. See `system-setup.md` "Firewall".
-- **No DNS**: peers always use dnsmasq at `<subnet>.1`. Run `/app/healthcheck` and see the dnsmasq rows above. A healthy container does not prove that the upstream works. Run `docker exec amneziawg nslookup example.com <DNS_UPSTREAM address>`. For Unbound on the host, check its `interface` and `access-control`. Also check the host-firewall rule for the bridge. With `network_mode: host`, a host resolver bound to `0.0.0.0:53` takes the port first. Bind it to specific addresses instead. After upgrade from an Unbound release or AYastrebov's image, `PEERDNS`, `USE_DNS`, and `USE_COREDNS` are ignored. See README "DNS".
+- **Handshake but no internet**: `sysctl net.ipv4.ip_forward` on the host must be `1`. `docker exec amneziawg iptables -t nat -S POSTROUTING` must show the `MASQUERADE` rule. If it is missing, a custom template dropped the `PostUp` lines. If the compose file has `network_mode: host`, remove it. See `system-setup.md` "Firewall".
+- **No DNS**: peers always use dnsmasq at `<subnet>.1`. Run `/app/healthcheck` and see the dnsmasq rows above. A healthy container does not prove that the upstream works. Run `docker exec amneziawg nslookup example.com <DNS_UPSTREAM address>`. For Unbound on the host, check its `interface` and `access-control`. Also check the host-firewall rule for the bridge. After upgrade from an Unbound release or AYastrebov's image, `PEERDNS`, `USE_DNS`, and `USE_COREDNS` are ignored. See README "DNS".
 - **Mobile data fails, Wi-Fi works**: try `SERVERPORT=443`, with map `443:51820/udp`. Or use a port ≤ 9999. Make sure `PERSISTENTKEEPALIVE_PEERS`, default `all`, includes that peer.
 
 ## Regenerating

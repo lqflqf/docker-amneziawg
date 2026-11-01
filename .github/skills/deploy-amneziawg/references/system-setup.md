@@ -34,7 +34,7 @@ sudo sysctl --system
 
 ## Firewall
 
-Open UDP `SERVERPORT`, which defaults to 51820. With the default bridge network, no NAT rule is necessary on the host. The server conf `PostUp` masquerades out of the container `eth+` interface. Docker bridge NAT then handles the rest. With `network_mode: host`, that rule applies to host interfaces. It works only if the uplink is named `eth*`. On `ens*` or `enp*` hosts, add a `PostUp` masquerade for the real uplink in `/config/templates/server.conf`. Alternatively, add a host rule for the VPN subnet.
+Open UDP `SERVERPORT`, which defaults to 51820. With the default bridge network, no NAT rule is necessary on the host. The server conf `PostUp` masquerades out of the container `eth+` interface. Docker bridge NAT then handles the rest. Do not use `network_mode: host`. In the host namespace, a failed tunnel makes the container remove the host default routes, and `PostUp` adds rules to the host firewall. See README "Quick start".
 
 ```bash
 sudo ufw allow 51820/udp            # ufw: allow SSH first before any `ufw enable`, or you lock yourself out
@@ -43,7 +43,7 @@ sudo nft add rule inet filter input udp dport 51820 accept                      
 sudo iptables -A INPUT -p udp --dport 51820 -j ACCEPT                              # iptables (persist with iptables-persistent)
 ```
 
-Docker publishes ports through its own chains. Thus, a closed host firewall can still pass traffic. Open it anyway for clarity and for `network_mode: host`.
+Docker publishes ports through its own chains. Thus, a closed host firewall can still pass traffic. Open it anyway for clarity.
 
 **Cloud firewalls are separate and usually the real blocker.** Always remind the user to allow inbound UDP on the port. Do this in AWS Security Groups, GCP VPC firewall, Hetzner Cloud Firewalls, DigitalOcean Cloud Firewalls, or the provider equivalent.
 

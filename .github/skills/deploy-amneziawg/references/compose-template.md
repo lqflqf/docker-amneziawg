@@ -15,7 +15,7 @@ services:
       - PUID=<<uid owning ./config, e.g. 1000>>
       - PGID=<<gid, e.g. 1000>>
       - TZ=<<IANA zone, e.g. Etc/UTC>>
-      - SERVERURL=<<vpn.example.com; omit the line to detect the public IPv4>>
+      - SERVERURL=<<vpn.example.com, recommended. Omit the line only to detect the public IPv4>>
       - SERVERPORT=<<port, default 51820>>
       - PEERS=<<count or names, e.g. laptop,phone>>
       # Optional — omit to keep the defaults:

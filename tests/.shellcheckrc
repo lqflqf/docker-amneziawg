@@ -1,0 +1,5 @@
+# The tests set globals that the sourced functions read (SC2034, SC2153),
+# change them inside the @test subshells (SC2030, SC2031), write stub bodies
+# and data in single quotes on purpose (SC2016), and override functions such
+# as fatal that only the sourced code calls (SC2329).
+disable=SC2016,SC2030,SC2031,SC2034,SC2153,SC2329

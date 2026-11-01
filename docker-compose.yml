@@ -30,8 +30,8 @@ services:
 
       # ---- Server Mode Configuration ----
       # Uncomment and configure for server mode
-      # - SERVERURL=vpn.example.com         # External URL/IP (unset: detect the public IPv4)
-      # - SERVERPORT=51820                  # Port advertised to peers; map it as SERVERPORT:51820/udp (the container always listens on 51820)
+      # - SERVERURL=vpn.example.com         # External URL/IP, recommended (unset: detect the public IPv4, and a changed IP re-issues every peer conf)
+      # - SERVERPORT=51820                  # Port advertised to peers (1-65535, no leading zero). Map it as SERVERPORT:51820/udp (the container always listens on 51820)
       # - PEERS=3                           # Number or names: 3 or laptop,phone,tablet
       # - INTERNAL_SUBNET=10.13.13.0        # VPN subnet
       # - ALLOWEDIPS=0.0.0.0/0, ::/0        # Allowed IPs for peers
@@ -111,6 +111,8 @@ services:
 #       - INTERNAL_SUBNET=10.13.13.0
 #       - ALLOWEDIPS=0.0.0.0/0, ::/0
 #       - PERSISTENTKEEPALIVE_PEERS=all
+#     devices:
+#       - /dev/net/tun:/dev/net/tun
 #     volumes:
 #       - ./config:/config
 #     ports:

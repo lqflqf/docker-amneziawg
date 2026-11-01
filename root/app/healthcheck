@@ -5,50 +5,70 @@
 # svc-amneziawg writes /run/activeconfs only after all tunnels came up, so a
 # missing file covers both "no valid config" and "a tunnel failed".
 
-if [[ ! -f /run/activeconfs ]]; then
-    echo "no active tunnels"
-    exit 1
-fi
+ACTIVECONFS=/run/activeconfs
+DNSMASQ_STATE=/run/dnsmasq-state
+DNSMASQ_ADDRESS=/run/dnsmasq/address
 
-. /run/activeconfs
-read -ra ACTIVE <<< "$(awg show interfaces 2>/dev/null | tr '\n' ' ')"
-
-for conf in "${AWG_CONFS[@]}"; do
-    iface=$(basename "${conf}" .conf)
-    if [[ " ${ACTIVE[*]} " != *" ${iface} "* ]]; then
-        echo "tunnel ${iface} is down"
-        exit 1
+# Sets ACTIVE to the interfaces that are up. Fails if a tunnel in ACTIVECONFS
+# is not one of them.
+check_tunnels() {
+    local conf iface AWG_CONFS=()
+    if [[ ! -f "${ACTIVECONFS}" ]]; then
+        echo "no active tunnels"
+        return 1
     fi
-done
+    # shellcheck source=/dev/null # written by svc-amneziawg with declare -p
+    . "${ACTIVECONFS}"
+    read -ra ACTIVE <<< "$(awg show interfaces 2>/dev/null | tr '\n' ' ')"
+    for conf in "${AWG_CONFS[@]}"; do
+        iface=$(basename "${conf}" .conf)
+        if [[ " ${ACTIVE[*]} " != *" ${iface} "* ]]; then
+            echo "tunnel ${iface} is down"
+            return 1
+        fi
+    done
+}
 
 # Server mode (PEERS set) needs dnsmasq answering; anything but "running"
 # (invalid, missing, or svc-dnsmasq never ran) is unhealthy. Client mode runs
 # no DNS, so the state is not checked there.
-if [[ -n "${PEERS:-}" ]]; then
-    state=$(cat /run/dnsmasq-state 2>/dev/null)
+check_dns() {
+    local state listen
+    [[ -n "${PEERS:-}" ]] || return 0
+    state=$(cat "${DNSMASQ_STATE}" 2>/dev/null)
     case "${state}" in
         running)
             ;;
         invalid)
             echo "dnsmasq has no valid config, see the container log"
-            exit 1
+            return 1
             ;;
         *)
             echo "dnsmasq is not running (state: ${state:-none})"
-            exit 1
+            return 1
             ;;
     esac
     # Query the tunnel address peers use, not loopback: dnsmasq can be alive
     # without having bound wg0's address.
-    listen=$(cat /run/dnsmasq/address 2>/dev/null)
-    if ! ip -4 -o addr show dev wg0 2>/dev/null | grep -q " ${listen}/"; then
+    listen=$(cat "${DNSMASQ_ADDRESS}" 2>/dev/null)
+    if ! grep -q " ${listen}/" <<<"$(ip -4 -o addr show dev wg0 2>/dev/null)"; then
         echo "the tunnel address ${listen:-(unknown)} is not on wg0"
-        exit 1
+        return 1
     fi
     if ! nslookup -type=a health.amneziawg. "${listen}" >/dev/null 2>&1; then
         echo "dnsmasq does not answer on ${listen}"
-        exit 1
+        return 1
     fi
-fi
+}
 
-echo "tunnels up: ${ACTIVE[*]}"
+main() {
+    ACTIVE=()
+    check_tunnels || exit 1
+    check_dns || exit 1
+    echo "tunnels up: ${ACTIVE[*]}"
+}
+
+# Sourced (unit tests): define the functions only.
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    main "$@"
+fi

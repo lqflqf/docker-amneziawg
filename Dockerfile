@@ -16,7 +16,7 @@ ARG AMNEZIAWG_TOOLS_COMMIT=ee0f0a9aa34ff0a0da4b3433b9512781cfe02843
 # Stage 1: Compile amneziawg-go
 # ============================================================================
 # Base images are pinned by digest (Dependabot keeps them current).
-FROM golang:1.27.1-alpine@sha256:8a5910f31396cd4d89662f56c68b3ae31d374308270a1c3bd96672ee5ed43414 AS go-builder
+FROM golang:1.27.3-alpine@sha256:d200d2dd76b03a99b52651fd1325aff7dcd35422c35c01bac56571b0507f3deb AS go-builder
 
 ARG AMNEZIAWG_GO_VERSION
 ARG AMNEZIAWG_GO_COMMIT
@@ -33,7 +33,7 @@ RUN CGO_ENABLED=1 go build -ldflags '-linkmode external -extldflags "-fno-PIC -s
 # ============================================================================
 # Stage 2: Compile awg-tools from source
 # ============================================================================
-FROM alpine:3.24.2@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6 AS tools-builder
+FROM alpine:3.24.3@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a AS tools-builder
 
 ARG AMNEZIAWG_TOOLS_VERSION
 ARG AMNEZIAWG_TOOLS_COMMIT
@@ -56,16 +56,12 @@ RUN make && \
 # ============================================================================
 # Stage 3: Runtime image: Alpine + Alpine's s6-overlay package
 # ============================================================================
-FROM alpine:3.24.2@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6
+FROM alpine:3.24.3@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a
 
-# set version label
-ARG BUILD_DATE
-ARG VERSION
 ARG AMNEZIAWG_GO_VERSION
 ARG AMNEZIAWG_GO_COMMIT
 ARG AMNEZIAWG_TOOLS_VERSION
 ARG AMNEZIAWG_TOOLS_COMMIT
-LABEL build_version="AmneziaWG version:- ${VERSION} Build-date:- ${BUILD_DATE}"
 # CI's metadata-action also sets source/title/url/revision; these cover local
 # builds.
 LABEL org.opencontainers.image.title="docker-amneziawg"
@@ -102,10 +98,9 @@ RUN \
   echo "**** install dependencies ****" && \
   apk add --no-cache \
     bash=5.3.9-r1 \
-    bc=1.08.2-r1 \
-    ca-certificates-bundle=20260909-r0 \
+    ca-certificates-bundle=20261020-r0 \
     coreutils=9.11-r0 \
-    curl=8.22.0-r0 \
+    curl=8.23.0-r0 \
     dnsmasq=2.92_p2-r0 \
     grep=3.12-r0 \
     iproute2=7.0.0-r0 \
@@ -115,11 +110,10 @@ RUN \
     kmod=34.2-r1 \
     libcap-utils=2.78-r0 \
     libqrencode-tools=4.1.1-r3 \
-    net-tools=2.10-r3 \
     nftables=1.1.6-r1 \
     openresolv=3.17.4-r0 \
     shadow=4.18.0-r1 \
-    tzdata=2026d-r0 && \
+    tzdata=2026e-r0 && \
   echo "**** create abc user (PUID/PGID are applied at start) ****" && \
   groupadd -g 911 abc && \
   useradd -u 911 -g abc -G users -d /config -s /bin/false -M abc && \
@@ -138,11 +132,21 @@ RUN chmod +x /usr/bin/awg /usr/bin/awg-quick /usr/bin/amneziawg-go
 # Apply awg-quick sysctl patch to avoid errors when sysctl is already set.
 # sed succeeds on zero matches, so check the patch took: an upstream change to
 # that line must fail the build rather than silently drop the fix.
+# The $ signs are literal shell code for awg-quick, so single quotes are right.
+# hadolint ignore=SC2016
 RUN sed -i 's|\[\[ $proto == -4 \]\] && cmd sysctl -q net\.ipv4\.conf\.all\.src_valid_mark=1|[[ $proto == -4 ]] \&\& [[ $(sysctl -n net.ipv4.conf.all.src_valid_mark) != 1 ]] \&\& cmd sysctl -q net.ipv4.conf.all.src_valid_mark=1|' /usr/bin/awg-quick && \
   grep -qF '[[ $(sysctl -n net.ipv4.conf.all.src_valid_mark) != 1 ]]' /usr/bin/awg-quick || \
   { echo "awg-quick src_valid_mark patch did not apply" >&2; exit 1; }
 
-# write build version info
+# BUILD_DATE and VERSION change on every build. Declare them only here: each
+# RUN after an ARG depends on it, so an earlier ARG would make the package
+# layers above miss the cache.
+ARG BUILD_DATE
+ARG VERSION
+LABEL build_version="AmneziaWG version:- ${VERSION} Build-date:- ${BUILD_DATE}"
+
+# write build version info (ash with pipefail for the pipe, hadolint DL4006)
+SHELL ["/bin/ash", "-eo", "pipefail", "-c"]
 RUN \
   printf "AmneziaWG version: ${VERSION}\nBuild-date: ${BUILD_DATE}\namneziawg-tools: ${AMNEZIAWG_TOOLS_VERSION} (${AMNEZIAWG_TOOLS_COMMIT:-unpinned})\namneziawg-go: ${AMNEZIAWG_GO_VERSION} (${AMNEZIAWG_GO_COMMIT:-unpinned})\ns6: %s\n" \
     "$(apk info -v 2>/dev/null | grep -E '^(s6-overlay|s6|s6-rc|s6-linux-init)-[0-9]' | sort | tr '\n' ' ' | sed 's/ $//')" > /build_version
