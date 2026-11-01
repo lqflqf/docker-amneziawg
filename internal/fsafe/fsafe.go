@@ -35,9 +35,9 @@ func owner(fi fs.FileInfo) (int, int) {
 }
 
 // CheckPath refuses a path that is a symlink, or that is not of the expected
-// kind, or that is owned by someone other than root or the volume owner. A
-// missing path is fine.
-func CheckPath(path string, wantDir bool, o Owner) error {
+// kind, or (unless anyOwner) that is owned by someone other than root or the
+// volume owner. A missing path is fine.
+func CheckPath(path string, wantDir, anyOwner bool, o Owner) error {
 	fi, err := os.Lstat(path)
 	if os.IsNotExist(err) {
 		return nil
@@ -55,19 +55,21 @@ func CheckPath(path string, wantDir bool, o Owner) error {
 		return fmt.Errorf("%s is not a regular file", path)
 	}
 	uid, _ := owner(fi)
-	if uid != 0 && uid != o.UID {
+	if !anyOwner && uid != 0 && uid != o.UID {
 		return fmt.Errorf("%s is owned by uid %d, expected root or %d (PUID)", path, uid, o.UID)
 	}
 	return nil
 }
 
-// CheckConfig checks /config itself, the DB, its journal and backups/.
-func CheckConfig(configDir, db, backups string, o Owner) error {
+// CheckConfig checks /config itself, the DB, its journal and backups/. With
+// anyOwner (awgctl init, which then gives /config to PUID:PGID), a volume of
+// an earlier PUID is accepted; symlinks and wrong file kinds never are.
+func CheckConfig(configDir, db, backups string, anyOwner bool, o Owner) error {
 	for _, c := range []struct {
 		path string
 		dir  bool
 	}{{configDir, true}, {db, false}, {db + "-journal", false}, {backups, true}} {
-		if err := CheckPath(c.path, c.dir, o); err != nil {
+		if err := CheckPath(c.path, c.dir, anyOwner, o); err != nil {
 			return err
 		}
 	}

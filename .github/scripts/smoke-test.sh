@@ -266,6 +266,11 @@ if [[ "$tunnel_was_up" == true ]]; then
     logs_have '**** Tunnel wg0 is down ****' || fail "the finish script did not take wg0 down"
 fi
 ok "env is read only on the first start, state kept, ownership kept, clean stop"
+# A PUID/PGID change re-owns the volume instead of stopping the container.
+start -e PUID=1500 -e PGID=1500
+unowned=$(dx find /config ! -type l \( ! -user 1500 -o ! -group 1500 \))
+[[ -z "$unowned" ]] || fail "not owned by the new PUID:PGID: $unowned"
+ok "a new PUID/PGID takes over the volume"
 passed "Restart and drift"
 
 # ----------------------------------------------------------------------------

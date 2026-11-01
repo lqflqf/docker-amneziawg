@@ -139,8 +139,8 @@ func TestPeerLifecycleLive(t *testing.T) {
 	if len(h.fake.Peers) != 2 || !h.fake.Called("awg syncconf wg0") {
 		t.Fatalf("wg0 peers %v", h.fake.Peers)
 	}
-	h.run(ExitError, "peer", "add", "phone")      // duplicate name
-	h.run(ExitUsage, "peer", "add", "bad name!")  // invalid name
+	h.run(ExitError, "peer", "add", "phone")     // duplicate name
+	h.run(ExitUsage, "peer", "add", "bad name!") // invalid name
 	h.run(ExitOK, "peer", "disable", "phone")
 	if len(h.fake.Peers) != 1 {
 		t.Fatalf("disabled peer still in wg0: %v", h.fake.Peers)

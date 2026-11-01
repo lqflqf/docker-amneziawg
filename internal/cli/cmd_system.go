@@ -67,7 +67,9 @@ func (a *App) cmdInit(ctx context.Context, args []string) error {
 	if err != nil {
 		return fmt.Errorf("volume owner: %w", err)
 	}
-	if err := fsafe.CheckConfig(a.P.Config, a.P.DB(), a.P.Backups(), o); err != nil {
+	// A PUID/PGID change leaves the volume owned by the old IDs; ChownTree
+	// below gives it to the new ones.
+	if err := fsafe.CheckConfig(a.P.Config, a.P.DB(), a.P.Backups(), true, o); err != nil {
 		return err
 	}
 	if _, err := os.Lstat(a.P.DB()); os.IsNotExist(err) {

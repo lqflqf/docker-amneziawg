@@ -213,7 +213,7 @@ func (a *App) openDB() (*store.DB, error) {
 	if err != nil {
 		return nil, fmt.Errorf("volume owner: %w", err)
 	}
-	if err := fsafe.CheckConfig(a.P.Config, a.P.DB(), a.P.Backups(), o); err != nil {
+	if err := fsafe.CheckConfig(a.P.Config, a.P.DB(), a.P.Backups(), false, o); err != nil {
 		return nil, err
 	}
 	if _, err := os.Lstat(a.P.DB()); err != nil {

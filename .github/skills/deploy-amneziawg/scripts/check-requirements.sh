@@ -165,8 +165,8 @@ if [ -n "${mem_mb:-}" ]; then
 fi
 
 # --- Sysctls ---
-# Only ip_forward genuinely matters on the host. src_valid_mark and disable_ipv6
-# are set inside the container's netns via compose 'sysctls:' — host values don't
+# Only ip_forward genuinely matters on the host. disable_ipv6
+# is set inside the container's netns via compose 'sysctls:' — host values don't
 # need to be touched. Look in PATH first, then fall back to absolute path
 # (some minimal distros omit /sbin from non-root PATH).
 sysctl_bin=$(command -v sysctl 2>/dev/null || { [ -x /usr/sbin/sysctl ] && echo /usr/sbin/sysctl; } || { [ -x /sbin/sysctl ] && echo /sbin/sysctl; })

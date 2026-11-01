@@ -82,9 +82,13 @@ func Server(desired *config.State, active config.Active) (*conf.File, error) {
 		s.Add("PublicKey", p.PublicKey)
 		s.Add("PresharedKey", p.PresharedKey)
 		s.Add("AllowedIPs", config.PeerAddress(subnet, p.Octet)+"/32")
-		if p.Keepalive && keepalive != "0" {
-			s.Add("PersistentKeepalive", keepalive)
+		// Always written: awg syncconf keeps the running value of a key that
+		// the file leaves out, so "off" must be an explicit 0.
+		ka := "0"
+		if p.Keepalive {
+			ka = keepalive
 		}
+		s.Add("PersistentKeepalive", ka)
 		f.Sections = append(f.Sections, s)
 	}
 	return f, f.Check()

@@ -136,6 +136,19 @@ func TestLivePeerChanges(t *testing.T) {
 	if n := len(wgPeers(t)); n != 2 {
 		t.Fatalf("wg0 has %d peers, want 2", n)
 	}
+	// syncconf keeps a value that the file leaves out: "off" must reach wg0.
+	b.run(cli.ExitOK, "peer", "set", "laptop", "--keepalive", "off")
+	ka := sh(t, "awg", "show", "wg0", "persistent-keepalive")
+	var vals []string
+	for _, l := range strings.Split(strings.TrimSpace(ka), "\n") {
+		if f := strings.Fields(l); len(f) == 2 {
+			vals = append(vals, f[1])
+		}
+	}
+	if strings.Join(vals, " ") != "25 0" && strings.Join(vals, " ") != "0 25" &&
+		strings.Join(vals, " ") != "25 off" && strings.Join(vals, " ") != "off 25" {
+		t.Fatalf("persistent-keepalive after off:\n%s", ka)
+	}
 	b.run(cli.ExitOK, "peer", "disable", "phone")
 	b.run(cli.ExitOK, "peer", "rotate", "laptop", "--yes")
 	st := state(t, b)
