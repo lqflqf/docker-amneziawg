@@ -14,7 +14,6 @@ services:
     environment:
       - PUID=<<uid owning ./config, e.g. 1000>>
       - PGID=<<gid, e.g. 1000>>
-      - TZ=<<IANA zone, e.g. Etc/UTC>>
       - SERVERURL=<<vpn.example.com, recommended. Omit the line only to detect the public IPv4 once>>
       - SERVERPORT=<<port, default 51820>>
       # Optional, first start only. Omit to keep the defaults:
@@ -43,4 +42,4 @@ services:
 - **`PUID`/`PGID`**: use `id -u` and `id -g` of the user that owns the deploy directory. `0` (root) stops the container.
 - **Peers**: do not put peers in the environment. The container ignores `PEERS`. Add each peer with `awgctl peer add <name>` after the start.
 - **`restart`**: keep `unless-stopped`. A fatal error at start stops the container with exit code 1, and the policy starts it again.
-- **Changes after the first start**: edit the compose file only for `PUID`, `PGID`, `TZ`, ports and sysctls. Change other values with `awgctl` (README "Settings").
+- **Changes after the first start**: edit the compose file only for `PUID`, `PGID`, ports and sysctls. Change other values with `awgctl` (README "Settings").

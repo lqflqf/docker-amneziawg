@@ -126,8 +126,7 @@ RUN \
     kmod=34.2-r1 \
     libcap-utils=2.78-r0 \
     nftables=1.1.6-r1 \
-    shadow=4.18.0-r1 \
-    tzdata=2026e-r0 && \
+    shadow=4.18.0-r1 && \
   echo "**** create abc user, the owner of /config (PUID/PGID are applied at start) ****" && \
   groupadd -g 911 abc && \
   useradd -u 911 -g abc -G users -d /config -s /bin/false -M abc && \

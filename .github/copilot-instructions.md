@@ -156,7 +156,7 @@ A change is one transaction: lock, load, change in memory, `apply.Check` (rules,
 
 ## Invariants
 
-- **The database is the only source of truth.** `awgctl init` reads the seed env vars only when there is no database. Later, a different value only gives a `WARNING` with the `awgctl` command. `PUID`, `PGID` and `TZ` apply at each start.
+- **The database is the only source of truth.** `awgctl init` reads the seed env vars only when there is no database. Later, a different value only gives a `WARNING` with the `awgctl` command. `PUID` and `PGID` apply at each start.
 - **The runtime never reads the database.** `awg-quick`, dnsmasq and `awgctl health` read only `/run`.
 - **One lock.** Each `awgctl` command that changes state, and each `awg-quick up`/`down` in s6, holds `/run/awgctl.lock`.
 - **`journal_mode = DELETE`.** Do not change to WAL: a copy of the main file then misses committed pages. One file must be a full backup.

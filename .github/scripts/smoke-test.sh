@@ -130,7 +130,6 @@ in_image "Runtime base" \
     '! grep -q "src_valid_mark) != 1" /usr/bin/awg-quick' \
     'command -v bash usermod groupmod flock dnsmasq >/dev/null' \
     'id dnsmasq >/dev/null' \
-    'test -f /usr/share/zoneinfo/Asia/Shanghai' \
     'test "$(id -u abc):$(id -g abc)" = 911:911' \
     'command -v nft >/dev/null'
 
@@ -185,7 +184,7 @@ healthy() {
 }
 
 section "First start"
-start -e SERVERURL=ci.example.com -e INTERNAL_SUBNET=10.57.57.0 -e PUID=1234 -e PGID=2345 -e TZ=Asia/Shanghai
+start -e SERVERURL=ci.example.com -e INTERNAL_SUBNET=10.57.57.0 -e PUID=1234 -e PGID=2345
 logs_have 'Created /config/amneziawg.db (AWG 3.1)' || fail "the DB was not created with AWG 3.1"
 logs_have 'No peers yet' || fail "a new server must start with no peers"
 [[ "$(dx stat -c '%a %u:%g' /config/amneziawg.db)" == "600 1234:2345" ]] || fail "DB mode/owner is not 600 PUID:PGID"
@@ -193,7 +192,6 @@ logs_have 'No peers yet' || fail "a new server must start with no peers"
 [[ -z "$(dx sh -c 'ls /config/*-wal 2>/dev/null')" ]] || fail "a -wal file exists"
 [[ "$(dx stat -c %a /run/amneziawg/wg0.conf)" == 600 ]] || fail "wg0.conf is not mode 600"
 dx grep -qx 'Address = 10.57.57.1/24' /run/amneziawg/wg0.conf || fail "wg0.conf has the wrong address"
-[[ "$(dx date +%Z)" == CST ]] || fail "TZ=Asia/Shanghai is not applied"
 logs_have '▸ uid:gid  1234:2345' || fail "the banner does not show PUID/PGID"
 box_widths=$(engine logs "$container" 2>&1 | sed -n '/^╭/,/^╰/p' |
     python3 -c 'import sys; print(sorted({len(l) for l in sys.stdin.buffer.read().decode().splitlines()}))')
@@ -201,7 +199,7 @@ box_widths=$(engine logs "$container" 2>&1 | sed -n '/^╭/,/^╰/p' |
 order=$(engine logs "$container" 2>&1 | grep -nE '▸ repo |Config initialization finished|Activating tunnel wg0' | cut -d: -f1 | tr '\n' ' ')
 read -r l_banner l_init l_tunnel <<<"$order"
 (( l_banner < l_init && l_init < l_tunnel )) || fail "start order is not banner, config, tunnel (lines: $order)"
-ok "DB 600 PUID:PGID, nothing else in /config, wg0.conf in /run, TZ, banner, start order"
+ok "DB 600 PUID:PGID, nothing else in /config, wg0.conf in /run, banner, start order"
 wait_tunnel
 if grep -qw wg0 <<<"$(dx awg show interfaces)"; then
     healthy || fail "unhealthy although wg0 is up"

@@ -25,7 +25,6 @@ services:
     environment:
       - PUID=1000
       - PGID=1000
-      - TZ=Etc/UTC
       - SERVERURL=vpn.example.com   # recommended. Leave it out to detect the public IPv4 once
     volumes:
       - ./config:/config
@@ -67,12 +66,11 @@ On the first start, `/config` has no database. `awgctl init` reads the environme
 
 If `SERVERURL` is not set, the container asks 3 HTTPS services for the public IPv4. It tries 3 times, after 0 s, 5 s and 15 s. If all attempts fail, the container stops and writes nothing. Set `SERVERURL` and start again.
 
-After the first start, the database is the only source of the configuration. If a variable above has a different value, the container ignores it. It writes a `WARNING` with the `awgctl` command that makes the change. `PUID`, `PGID` and `TZ` apply at each start:
+After the first start, the database is the only source of the configuration. If a variable above has a different value, the container ignores it. It writes a `WARNING` with the `awgctl` command that makes the change. `PUID` and `PGID` apply at each start:
 
 | Variable | Default | Function |
 |---|---|---|
 | `PUID` / `PGID` | `911` | Owner of `/config` and of the database. Use a number from 1 to 4294967294. A value that is not valid, or `0` (root), stops the container with exit code 1 |
-| `TZ` | `UTC` | Time zone of the log |
 
 The container ignores `PEERS`, `PERSISTENTKEEPALIVE_PEERS`, `LOG_CONFS`, `PEERDNS`, `USE_DNS` and `HEALTHCHECK_DNS_NAME`, with a `WARNING`.
 

@@ -1,6 +1,6 @@
 # Docker Compose for the AmneziaWG server
 #
-# 1. Set PUID/PGID/TZ and, before the first start, SERVERURL.
+# 1. Set PUID/PGID and, before the first start, SERVERURL.
 # 2. docker compose up -d
 # 3. Add a peer and show its QR code:
 #      docker exec -it amneziawg awgctl peer add phone --qr
@@ -30,7 +30,6 @@ services:
       # ---- Each start ----
       - PUID=1000                           # Owner of ./config and the database (numeric, not 0)
       - PGID=1000
-      - TZ=Etc/UTC                          # Time zone of the log
 
       # ---- First start only (then: awgctl set <key> <value>) ----
       - SERVERURL=vpn.example.com           # server.endpoint_host. Change it before the first start: a DNS name or a fixed IP. Unset: detect the public IPv4 once

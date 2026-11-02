@@ -35,7 +35,6 @@ Ask in one batch. Use the `ask_user` tool with several fields. The container rea
 | `SERVERURL` | detected | Always set it, preferably to a DNS name. If it is not set, the container detects the public IPv4 once. If detection fails, the container stops |
 | `SERVERPORT` | `51820` | For a non-default port, map `SERVERPORT:51820/udp`. If carriers block high UDP ports, use 443/udp or a port ≤ 9999 |
 | Peer names | — | One name for each device, for example `laptop`, `phone`. 1-32 of `A-Z a-z 0-9 . _ -`, starting with a letter or digit. The peers come in Phase 6, not from the environment |
-| `TZ` | `Etc/UTC` | This controls log timestamps only |
 
 Ask these optional settings only if the user wants them. Use `INTERNAL_SUBNET` (a `/24`) for a LAN conflict. Use `DNS_UPSTREAM` for the peer dnsmasq forwarder (default `1.1.1.1,1.0.0.1`). Use `ALLOWEDIPS` for a split tunnel. Use `MTU` (default 1280) only for a known constrained path. For meanings and defaults, see README "First start" and "Settings".
 
