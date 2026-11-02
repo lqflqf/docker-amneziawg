@@ -1,6 +1,9 @@
 package netcheck
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestValidators(t *testing.T) {
 	for _, c := range []struct {
@@ -53,6 +56,37 @@ func TestLists(t *testing.T) {
 	for _, bad := range []string{"dns.example", "1.1.1.1#0", ""} {
 		if _, err := DNSUpstream(bad); err == nil {
 			t.Errorf("%q accepted", bad)
+		}
+	}
+}
+
+func TestEndpointHostForms(t *testing.T) {
+	if !ValidEndpointHost("203.0.113.7") {
+		t.Error("an IPv4 address was refused")
+	}
+	for in, want := range map[string]string{
+		" 2001:db8::1 ":   "[2001:db8::1]",
+		"[2001:db8::1]":   "[2001:db8::1]",
+		"vpn.example.com": "vpn.example.com",
+		"203.0.113.7\n":   "203.0.113.7",
+	} {
+		if got := NormalizeEndpointHost(in); got != want {
+			t.Errorf("%q: got %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestCIDRListErrors(t *testing.T) {
+	if got, err := CIDRList(" 10.0.0.0/8, ,192.168.0.0/16,"); err != nil || got != "10.0.0.0/8, 192.168.0.0/16" {
+		t.Errorf("empty parts: %q %v", got, err)
+	}
+	for in, want := range map[string]string{
+		"10.0.0.0/8, nope": `"nope" is not an IP prefix`,
+		"10.0.0.1/24":      "has host bits set; use 10.0.0.0/24",
+		" , ":              "the list is empty",
+	} {
+		if _, err := CIDRList(in); err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("%q: got %v, want %q", in, err, want)
 		}
 	}
 }

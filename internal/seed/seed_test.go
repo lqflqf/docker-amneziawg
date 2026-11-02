@@ -136,3 +136,98 @@ func TestRetrying(t *testing.T) {
 }
 
 var _ = config.Registry
+
+func TestBuildAWGPinErrors(t *testing.T) {
+	for name, c := range map[string]struct {
+		env  map[string]string
+		want string
+	}{
+		"bad switch": {map[string]string{"AWG_RANDOM_TRAILERS": "maybe"}, `AWG_RANDOM_TRAILERS must be on or off, got "maybe"`},
+		"3.x key":    {map[string]string{"AWG_VERSION": "2.0", "AWG_HEADER_PROTECTION_KEY": "x"}, "exists only in AWG 3.0 and 3.1"},
+		"bad value":  {map[string]string{"AWG_JC": "500"}, "the AWG_* values are not valid: Jc (500) must be 0-128"},
+	} {
+		c.env["SERVERURL"] = "a.example"
+		_, _, err := Build(context.Background(), rnd(), env(c.env), noDetect)
+		if err == nil || !strings.Contains(err.Error(), c.want) {
+			t.Errorf("%s: got %v, want %q", name, err, c.want)
+		}
+	}
+}
+
+func TestDriftMessages(t *testing.T) {
+	st, _, err := Build(context.Background(), rnd(), env(map[string]string{"SERVERURL": "a.example"}), noDetect)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := strings.Join(Drift(st, env(map[string]string{
+		"SERVERPORT":           "abc",
+		"ALLOWEDIPS":           "10.0.0.0/8, 192.168.0.0/16",
+		"AWG_VERSION":          "2.0",
+		"AWG_JC":               st.AWG["jc"] + "0",
+		"AWG_JMIN":             st.AWG["jmin"],
+		"AWG_DISABLE_COOKIES":  "no",
+		"AWG_RANDOM_TRAILERS":  "true",
+		"HEALTHCHECK_DNS_NAME": "x",
+	})), "\n")
+	for _, want := range []string{
+		"SERVERPORT=abc differs from the saved server.endpoint_port (51820)",
+		"awgctl set peer.default_allowed_ips '10.0.0.0/8, 192.168.0.0/16'",
+		"AWG_VERSION=2.0 differs from the saved version 3.1",
+		"AWG_JC differs from the saved value",
+		"HEALTHCHECK_DNS_NAME is not supported",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q in:\n%s", want, got)
+		}
+	}
+	// Same values in another spelling are not drift.
+	for _, no := range []string{"AWG_JMIN", "AWG_DISABLE_COOKIES", "AWG_RANDOM_TRAILERS"} {
+		if strings.Contains(got, no) {
+			t.Errorf("%s reported as drift:\n%s", no, got)
+		}
+	}
+}
+
+func TestDetectIPv4Failures(t *testing.T) {
+	ok := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, "198.51.100.9\n")
+	}))
+	defer ok.Close()
+	// The default client dials tcp4, which reaches the local test server.
+	if ip, err := DetectIPv4(context.Background(), []string{ok.URL}, nil); err != nil || ip != "198.51.100.9" {
+		t.Fatalf("default client: %s %v", ip, err)
+	}
+	failing := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "198.51.100.10", http.StatusServiceUnavailable)
+	}))
+	defer failing.Close()
+	closed := httptest.NewServer(http.NotFoundHandler())
+	closed.Close()
+	ip, err := DetectIPv4(context.Background(), []string{"://bad", closed.URL, failing.URL}, http.DefaultClient)
+	if err == nil || ip != "" || !strings.Contains(err.Error(), "no service answered") {
+		t.Fatalf("got %q %v", ip, err)
+	}
+}
+
+func TestRetryingStops(t *testing.T) {
+	old := RetryDelays
+	defer func() { RetryDelays = old }()
+	down := func(context.Context) (string, error) { return "", errors.New("down") }
+
+	RetryDelays = []time.Duration{0, time.Millisecond}
+	var logs []string
+	_, err := Retrying(down, func(s string) { logs = append(logs, s) })(context.Background())
+	if err == nil || err.Error() != "down" {
+		t.Fatalf("all attempts failed: got %v, want the last error", err)
+	}
+	if len(logs) != 1 || !strings.Contains(logs[0], "(down), trying again in 1ms (attempt 2 of 2)") {
+		t.Fatalf("logs = %q", logs)
+	}
+
+	RetryDelays = []time.Duration{0, time.Hour}
+	ctx, cancel := context.WithCancel(context.Background())
+	_, err = Retrying(down, func(string) { cancel() })(ctx)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled wait: got %v", err)
+	}
+}

@@ -2,6 +2,7 @@ package keys
 
 import (
 	"encoding/base64"
+	"strings"
 	"testing"
 )
 
@@ -55,5 +56,11 @@ func TestDecodeRejects(t *testing.T) {
 	}
 	if a, b := NewSymmetric(), NewSymmetric(); a == b {
 		t.Error("symmetric keys repeat")
+	}
+}
+
+func TestPublicRejectsBadKey(t *testing.T) {
+	if _, err := Public("abc"); err == nil || !strings.Contains(err.Error(), "44 base64 characters, got 3") {
+		t.Fatalf("got %v", err)
 	}
 }

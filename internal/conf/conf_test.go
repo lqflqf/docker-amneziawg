@@ -67,3 +67,91 @@ func TestDiff(t *testing.T) {
 		t.Fatalf("diff = %v", d)
 	}
 }
+
+func TestSectionGetAll(t *testing.T) {
+	f, err := Parse("[Peer]\nAllowedIPs = 10.0.0.2/32\nallowedips = 10.0.0.3/32\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := f.Peers()[0]
+	if got := p.All("AllowedIPs"); len(got) != 2 || got[1] != "10.0.0.3/32" {
+		t.Fatalf("All = %v", got)
+	}
+	if p.Get("Endpoint") != "" || p.All("Endpoint") != nil {
+		t.Fatal("a missing key returned a value")
+	}
+	if f.Interface() != nil {
+		t.Fatal("Interface found in a conf without [Interface]")
+	}
+}
+
+func TestCheck(t *testing.T) {
+	for name, c := range map[string]struct {
+		s    Section
+		want string
+	}{
+		"good":             {Section{Name: "Interface", Comments: []string{"ok"}, Lines: []KV{{"MTU", "1280"}}}, ""},
+		"comment newline":  {Section{Name: "Peer", Comments: []string{"a\rb"}}, "[Peer]: a comment contains a newline"},
+		"empty key":        {Section{Name: "Peer", Lines: []KV{{"", "x"}}}, "[Peer] : a key or value contains a newline"},
+		"newline in a key": {Section{Name: "Peer", Lines: []KV{{"A\nB", "x"}}}, "a key or value contains a newline"},
+	} {
+		f := &File{Sections: []Section{c.s}}
+		err := f.Check()
+		if c.want == "" {
+			if err != nil {
+				t.Errorf("%s: %v", name, err)
+			}
+			continue
+		}
+		if err == nil || !strings.Contains(err.Error(), c.want) {
+			t.Errorf("%s: got %v, want %q", name, err, c.want)
+		}
+	}
+}
+
+func TestStringSeparatesSections(t *testing.T) {
+	f := &File{Sections: []Section{
+		{Name: "Interface", Lines: []KV{{"PrivateKey", "k"}}},
+		{Name: "Peer", Comments: []string{"laptop"}, Lines: []KV{{"PublicKey", "p"}}},
+	}}
+	want := "[Interface]\nPrivateKey = k\n\n[Peer]\n# laptop\nPublicKey = p\n"
+	if got := f.String(); got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
+func TestParseRejectsLineWithoutEquals(t *testing.T) {
+	_, err := Parse("[Interface]\nPrivateKey = k\njunk\n")
+	if err == nil || !strings.Contains(err.Error(), `line 3: no '=' in "junk"`) {
+		t.Fatalf("got %v", err)
+	}
+}
+
+func TestDiffSectionsAndPeers(t *testing.T) {
+	parse := func(s string) *File {
+		t.Helper()
+		f, err := Parse(s)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return f
+	}
+	for name, c := range map[string]struct {
+		a, b string
+		want string
+	}{
+		"same":             {"[Peer]\nPublicKey = a\n", "[Peer]\nPublicKey = a\n", ""},
+		"key only in b":    {"[Interface]\nMTU = 1\n", "[Interface]\nMTU = 1\nDNS = x\n", "Interface.dns"},
+		"interface in a":   {"[Interface]\nMTU = 1\n", "[Peer]\nPublicKey = a\n", "Interface Peer.PublicKey"},
+		"interface in b":   {"", "[Interface]\nMTU = 1\n", "Interface"},
+		"peer only in a":   {"[Peer]\nPublicKey = a\n[Peer]\nPublicKey = b\n", "[Peer]\nPublicKey = a\n", "Peer.PublicKey"},
+		"peer only in b":   {"[Peer]\nPublicKey = a\n", "[Peer]\nPublicKey = b\n", "Peer.PublicKey"},
+		"peer value":       {"[Peer]\nPublicKey = a\nAllowedIPs = 1\n", "[Peer]\nPublicKey = a\nAllowedIPs = 2\n", "Peer.allowedips"},
+		"nil normalize ok": {"[Interface]\nMTU = 1\nMTU = 2\n", "[Interface]\nMTU = 2\nMTU = 1\n", ""},
+	} {
+		got := strings.Join(Diff(parse(c.a), parse(c.b), nil), " ")
+		if got != c.want {
+			t.Errorf("%s: got %q, want %q", name, got, c.want)
+		}
+	}
+}
