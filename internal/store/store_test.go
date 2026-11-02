@@ -90,6 +90,21 @@ func TestCreateFailureLeavesNothing(t *testing.T) {
 	}
 }
 
+func TestCreateDirSyncFailureLeavesNothing(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "amneziawg.db")
+	orig := syncDir
+	t.Cleanup(func() { syncDir = orig })
+	syncDir = func(string) error { return errors.New("sync failed") }
+	if err := Create(path, func(*Tx) error { return nil }); err == nil || !strings.Contains(err.Error(), "sync failed") {
+		t.Fatalf("got %v, want the sync error", err)
+	}
+	entries, _ := os.ReadDir(dir)
+	if len(entries) != 0 {
+		t.Fatalf("left behind: %v", entries)
+	}
+}
+
 func TestConstraintsAndNewerSchema(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "amneziawg.db")

@@ -213,8 +213,15 @@ func Create(path string, fn func(*Tx) error) (err error) {
 	if err = os.Rename(tmp, path); err != nil {
 		return err
 	}
-	return syncFile(dir)
+	if err = syncDir(dir); err != nil {
+		os.Remove(path)
+		return err
+	}
+	return nil
 }
+
+// syncDir is a variable, so that a test can make the directory sync fail.
+var syncDir = syncFile
 
 func syncFile(path string) error {
 	f, err := os.Open(path)
