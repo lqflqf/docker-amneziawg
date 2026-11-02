@@ -83,11 +83,10 @@ func (a *App) awgChange(ctx context.Context, yes bool, f func(awg.Params) (awg.P
 		pl := plan{class: config.Restart}
 		for _, k := range changed {
 			v := n[k]
-			if awg.Secret(k) {
-				v = "(new secret)"
-			}
 			if v == "" {
 				v = "(removed)"
+			} else if awg.Secret(k) {
+				v = "(new secret)"
 			}
 			pl.summary = append(pl.summary, fmt.Sprintf("awg.%s: %s", k, v))
 			if awg.MustMatch(k) {

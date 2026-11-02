@@ -622,7 +622,8 @@ func TestAWGShowAndNoChange(t *testing.T) {
 	if out := h.run(ExitOK, "awg", "set", "s=30", "--yes"); !strings.Contains(out, "WARNING: ") {
 		t.Fatalf("set s=30 gives no warning:\n%s", out)
 	}
-	if out := h.run(ExitOK, "awg", "version", "1.5", "--yes"); !strings.Contains(out, "awg.i1: (removed)") {
+	if out := h.run(ExitOK, "awg", "version", "1.5", "--yes"); !strings.Contains(out, "awg.i1: (removed)") ||
+		!strings.Contains(out, "awg.header_protection_key: (removed)") {
 		t.Fatalf("version 1.5:\n%s", out)
 	}
 	h.run(ExitOK, "init")
