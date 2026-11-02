@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/lqflqf/docker-amneziawg/internal/keys"
+	"golang.org/x/sys/unix"
 )
 
 func peer(name string, octet int) Peer {
@@ -102,6 +103,50 @@ func TestCreateDirSyncFailureLeavesNothing(t *testing.T) {
 	entries, _ := os.ReadDir(dir)
 	if len(entries) != 0 {
 		t.Fatalf("left behind: %v", entries)
+	}
+}
+
+func TestCreateNeverReplacesAnotherDB(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "amneziawg.db")
+	orig := renameat2
+	t.Cleanup(func() { renameat2 = orig })
+	// Another creator wins the race after the existence checks.
+	renameat2 = func(od int, op string, nd int, np string, fl uint) error {
+		os.WriteFile(path, []byte("other"), 0o600)
+		return orig(od, op, nd, np, fl)
+	}
+	if err := Create(path, func(*Tx) error { return nil }); err == nil || !strings.Contains(err.Error(), "already exists") {
+		t.Fatalf("got %v, want already exists", err)
+	}
+	if b, _ := os.ReadFile(path); string(b) != "other" {
+		t.Fatalf("the other DB was replaced: %q", b)
+	}
+	if entries, _ := os.ReadDir(dir); len(entries) != 1 {
+		t.Fatalf("left behind: %v", entries)
+	}
+}
+
+func TestCreateWithoutRenameNoReplace(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "amneziawg.db")
+	orig := renameat2
+	t.Cleanup(func() { renameat2 = orig })
+	renameat2 = func(int, string, int, string, uint) error { return unix.EINVAL }
+	if err := Create(path, func(*Tx) error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	d, err := Open(path, filepath.Join(dir, "backups"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	d.Close()
+	if err := Create(path, func(*Tx) error { return nil }); err == nil || !strings.Contains(err.Error(), "already exists") {
+		t.Fatalf("got %v, want already exists", err)
+	}
+	renameat2 = func(int, string, int, string, uint) error { return unix.EACCES }
+	if err := Create(filepath.Join(dir, "x.db"), func(*Tx) error { return nil }); !errors.Is(err, unix.EACCES) {
+		t.Fatalf("got %v, want EACCES", err)
 	}
 }
 

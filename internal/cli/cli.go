@@ -320,8 +320,9 @@ func (a *App) applySaved(ctx context.Context, db *store.DB, gen int64, pl plan) 
 	if applyErr == nil {
 		applyErr = e.Live(ctx, d)
 	}
-	if err := e.Record(gen, applyErr, pending); err != nil {
-		fmt.Fprintf(a.Err, "awgctl: could not write the apply state: %v\n", err)
+	recErr := e.Record(gen, applyErr, pending)
+	if recErr != nil {
+		recErr = fmt.Errorf("could not write the apply state, so the health check does not see this change: %w. Run awgctl apply", recErr)
 	}
 	switch {
 	case applyErr == nil:
@@ -331,13 +332,17 @@ func (a *App) applySaved(ctx context.Context, db *store.DB, gen int64, pl plan) 
 	case errors.Is(applyErr, apply.ErrNotUp):
 		fmt.Fprintln(a.Out, "Saved. wg0 is not up; the change is applied when the tunnel starts.")
 	default:
-		return &exitError{ExitNotApplied, fmt.Errorf("saved, not applied: %v. Run awgctl apply or restart the container", applyErr)}
+		return &exitError{ExitNotApplied, errors.Join(
+			fmt.Errorf("saved, not applied: %v. Run awgctl apply or restart the container", applyErr), recErr)}
 	}
 	if len(pending) > 0 {
 		fmt.Fprintf(a.Out, "Pending restart: %s. Restart the container to apply.\n", strings.Join(pending, ", "))
 	}
 	if pl.reissue != "" {
 		fmt.Fprintf(a.Out, "New conf needed for %s: awgctl peer export <peer> --qr\n", pl.reissue)
+	}
+	if recErr != nil {
+		return &exitError{ExitNotApplied, recErr}
 	}
 	return nil
 }

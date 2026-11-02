@@ -18,6 +18,7 @@ import (
 	"strings"
 	"time"
 
+	"golang.org/x/sys/unix"
 	_ "modernc.org/sqlite" // registers the "sqlite" driver; pure Go, no cgo
 )
 
@@ -171,8 +172,8 @@ func (d *DB) VacuumInto(dst string) error {
 }
 
 // Create makes a new DB at path atomically: it is built in a temporary file
-// next to path, filled by fn in one transaction, synced and renamed. On any
-// failure nothing is left at path.
+// next to path, filled by fn in one transaction, synced and renamed. The
+// rename never replaces a file at path. On any failure nothing is left at path.
 func Create(path string, fn func(*Tx) error) (err error) {
 	dir := filepath.Dir(path)
 	rnd := make([]byte, 6)
@@ -207,10 +208,7 @@ func Create(path string, fn func(*Tx) error) (err error) {
 	if err = syncFile(tmp); err != nil {
 		return err
 	}
-	if _, statErr := os.Lstat(path); statErr == nil {
-		return fmt.Errorf("%s already exists", path)
-	}
-	if err = os.Rename(tmp, path); err != nil {
+	if err = renameNoReplace(tmp, path); err != nil {
 		return err
 	}
 	if err = syncDir(dir); err != nil {
@@ -218,6 +216,29 @@ func Create(path string, fn func(*Tx) error) (err error) {
 		return err
 	}
 	return nil
+}
+
+// renameat2 is a variable, so that a test can add a race or an old file system.
+var renameat2 = unix.Renameat2
+
+// renameNoReplace renames src to dst and never replaces dst. Two creators
+// (init and import-legacy in another container) do not share the /run lock.
+func renameNoReplace(src, dst string) error {
+	err := renameat2(unix.AT_FDCWD, src, unix.AT_FDCWD, dst, unix.RENAME_NOREPLACE)
+	switch {
+	case err == nil:
+		return nil
+	case errors.Is(err, unix.EEXIST):
+		return fmt.Errorf("%s already exists", dst)
+	case errors.Is(err, unix.EINVAL), errors.Is(err, unix.ENOSYS), errors.Is(err, unix.EOPNOTSUPP):
+		// The file system has no RENAME_NOREPLACE (for example NFS): check, then rename.
+		if _, statErr := os.Lstat(dst); statErr == nil {
+			return fmt.Errorf("%s already exists", dst)
+		}
+		return os.Rename(src, dst)
+	default:
+		return fmt.Errorf("rename %s: %w", src, err)
+	}
 }
 
 // syncDir is a variable, so that a test can make the directory sync fail.

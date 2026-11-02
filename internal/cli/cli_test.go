@@ -437,6 +437,11 @@ func TestLockContention(t *testing.T) {
 	if len(h.state().Peers) != 0 {
 		t.Fatal("a command changed the DB without the lock")
 	}
+	for _, p := range []string{h.app.P.ActiveJSON(), h.app.P.StateJSON(), h.app.P.WG0()} {
+		if _, err := os.Stat(p); err != nil {
+			t.Errorf("a refused init removed %s", p)
+		}
+	}
 }
 
 func TestHealthVersionAndNew(t *testing.T) {
@@ -685,7 +690,7 @@ func TestApplyStateWriteFailureIsReported(t *testing.T) {
 	h.boot()
 	os.Remove(h.app.P.StateJSON())
 	os.Mkdir(h.app.P.StateJSON(), 0o700)
-	out := h.run(ExitOK, "peer", "add", "phone")
+	out := h.run(ExitNotApplied, "peer", "add", "phone")
 	if !strings.Contains(out, "could not write the apply state") || !strings.Contains(out, "Applied.") {
 		t.Fatalf("output:\n%s", out)
 	}

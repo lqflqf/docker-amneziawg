@@ -46,6 +46,13 @@ func (a *App) cmdInit(ctx context.Context, args []string) error {
 	if _, err := parse(fs, args); err != nil {
 		return err
 	}
+	// Take the lock first: a refused init must not remove the runtime state
+	// of a running instance.
+	l, err := a.lock(ctx)
+	if err != nil {
+		return err
+	}
+	defer l.Release()
 	// Stale runtime state from before a docker restart (/run survives it).
 	for _, p := range []string{a.P.Settled(), a.P.DNSState()} {
 		os.Remove(p)
@@ -57,11 +64,6 @@ func (a *App) cmdInit(ctx context.Context, args []string) error {
 	if err := os.MkdirAll(a.P.DNSDir(), 0o755); err != nil {
 		return err
 	}
-	l, err := a.lock(ctx)
-	if err != nil {
-		return err
-	}
-	defer l.Release()
 
 	o, err := a.Owner()
 	if err != nil {
