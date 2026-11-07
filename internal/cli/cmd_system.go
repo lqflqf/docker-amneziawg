@@ -2,22 +2,20 @@ package cli
 
 import (
 	"context"
-	"errors"
 	"flag"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
-	"time"
 
-	"github.com/lqflqf/docker-amneziawg/internal/apply"
 	"github.com/lqflqf/docker-amneziawg/internal/config"
 	"github.com/lqflqf/docker-amneziawg/internal/fsafe"
 	"github.com/lqflqf/docker-amneziawg/internal/health"
-	"github.com/lqflqf/docker-amneziawg/internal/keys"
+	"github.com/lqflqf/docker-amneziawg/internal/render"
 	"github.com/lqflqf/docker-amneziawg/internal/seed"
 	"github.com/lqflqf/docker-amneziawg/internal/store"
+	"github.com/lqflqf/docker-amneziawg/internal/sys"
 )
 
 // legacyMarkers are files of the shell-based releases.
@@ -46,13 +44,6 @@ func (a *App) cmdInit(ctx context.Context, args []string) error {
 	if _, err := parse(fs, args); err != nil {
 		return err
 	}
-	// Take the lock first: a refused init must not remove the runtime state
-	// of a running instance.
-	l, err := a.lock(ctx)
-	if err != nil {
-		return err
-	}
-	defer l.Release()
 	// Stale runtime state from before a docker restart (/run survives it).
 	for _, p := range []string{a.P.Settled(), a.P.DNSState()} {
 		os.Remove(p)
@@ -71,7 +62,7 @@ func (a *App) cmdInit(ctx context.Context, args []string) error {
 	}
 	// A PUID/PGID change leaves the volume owned by the old IDs; ChownTree
 	// below gives it to the new ones.
-	if err := fsafe.CheckConfig(a.P.Config, a.P.DB(), a.P.Backups(), true, o); err != nil {
+	if err := fsafe.CheckConfig(a.P.Config, a.P.DB(), true, o); err != nil {
 		return err
 	}
 	if _, err := os.Lstat(a.P.DB()); os.IsNotExist(err) {
@@ -85,51 +76,20 @@ func (a *App) cmdInit(ctx context.Context, args []string) error {
 		}
 	}
 
-	db, err := store.Open(a.P.DB(), a.P.Backups())
+	db, err := store.Open(a.P.DB())
 	if err != nil {
-		if errors.Is(err, store.ErrNewerSchema) {
-			return fmt.Errorf("%v: use that image, or restore a backup made by this one", err)
-		}
 		return err
 	}
 	defer db.Close()
+	// One read transaction from the load to the last runtime file: a command
+	// cannot commit in between, so this start renders one consistent state.
 	var st *config.State
 	if err := db.View(ctx, func(tx *store.Tx) error {
-		st, err = config.Load(tx)
-		return err
-	}); err != nil {
-		return err
-	}
-	errs, warns := st.Validate()
-	for _, w := range warns {
-		a.warnf("%s", w)
-	}
-	if len(errs) > 0 {
-		for _, e := range errs {
-			fmt.Fprintf(a.Out, "**** ERROR: %v ****\n", e)
+		if st, err = config.Load(tx); err != nil {
+			return err
 		}
-		return fmt.Errorf("the database holds invalid values (see above)")
-	}
-	for _, d := range seed.Drift(st, a.Getenv) {
-		a.warnf("%s", d)
-	}
-	a.checkKernel(st)
-
-	e := a.env()
-	if err := e.Check(ctx, st); err != nil {
-		return fmt.Errorf("config check failed: %w", err)
-	}
-	active := config.ActiveOf(st)
-	if err := e.WriteActive(active); err != nil {
-		return err
-	}
-	if _, err := e.WriteRuntime(st, active); err != nil {
-		return err
-	}
-	if err := os.WriteFile(a.P.DNSAddress(), []byte(config.ServerAddress(active["net.subnet"])+"\n"), 0o644); err != nil {
-		return err
-	}
-	if err := e.WriteState(apply.State{Committed: st.Generation, Applied: st.Generation}); err != nil {
+		return a.render(ctx, st)
+	}); err != nil {
 		return err
 	}
 
@@ -142,10 +102,40 @@ func (a *App) cmdInit(ctx context.Context, args []string) error {
 	a.logf("AmneziaWG %s, endpoint %s:%s, subnet %s, %d peer(s)", st.AWG["version"],
 		st.Get("server.endpoint_host"), st.Get("server.endpoint_port"), st.Subnet(), len(st.Peers))
 	if len(st.Peers) == 0 {
-		a.logf("No peers yet. Add one with: docker exec -it <container> awgctl peer add <name> --qr")
+		a.logf("No peers yet. Add one with: docker exec -it <container> awgctl peer add --qr, then restart the container")
 	}
 	a.logf("Config initialization finished")
 	return nil
+}
+
+// render checks st completely and writes the runtime files: wg0.conf, the
+// dnsmasq conf and the dnsmasq address.
+func (a *App) render(ctx context.Context, st *config.State) error {
+	errs, warns := st.Validate()
+	for _, w := range warns {
+		a.warnf("%s", w)
+	}
+	if len(errs) > 0 {
+		for _, e := range errs {
+			fmt.Fprintf(a.Out, "**** ERROR: %v ****\n", e)
+		}
+		return fmt.Errorf("the database holds invalid values (see above)")
+	}
+	a.checkKernel(st)
+	if err := a.env().Check(ctx, st); err != nil {
+		return fmt.Errorf("config check failed: %w", err)
+	}
+	srv, err := render.Server(st)
+	if err != nil {
+		return err
+	}
+	if err := sys.WriteAtomic(a.P.WG0(), []byte(srv.String()), 0o600); err != nil {
+		return err
+	}
+	if err := sys.WriteAtomic(a.P.DNSConf(), []byte(render.Dnsmasq(st.Get("dns.upstream"))), 0o644); err != nil {
+		return err
+	}
+	return sys.WriteAtomic(a.P.DNSAddress(), []byte(config.ServerAddress(st.Subnet())+"\n"), 0o644)
 }
 
 func (a *App) seedDB(ctx context.Context) error {
@@ -160,22 +150,7 @@ func (a *App) seedDB(ctx context.Context) error {
 	if err := a.env().Check(ctx, st); err != nil {
 		return fmt.Errorf("the seeded config is not valid: %w", err)
 	}
-	err = store.Create(a.P.DB(), func(tx *store.Tx) error {
-		if err := st.SaveSettings(tx); err != nil {
-			return err
-		}
-		for k, v := range map[string]string{
-			"created_at":  time.Now().UTC().Format(time.RFC3339),
-			"created_by":  Version,
-			"seeded_from": "env",
-			"generation":  "1",
-		} {
-			if err := tx.SetMeta(k, v); err != nil {
-				return err
-			}
-		}
-		return nil
-	})
+	err = store.Create(a.P.DB(), st.SaveSettings)
 	if err != nil {
 		return fmt.Errorf("could not create the database: %w", err)
 	}
@@ -217,37 +192,12 @@ func (a *App) cmdHealth(ctx context.Context, args []string) error {
 	if _, err := parse(fs, args); err != nil {
 		return err
 	}
-	if err := health.Check(ctx, a.env()); err != nil {
+	if err := health.Check(ctx, a.P, a.R); err != nil {
 		fmt.Fprintln(a.Out, err)
 		return &exitError{ExitError, err}
 	}
 	fmt.Fprintln(a.Out, "healthy")
 	return nil
-}
-
-func (a *App) cmdApply(ctx context.Context, args []string) error {
-	fs := flag.NewFlagSet("apply", flag.ContinueOnError)
-	if _, err := parse(fs, args); err != nil {
-		return err
-	}
-	l, err := a.lock(ctx)
-	if err != nil {
-		return err
-	}
-	defer l.Release()
-	db, err := a.openDB()
-	if err != nil {
-		return err
-	}
-	defer db.Close()
-	var gen int64
-	if err := db.View(ctx, func(tx *store.Tx) error {
-		gen, err = tx.Generation()
-		return err
-	}); err != nil {
-		return err
-	}
-	return a.applySaved(ctx, db, gen, plan{class: config.Live})
 }
 
 func (a *App) cmdVersion(ctx context.Context, args []string) error {
@@ -263,55 +213,6 @@ func (a *App) cmdVersion(ctx context.Context, args []string) error {
 			v = "unknown"
 		}
 		fmt.Fprintf(a.Out, "%-13s %s\n", c[0], v)
-	}
-	fmt.Fprintf(a.Out, "schema        %d (this binary)\n", store.SchemaVersion)
-	return nil
-}
-
-func (a *App) cmdStatus(ctx context.Context, args []string) error {
-	fs := flag.NewFlagSet("status", flag.ContinueOnError)
-	if _, err := parse(fs, args); err != nil {
-		return err
-	}
-	st, err := a.view(ctx)
-	if err != nil {
-		return err
-	}
-	e := a.env()
-	up := "down"
-	if e.Up(ctx) {
-		up = "up"
-	}
-	datapath := "kernel module"
-	if _, ok := a.Getenv("WG_QUICK_USERSPACE_IMPLEMENTATION"); ok {
-		datapath = "userspace (amneziawg-go)"
-	} else if b, err := os.ReadFile("/run/s6/container_environment/WG_QUICK_USERSPACE_IMPLEMENTATION"); err == nil && len(b) > 0 {
-		datapath = "userspace (amneziawg-go)"
-	}
-	pub, _ := keys.Public(st.Get("server.private_key"))
-	fmt.Fprintf(a.Out, "tunnel      wg0 %s (%s)\n", up, datapath)
-	fmt.Fprintf(a.Out, "endpoint    %s:%s\n", st.Get("server.endpoint_host"), st.Get("server.endpoint_port"))
-	fmt.Fprintf(a.Out, "subnet      %s\n", st.Subnet())
-	fmt.Fprintf(a.Out, "public key  %s\n", pub)
-	fmt.Fprintf(a.Out, "awg         %s (RandomTrailers %s, DisableCookies %s)\n", st.AWG["version"], st.AWG["random_trailers"], st.AWG["disable_cookies"])
-	enabled := 0
-	for _, p := range st.Peers {
-		if p.Enabled {
-			enabled++
-		}
-	}
-	fmt.Fprintf(a.Out, "peers       %d (%d enabled)\n", len(st.Peers), enabled)
-	if active, err := e.ReadActive(); err == nil {
-		if pend := config.PendingRestart(st, active); len(pend) > 0 {
-			fmt.Fprintf(a.Out, "pending     restart for: %s\n", strings.Join(pend, ", "))
-		}
-	}
-	if s, err := e.ReadState(); err == nil && s.Pending() {
-		msg := fmt.Sprintf("generation %d saved, %d applied", s.Committed, s.Applied)
-		if s.ApplyError != "" {
-			msg += ": " + s.ApplyError
-		}
-		fmt.Fprintf(a.Out, "apply       %s (run awgctl apply)\n", msg)
 	}
 	return nil
 }

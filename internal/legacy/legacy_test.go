@@ -99,7 +99,7 @@ func TestImportKeepsEveryPeerConf(t *testing.T) {
 	if st.Subnet() != "10.20.30.0/24" || st.Get("dns.upstream") != "9.9.9.9,149.112.112.112" || st.AWG["version"] != "2.0" {
 		t.Fatalf("state %v %v", st.Settings, st.AWG["version"])
 	}
-	if st.Peers[0].Name != "peer1" || st.Peers[1].Name != "laptop" || st.Peers[1].Octet != 3 || !st.Peers[0].Keepalive {
+	if st.Peers[0].Name != "peer1" || st.Peers[1].Name != "laptop" || st.Peers[1].ID != 3 || !st.Peers[0].Keepalive {
 		t.Fatalf("peers %+v", st.Peers)
 	}
 	for _, vd := range rep.Verdicts {

@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
-	"sort"
 	"strconv"
 	"strings"
 
@@ -17,12 +16,11 @@ import (
 // MaxPeers is the number of peer addresses in a /24 (.2-.254).
 const MaxPeers = 253
 
-// State is the desired state: everything in the DB.
+// State is the configuration: everything in the DB.
 type State struct {
-	Settings   map[string]string // non-AWG settings
-	AWG        awg.Params
-	Peers      []store.Peer
-	Generation int64
+	Settings map[string]string // non-AWG settings
+	AWG      awg.Params
+	Peers    []store.Peer
 }
 
 // Get returns a setting, or its default when the row is missing.
@@ -39,7 +37,7 @@ func (s *State) Get(k string) string {
 // Subnet returns the tunnel subnet ("10.13.13.0/24").
 func (s *State) Subnet() string { return s.Get("net.subnet") }
 
-// Load reads the desired state.
+// Load reads the configuration.
 func Load(tx *store.Tx) (*State, error) {
 	all, err := tx.Settings()
 	if err != nil {
@@ -54,9 +52,6 @@ func Load(tx *store.Tx) (*State, error) {
 		}
 	}
 	if st.Peers, err = tx.Peers(); err != nil {
-		return nil, err
-	}
-	if st.Generation, err = tx.Generation(); err != nil {
 		return nil, err
 	}
 	return st, nil
@@ -80,7 +75,7 @@ func (s *State) SaveSettings(tx *store.Tx) error {
 
 // Clone returns a deep copy.
 func (s *State) Clone() *State {
-	c := &State{Settings: map[string]string{}, AWG: s.AWG.Clone(), Generation: s.Generation}
+	c := &State{Settings: map[string]string{}, AWG: s.AWG.Clone()}
 	for k, v := range s.Settings {
 		c.Settings[k] = v
 	}
@@ -88,10 +83,43 @@ func (s *State) Clone() *State {
 	return c
 }
 
-var nameRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,31}$`)
+// MinPeerID and MaxPeerID are the peer ids, which are also the last octet of
+// the peer addresses (.1 is the server).
+const (
+	MinPeerID = 2
+	MaxPeerID = 254
+)
+
+// NameRule describes a valid peer name for error messages.
+const NameRule = "1-32 of A-Z a-z 0-9 . _ - and space, starting with a letter or digit, not ending with a space"
+
+var (
+	nameRe     = regexp.MustCompile(`^[A-Za-z0-9]([A-Za-z0-9._ -]{0,30}[A-Za-z0-9._-])?$`)
+	reservedRe = regexp.MustCompile(`^peer [0-9]+$`)
+	idRe       = regexp.MustCompile(`^[0-9]{1,9}$`)
+)
 
 // ValidPeerName reports whether n can be a peer name.
 func ValidPeerName(n string) bool { return nameRe.MatchString(n) }
+
+// DefaultPeerName is the name of a peer without a name of its own.
+func DefaultPeerName(id int) string { return "peer " + strconv.Itoa(id) }
+
+// NameFitsID reports whether name may belong to the peer id: a name of the
+// form "peer <digits>" is only the default name of that same id, so that a
+// later default name never collides.
+func NameFitsID(name string, id int) bool {
+	return !reservedRe.MatchString(name) || name == DefaultPeerName(id)
+}
+
+// ParseID parses a peer id argument: plain decimal digits only.
+func ParseID(s string) (int, bool) {
+	if !idRe.MatchString(s) {
+		return 0, false
+	}
+	n, err := strconv.Atoi(s)
+	return n, err == nil
+}
 
 // Validate checks the whole state: every setting, the AWG set and every peer,
 // including that each stored public key belongs to its private key.
@@ -126,21 +154,27 @@ func (s *State) Validate() (errs []error, warns []string) {
 	if len(s.Peers) > MaxPeers {
 		e("%d peers; the maximum for a /24 is %d", len(s.Peers), MaxPeers)
 	}
-	names, octets, pubs := map[string]bool{}, map[int]bool{}, map[string]bool{}
+	names, ids, pubs := map[string]bool{}, map[int]bool{}, map[string]bool{}
 	serverPub, _ := keys.Public(s.Get("server.private_key"))
 	for _, p := range s.Peers {
-		id := fmt.Sprintf("peer #%d", p.ID)
-		if !ValidPeerName(p.Name) {
-			e("%s: name %q must match %s", id, p.Name, nameRe)
+		id := fmt.Sprintf("peer %d", p.ID)
+		if p.ID < MinPeerID || p.ID > MaxPeerID {
+			e("%s: the id must be %d-%d", id, MinPeerID, MaxPeerID)
+		}
+		if ids[p.ID] {
+			e("%s: the id is used twice", id)
+		}
+		ids[p.ID] = true
+		switch {
+		case !ValidPeerName(p.Name):
+			e("%s: name %q is not valid: use %s", id, p.Name, NameRule)
+		case !NameFitsID(p.Name, p.ID):
+			e("%s: name %q is the default name of peer %s only", id, p.Name, p.Name[len("peer "):])
 		}
 		if names[p.Name] {
 			e("%s: name %q is used twice", id, p.Name)
 		}
 		names[p.Name] = true
-		if p.Octet < 2 || p.Octet > 254 || octets[p.Octet] {
-			e("%s: address octet %d is out of range or used twice", id, p.Octet)
-		}
-		octets[p.Octet] = true
 		pub, err := keys.Public(p.PrivateKey)
 		switch {
 		case err != nil:
@@ -165,100 +199,38 @@ func (s *State) Err() error {
 	return errors.Join(errs...)
 }
 
-// FreeOctet returns the lowest address octet that no peer holds.
-func (s *State) FreeOctet() (int, error) {
+// FreeIDs returns the n lowest ids that no peer holds.
+func (s *State) FreeIDs(n int) ([]int, error) {
 	used := map[int]bool{}
 	for _, p := range s.Peers {
-		used[p.Octet] = true
+		used[p.ID] = true
 	}
-	for o := 2; o <= 254; o++ {
-		if !used[o] {
-			return o, nil
+	var out []int
+	for id := MinPeerID; id <= MaxPeerID && len(out) < n; id++ {
+		if !used[id] {
+			out = append(out, id)
 		}
 	}
-	return 0, fmt.Errorf("no free address in %s (at most %d peers)", s.Subnet(), MaxPeers)
+	if len(out) < n {
+		return nil, fmt.Errorf("only %d free address(es) in %s (at most %d peers)", len(out), s.Subnet(), MaxPeers)
+	}
+	return out, nil
 }
 
-// PeerAddress returns the address of a peer in subnet.
-func PeerAddress(subnet string, octet int) string {
-	return netcheck.Prefix24(subnet) + "." + strconv.Itoa(octet)
+// PeerAddress returns the address of peer id in subnet.
+func PeerAddress(subnet string, id int) string {
+	return netcheck.Prefix24(subnet) + "." + strconv.Itoa(id)
 }
 
 // ServerAddress returns the server end of subnet (".1").
 func ServerAddress(subnet string) string { return netcheck.Prefix24(subnet) + ".1" }
 
-// FindPeer resolves a selector: an id ("7", "#7") or a name ("phone",
-// "name:123" for a name made of digits).
-func (s *State) FindPeer(sel string) (*store.Peer, error) {
-	byName := func(n string) (*store.Peer, error) {
-		for i := range s.Peers {
-			if s.Peers[i].Name == n {
-				return &s.Peers[i], nil
-			}
-		}
-		return nil, fmt.Errorf("no peer named %q", n)
-	}
-	if n, ok := strings.CutPrefix(sel, "name:"); ok {
-		return byName(n)
-	}
-	idStr := strings.TrimPrefix(sel, "#")
-	if id, err := strconv.ParseInt(idStr, 10, 64); err == nil && idStr != "" && idStr[0] != '+' && idStr[0] != '-' {
-		for i := range s.Peers {
-			if s.Peers[i].ID == id {
-				return &s.Peers[i], nil
-			}
-		}
-		return nil, fmt.Errorf("no peer with id %d", id)
-	}
-	return byName(sel)
-}
-
-// Active is the interface-level part of the state that wg0 started with:
-// every restart-class setting and the whole AWG set ("awg.<key>").
-type Active map[string]string
-
-// ActiveOf extracts the active part of a state.
-func ActiveOf(s *State) Active {
-	a := Active{}
-	for _, k := range RestartKeys() {
-		a[k] = s.Get(k)
-	}
-	for k, v := range s.AWG {
-		if v != "" {
-			a["awg."+k] = v
+// FindPeer returns the peer with id.
+func (s *State) FindPeer(id int) (*store.Peer, error) {
+	for i := range s.Peers {
+		if s.Peers[i].ID == id {
+			return &s.Peers[i], nil
 		}
 	}
-	return a
-}
-
-// AWG returns the AWG part of an active snapshot.
-func (a Active) AWG() awg.Params {
-	p := awg.Params{}
-	for k, v := range a {
-		if x, ok := strings.CutPrefix(k, "awg."); ok {
-			p[x] = v
-		}
-	}
-	return p
-}
-
-// PendingRestart lists the keys whose desired value differs from the active
-// one. It is computed every time and never stored, so it cannot go stale.
-func PendingRestart(desired *State, active Active) []string {
-	want := ActiveOf(desired)
-	seen := map[string]bool{}
-	var out []string
-	for k, v := range want {
-		seen[k] = true
-		if active[k] != v {
-			out = append(out, k)
-		}
-	}
-	for k := range active {
-		if !seen[k] {
-			out = append(out, k)
-		}
-	}
-	sort.Strings(out)
-	return out
+	return nil, fmt.Errorf("no peer with id %d", id)
 }

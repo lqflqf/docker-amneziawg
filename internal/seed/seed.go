@@ -1,6 +1,5 @@
-// Package seed builds the first desired state from the environment. Env vars
-// are read only here, on the first start; later starts only compare them with
-// the DB (Drift).
+// Package seed builds the first configuration from the environment. Env vars
+// are read only here, on the first start; later starts ignore them.
 package seed
 
 import (
@@ -114,60 +113,6 @@ func Build(ctx context.Context, r *rand.Rand, getenv Getenv, detect Detector) (*
 		return nil, nil, fmt.Errorf("the AWG_* values are not valid: %s", strings.Join(msg, "; "))
 	}
 	return st, notes, nil
-}
-
-// Drift returns one message for each seed env var whose value differs from
-// the DB. Env vars are read only on the first start.
-func Drift(st *config.State, getenv Getenv) []string {
-	var out []string
-	seen := map[string]bool{}
-	for _, s := range config.Registry {
-		if s.Env == "" || seen[s.Env] {
-			continue
-		}
-		v, ok := getenv(s.Env)
-		if !ok {
-			continue
-		}
-		n, err := s.Check(v)
-		if err != nil {
-			n = v
-		}
-		if n != st.Get(s.Key) {
-			seen[s.Env] = true
-			out = append(out, fmt.Sprintf("%s=%s differs from the saved %s (%s). Env vars are read only on the first start; use: awgctl set %s %s",
-				s.Env, v, s.Key, st.Get(s.Key), s.Key, quote(v)))
-		}
-	}
-	if v, ok := getenv("AWG_VERSION"); ok && strings.TrimSpace(v) != st.AWG["version"] {
-		out = append(out, fmt.Sprintf("AWG_VERSION=%s differs from the saved version %s. Use: awgctl awg version %s --yes", v, st.AWG["version"], v))
-	}
-	for _, k := range awg.Keys {
-		v, ok := getenv(awg.EnvName(k))
-		if !ok {
-			continue
-		}
-		cur := st.AWG[k]
-		if k == "random_trailers" || k == "disable_cookies" {
-			v, _ = awg.NormalizeSwitch(v)
-		}
-		if strings.TrimSpace(v) != cur {
-			out = append(out, fmt.Sprintf("%s differs from the saved value. Use: awgctl awg set %s=<value>", awg.EnvName(k), k))
-		}
-	}
-	for _, old := range []string{"PEERS", "PERSISTENTKEEPALIVE_PEERS", "LOG_CONFS", "PEERDNS", "USE_DNS", "HEALTHCHECK_DNS_NAME"} {
-		if _, ok := getenv(old); ok {
-			out = append(out, fmt.Sprintf("%s is not supported by this image and is ignored (peers: awgctl peer add)", old))
-		}
-	}
-	return out
-}
-
-func quote(s string) string {
-	if strings.ContainsAny(s, " ,") {
-		return "'" + s + "'"
-	}
-	return s
 }
 
 // DetectURLs are asked at the same time; the first valid answer in this order wins.

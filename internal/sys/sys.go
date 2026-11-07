@@ -33,18 +33,13 @@ func DefaultPaths() Paths {
 }
 
 func (p Paths) DB() string         { return filepath.Join(p.Config, "amneziawg.db") }
-func (p Paths) Backups() string    { return filepath.Join(p.Config, "backups") }
 func (p Paths) RunDir() string     { return filepath.Join(p.Run, "amneziawg") }
 func (p Paths) WG0() string        { return filepath.Join(p.RunDir(), "wg0.conf") }
-func (p Paths) ActiveJSON() string { return filepath.Join(p.RunDir(), "active.json") }
-func (p Paths) StateJSON() string  { return filepath.Join(p.RunDir(), "state.json") }
-func (p Paths) Lock() string       { return filepath.Join(p.Run, "awgctl.lock") }
 func (p Paths) Settled() string    { return filepath.Join(p.Run, "amneziawg-settled") }
 func (p Paths) DNSDir() string     { return filepath.Join(p.Run, "dnsmasq") }
 func (p Paths) DNSConf() string    { return filepath.Join(p.DNSDir(), "dnsmasq.conf") }
 func (p Paths) DNSAddress() string { return filepath.Join(p.DNSDir(), "address") }
 func (p Paths) DNSState() string   { return filepath.Join(p.Run, "dnsmasq-state") }
-func (p Paths) S6DNS() string      { return filepath.Join(p.Run, "service", "svc-dnsmasq") }
 
 // Runner runs a program. The real one is Exec; tests use a fake.
 type Runner interface {

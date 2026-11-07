@@ -10,36 +10,17 @@ import (
 	"strings"
 	"time"
 
-	"github.com/lqflqf/docker-amneziawg/internal/apply"
 	"github.com/lqflqf/docker-amneziawg/internal/render"
+	"github.com/lqflqf/docker-amneziawg/internal/sys"
 )
 
-// PendingGrace is how long a saved change may wait for its apply before the
-// container is unhealthy.
-const PendingGrace = 30 * time.Second
-
-// Check returns nil when wg0 is up, no saved change waits too long for its
-// apply, and dnsmasq answers on the tunnel address.
-func Check(ctx context.Context, e apply.Env) error {
-	out, _, err := e.R.Run(ctx, "awg", []string{"show", "interfaces"}, nil, nil)
+// Check returns nil when wg0 is up and dnsmasq answers on the tunnel address.
+func Check(ctx context.Context, p sys.Paths, r sys.Runner) error {
+	out, _, err := r.Run(ctx, "awg", []string{"show", "interfaces"}, nil, nil)
 	if err != nil || !contains(strings.Fields(string(out)), render.Interface) {
 		return fmt.Errorf("tunnel %s is down", render.Interface)
 	}
-	st, err := e.ReadState()
-	if err != nil {
-		return fmt.Errorf("no apply state: %v", err)
-	}
-	if st.Pending() {
-		since, _ := time.Parse(time.RFC3339, st.PendingSince)
-		if st.PendingSince == "" || time.Since(since) > PendingGrace {
-			msg := "a saved change is not applied"
-			if st.ApplyError != "" {
-				msg += ": " + st.ApplyError
-			}
-			return fmt.Errorf("%s; run awgctl apply or restart the container", msg)
-		}
-	}
-	state, _ := os.ReadFile(e.P.DNSState())
+	state, _ := os.ReadFile(p.DNSState())
 	switch s := strings.TrimSpace(string(state)); s {
 	case "running":
 	case "invalid":
@@ -50,11 +31,11 @@ func Check(ctx context.Context, e apply.Env) error {
 		}
 		return fmt.Errorf("dnsmasq is not running (state: %s)", s)
 	}
-	b, _ := os.ReadFile(e.P.DNSAddress())
+	b, _ := os.ReadFile(p.DNSAddress())
 	addr := strings.TrimSpace(string(b))
 	ip := net.ParseIP(addr)
 	if ip == nil {
-		return fmt.Errorf("no tunnel address in %s", e.P.DNSAddress())
+		return fmt.Errorf("no tunnel address in %s", p.DNSAddress())
 	}
 	if !onInterface(ip, render.Interface) {
 		return fmt.Errorf("the tunnel address %s is not on %s", addr, render.Interface)

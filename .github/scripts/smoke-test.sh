@@ -82,7 +82,7 @@ in_image "Binaries" \
     'test -x /usr/bin/awg-quick' \
     'test -x /usr/bin/amneziawg-go' \
     'test -x /usr/local/bin/awgctl' \
-    'awgctl version | grep -q "^schema"' \
+    'awgctl version | grep -q "^awgctl "' \
     '! test -e /usr/bin/wg && ! test -L /usr/bin/wg' \
     '! test -e /usr/bin/wg-quick && ! test -L /usr/bin/wg-quick' \
     '! test -e /etc/wireguard && ! test -L /etc/wireguard'
@@ -128,7 +128,7 @@ in_image "Runtime base" \
     '! apk info -e openresolv >/dev/null && ! command -v resolvconf' \
     '! command -v qrencode' \
     '! grep -q "src_valid_mark) != 1" /usr/bin/awg-quick' \
-    'command -v bash usermod groupmod flock dnsmasq >/dev/null' \
+    'command -v bash usermod groupmod dnsmasq >/dev/null' \
     'id dnsmasq >/dev/null' \
     'test "$(id -u abc):$(id -g abc)" = 911:911' \
     'command -v nft >/dev/null'
@@ -231,29 +231,32 @@ passed "dnsmasq"
 
 section "awgctl"
 code() { local rc=0; dx awgctl "$@" >/dev/null 2>&1 || rc=$?; echo "$rc"; }
-dx awgctl peer add phone >/dev/null || fail "peer add"
-dx awgctl peer add laptop --no-keepalive >/dev/null || fail "peer add laptop"
-grep -q 'Endpoint = ci.example.com:51820' <<<"$(dx awgctl peer export phone)" || fail "peer export"
-grep -q '█' <<<"$(dx awgctl peer export 1 --qr)" || fail "QR code"
+grep -q 'Peer 2 "phone" added' <<<"$(dx awgctl peer add --name phone)" || fail "peer add"
+grep -q 'Peer 3 added' <<<"$(dx awgctl peer add --no-keepalive)" || fail "peer add without a name"
+grep -q 'Endpoint = ci.example.com:51820' <<<"$(dx awgctl peer export 2)" || fail "peer export"
+grep -q '█' <<<"$(dx awgctl peer export 2 --qr)" || fail "QR code"
 [[ "$(code set awg.s1 20)" == 2 ]] || fail "set awg.* must be refused (exit 2)"
-[[ "$(code peer rm laptop)" == 3 ]] || fail "peer rm without --yes must exit 3"
+[[ "$(code peer rm 3)" == 3 ]] || fail "peer rm without --yes must exit 3"
+[[ "$(code peer rm phone --yes)" == 2 ]] || fail "a peer name as the id must exit 2"
 [[ "$(code set server.endpoint_host other.example.com)" == 3 ]] || fail "a reissue change without --yes must exit 3"
 [[ "$(code set fw.nat_interface 'eth0;reboot')" == 1 ]] || fail "an injection string was accepted"
 dx awgctl set dns.upstream 9.9.9.9 >/dev/null || fail "set dns.upstream"
-dx grep -qx 'server=9.9.9.9' /run/dnsmasq/dnsmasq.conf || fail "dns.upstream was not applied"
-dx awgctl peer rm laptop --yes >/dev/null || fail "peer rm"
-[[ "$(dx awgctl peer list --json | grep -c '"name"')" == 1 ]] || fail "peer list after rm"
-ok "peer add/export/rm, exit codes 2 and 3, dns.upstream applied live"
+dx grep -qx 'server=9.9.9.9' /run/dnsmasq/dnsmasq.conf && fail "dns.upstream was applied before the restart"
+dx grep -q '^\[Peer\]' /run/amneziawg/wg0.conf && fail "a peer was applied before the restart"
+dx awgctl peer rm 3 --yes >/dev/null || fail "peer rm"
+grep -q '2 peer(s) added' <<<"$(dx awgctl peer add-many 2)" || fail "peer add-many"
+[[ "$(dx awgctl peer list --json | grep -c '"name"')" == 3 ]] || fail "peer list after add-many"
+dx awgctl peer rm 4 --yes >/dev/null || fail "peer rm 4"
+[[ "$(dx awgctl peer list --json | grep -c '"name"')" == 2 ]] || fail "peer list after rm"
+ok "peer add/add-many/export/rm by id, exit codes 2 and 3, changes wait for the restart"
 passed "awgctl"
 
-section "Restart and drift"
-gen=$(dx cat /run/amneziawg/state.json | grep committed)
-start -e SERVERURL=ci.example.com -e SERVERPORT=4443 -e PEERS=3 -e PUID=1234 -e PGID=2345
-logs_have 'SERVERPORT=4443 differs from the saved server.endpoint_port' || fail "no drift warning"
-logs_have 'PEERS is not supported by this image' || fail "no PEERS warning"
-[[ "$(dx cat /run/amneziawg/state.json | grep committed)" == "$gen" ]] || fail "a restart changed the DB"
+section "Restart"
+start -e SERVERURL=ci.example.com -e SERVERPORT=4443 -e PUID=1234 -e PGID=2345
 [[ "$(dx awgctl get server.endpoint_port)" == 51820 ]] || fail "an env change after the first start was applied"
-grep -q 'phone' <<<"$(dx awgctl peer list)" || fail "the peer is gone after a restart"
+dx grep -qx 'server=9.9.9.9' /run/dnsmasq/dnsmasq.conf || fail "the restart did not apply dns.upstream"
+dx grep -qx '# #2 phone' /run/amneziawg/wg0.conf || fail "the restart did not apply peer 2"
+dx grep -qx '# #3 peer 3' /run/amneziawg/wg0.conf || fail "the restart did not apply peer 3"
 unowned=$(dx find /config ! -type l \( ! -user 1234 -o ! -group 2345 \))
 [[ -z "$unowned" ]] || fail "not owned by PUID:PGID: $unowned"
 tunnel_was_up=false
@@ -263,13 +266,13 @@ engine stop -t 20 "$container" >/dev/null
 if [[ "$tunnel_was_up" == true ]]; then
     logs_have '**** Tunnel wg0 is down ****' || fail "the finish script did not take wg0 down"
 fi
-ok "env is read only on the first start, state kept, ownership kept, clean stop"
+ok "a restart applies the saved changes, env is read only on the first start, ownership kept, clean stop"
 # A PUID/PGID change re-owns the volume instead of stopping the container.
 start -e PUID=1500 -e PGID=1500
 unowned=$(dx find /config ! -type l \( ! -user 1500 -o ! -group 1500 \))
 [[ -z "$unowned" ]] || fail "not owned by the new PUID:PGID: $unowned"
 ok "a new PUID/PGID takes over the volume"
-passed "Restart and drift"
+passed "Restart"
 
 # ----------------------------------------------------------------------------
 # Fatal start-up errors stop the container with exit code 1, so the restart
@@ -342,7 +345,9 @@ for _ in $(seq 1 60); do
     sleep 1
 done
 logs_have 'Config initialization finished' || fail "the new image did not start on the imported volume"
-new_conf=$(dx awgctl peer export laptop)
+laptop_id=$(dx awgctl peer list | awk '$2 == "laptop" {print $1}')
+[[ "$laptop_id" == 3 ]] || fail "laptop has id ${laptop_id:-none}, expected its old octet 3"
+new_conf=$(dx awgctl peer export "$laptop_id")
 for k in PrivateKey PublicKey PresharedKey Endpoint H1 S1 I1 HeaderProtectionKey; do
     [[ "$(grep "^$k = " <<<"$old_conf")" == "$(grep "^$k = " <<<"$new_conf")" ]] || fail "the import changed $k of laptop"
 done
@@ -379,10 +384,12 @@ else
     wait_tunnel "$srv"
     logs_have 'Tunnel wg0 is up' "$srv" || e2e_fail "server tunnel did not come up"
     healthy "$srv" || e2e_fail "server with zero peers is not healthy"
-    engine exec "$srv" awgctl peer add cli >/dev/null || e2e_fail "peer add"
+    engine exec "$srv" awgctl peer add --name cli >/dev/null || e2e_fail "peer add"
+    engine restart "$srv" >/dev/null
+    healthy "$srv" || e2e_fail "server is not healthy after the restart"
     # No openresolv in the image: drop the DNS line and query the tunnel
     # address directly. A split tunnel needs no src_valid_mark.
-    engine exec "$srv" awgctl peer export cli | sed -e '/^DNS = /d' \
+    engine exec "$srv" awgctl peer export 2 | sed -e '/^DNS = /d' \
         -e 's|^AllowedIPs = .*|AllowedIPs = 10.58.58.0/24|' > "$tmpdir/cli.conf"
     engine run -d --name "$cli" --network "$network" --cap-add NET_ADMIN --device /dev/net/tun \
         -v "$tmpdir":/t:ro --entrypoint sh "$image" -c 'cp /t/cli.conf /tmp/wg0.conf && awg-quick up /tmp/wg0.conf && sleep infinity' >/dev/null
@@ -402,18 +409,21 @@ else
         ping -c1 -W3 10.58.58.1 >/dev/null &&
         ! nslookup -type=a -timeout=2 -retry=1 health.amneziawg. 10.58.58.1 >/dev/null 2>&1
     ' || e2e_fail "a container outside the tunnel can query dnsmasq (or cannot reach the server)"
-    # Live changes keep the session of the other peer.
-    engine exec "$srv" awgctl peer add second >/dev/null || e2e_fail "live peer add"
-    engine exec "$cli" ping -c1 -W3 10.58.58.1 >/dev/null || e2e_fail "a live peer add dropped the other peer"
-    engine exec "$srv" awgctl peer disable cli >/dev/null || e2e_fail "peer disable"
+    # A change waits for the restart, then the restart applies it.
+    engine exec "$srv" awgctl peer disable 2 >/dev/null || e2e_fail "peer disable"
+    engine exec "$cli" ping -c1 -W3 10.58.58.1 >/dev/null || e2e_fail "a saved change reached wg0 before the restart"
+    engine restart "$srv" >/dev/null
+    healthy "$srv" || e2e_fail "server is not healthy after the restart"
     engine exec "$cli" ping -c1 -W3 10.58.58.1 >/dev/null 2>&1 && e2e_fail "a disabled peer still reaches the server"
-    engine exec "$srv" awgctl peer enable cli >/dev/null || e2e_fail "peer enable"
+    engine exec "$srv" awgctl peer enable 2 >/dev/null || e2e_fail "peer enable"
+    engine restart "$srv" >/dev/null
+    healthy "$srv" || e2e_fail "server is not healthy after the restart"
     for _ in $(seq 1 10); do
         engine exec "$cli" ping -c1 -W2 10.58.58.1 >/dev/null 2>&1 && break
         sleep 1
     done
     engine exec "$cli" ping -c1 -W3 10.58.58.1 >/dev/null || e2e_fail "an enabled peer does not reach the server again"
-    ok "handshake, DNS through the tunnel to the upstream, DNS closed to non-peers, live peer changes"
+    ok "handshake, DNS through the tunnel to the upstream, DNS closed to non-peers, peer changes at the restart"
     passed "End to end"
 fi
 

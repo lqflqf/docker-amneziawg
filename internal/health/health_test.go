@@ -10,7 +10,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lqflqf/docker-amneziawg/internal/apply"
 	"github.com/lqflqf/docker-amneziawg/internal/sys"
 	"github.com/lqflqf/docker-amneziawg/internal/sys/systest"
 )
@@ -26,24 +25,14 @@ func write(t *testing.T, p, text string) {
 }
 
 func TestCheck(t *testing.T) {
-	old := time.Now().Add(-time.Hour).UTC().Format(time.RFC3339)
-	now := time.Now().UTC().Format(time.RFC3339)
 	for _, c := range []struct {
 		name    string
 		down    bool
-		state   *apply.State
 		dns     string
 		address string
 		want    string
 	}{
 		{name: "down", down: true, want: "tunnel wg0 is down"},
-		{name: "no state", want: "no apply state"},
-		{name: "pending without time", state: &apply.State{Committed: 2, Applied: 1},
-			want: "a saved change is not applied; run awgctl apply"},
-		{name: "pending too long", state: &apply.State{Committed: 2, Applied: 1, PendingSince: old, ApplyError: "boom"},
-			want: "a saved change is not applied: boom; run"},
-		{name: "pending in grace", state: &apply.State{Committed: 2, Applied: 1, PendingSince: now},
-			dns: "invalid", want: "dnsmasq has no valid config"},
 		{name: "dns invalid", dns: "invalid\n", want: "dnsmasq has no valid config"},
 		{name: "dns missing", want: "dnsmasq is not running (state: none)"},
 		{name: "dns other", dns: "starting", want: "dnsmasq is not running (state: starting)"},
@@ -54,23 +43,14 @@ func TestCheck(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			f := systest.New()
 			f.Up = !c.down
-			e := apply.Env{P: sys.Paths{Config: t.TempDir(), Run: t.TempDir()}, R: f}
-			st := c.state
-			if st == nil && c.name != "no state" {
-				st = &apply.State{Committed: 1, Applied: 1}
-			}
-			if st != nil {
-				if err := e.WriteState(*st); err != nil {
-					t.Fatal(err)
-				}
-			}
+			p := sys.Paths{Config: t.TempDir(), Run: t.TempDir()}
 			if c.dns != "" {
-				write(t, e.P.DNSState(), c.dns)
+				write(t, p.DNSState(), c.dns)
 			}
 			if c.address != "" {
-				write(t, e.P.DNSAddress(), c.address)
+				write(t, p.DNSAddress(), c.address)
 			}
-			err := Check(context.Background(), e)
+			err := Check(context.Background(), p, f)
 			if err == nil || !strings.Contains(err.Error(), c.want) {
 				t.Errorf("err = %v, want %q", err, c.want)
 			}
@@ -82,8 +62,8 @@ func TestCheckAwgFails(t *testing.T) {
 	f := systest.New()
 	f.Up = true
 	f.Fail["awg show interfaces"] = "no"
-	e := apply.Env{P: sys.Paths{Config: t.TempDir(), Run: t.TempDir()}, R: f}
-	if err := Check(context.Background(), e); err == nil || !strings.Contains(err.Error(), "is down") {
+	p := sys.Paths{Config: t.TempDir(), Run: t.TempDir()}
+	if err := Check(context.Background(), p, f); err == nil || !strings.Contains(err.Error(), "is down") {
 		t.Errorf("err = %v", err)
 	}
 }

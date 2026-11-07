@@ -159,9 +159,9 @@ RUN \
 # add local files
 COPY /root /
 
-# Healthy while wg0 is up, dnsmasq answers on the tunnel address and no saved
-# change waits for its apply. Docker does not restart unhealthy containers by
-# itself; this is a signal for monitoring.
+# Healthy while wg0 is up and dnsmasq answers on the tunnel address. Docker
+# does not restart unhealthy containers by itself; this is a signal for
+# monitoring.
 HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
   CMD ["/usr/local/bin/awgctl", "health"]
 

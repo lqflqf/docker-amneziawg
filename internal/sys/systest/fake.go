@@ -1,5 +1,5 @@
-// Package systest has a fake sys.Runner that models awg, awg-quick, dnsmasq
-// and s6-svc well enough for unit tests, and records every call.
+// Package systest has a fake sys.Runner that models awg, awg-quick and
+// dnsmasq well enough for unit tests, and records every call.
 package systest
 
 import (
@@ -11,15 +11,13 @@ import (
 )
 
 // Fake is a fake runner. Set Up to model a running wg0; set Fail to make a
-// command fail (key: call prefix such as "awg syncconf", value: stderr).
+// command fail (key: call prefix such as "awg setconf", value: stderr).
 type Fake struct {
 	mu    sync.Mutex
 	Up    bool
 	Peers []string // public keys that wg0 has
 	Fail  map[string]string
 	Calls []string
-	// Ghost stays in wg0 after each syncconf, to model a failed removal.
-	Ghost string
 }
 
 // New returns a fake with wg0 down.
@@ -38,17 +36,6 @@ func strip(text string) string {
 		out = append(out, l)
 	}
 	return strings.Join(out, "\n")
-}
-
-func peersOf(text string) []string {
-	var out []string
-	for _, l := range strings.Split(text, "\n") {
-		k, v, ok := strings.Cut(l, "=")
-		if ok && strings.TrimSpace(k) == "PublicKey" {
-			out = append(out, strings.TrimSpace(v))
-		}
-	}
-	return out
 }
 
 // Run implements sys.Runner.
@@ -77,18 +64,11 @@ func (f *Fake) Run(_ context.Context, name string, args []string, _ []byte, _ []
 			return nil, []byte("dnsmasq: bad option"), fmt.Errorf("exit status 1")
 		}
 		return nil, []byte("dnsmasq: syntax check OK."), nil
-	case name == "awg" && len(args) == 2 && args[0] == "show" && args[1] == "wg0":
-		if !f.Up {
-			return nil, []byte("Unable to access interface: No such device"), fmt.Errorf("exit status 1")
-		}
-		return []byte("interface: wg0\n"), nil, nil
 	case name == "awg" && len(args) == 2 && args[0] == "show" && args[1] == "interfaces":
 		if f.Up {
 			return []byte("wg0\n"), nil, nil
 		}
 		return []byte("\n"), nil, nil
-	case name == "awg" && len(args) == 3 && args[0] == "show" && args[2] == "peers":
-		return []byte(strings.Join(f.Peers, "\n") + "\n"), nil, nil
 	case name == "awg" && len(args) == 3 && args[0] == "show" && args[2] == "dump":
 		if !f.Up {
 			return nil, nil, fmt.Errorf("exit status 1")
@@ -98,14 +78,6 @@ func (f *Fake) Run(_ context.Context, name string, args []string, _ []byte, _ []
 			out += p + "\tpsk\t(none)\t10.0.0.2/32\t0\t0\t0\toff\n"
 		}
 		return []byte(out), nil, nil
-	case name == "awg" && len(args) == 3 && args[0] == "syncconf":
-		f.Peers = peersOf(read(args[2]))
-		if f.Ghost != "" {
-			f.Peers = append(f.Peers, f.Ghost)
-		}
-		return nil, nil, nil
-	case name == "s6-svc":
-		return nil, nil, nil
 	case len(args) == 1 && args[0] == "--version":
 		return []byte(name + " v0-test\n"), nil, nil
 	}
@@ -122,11 +94,4 @@ func (f *Fake) Called(prefix string) bool {
 		}
 	}
 	return false
-}
-
-// Reset forgets the recorded calls.
-func (f *Fake) Reset() {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.Calls = nil
 }

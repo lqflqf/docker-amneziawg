@@ -23,7 +23,7 @@ func state(t *testing.T) *config.State {
 	}
 	for i, n := range []string{"phone", "laptop"} {
 		priv, pub := keys.Pair()
-		st.Peers = append(st.Peers, store.Peer{ID: int64(i + 1), Name: n, Octet: i + 2, PrivateKey: priv,
+		st.Peers = append(st.Peers, store.Peer{ID: i*5 + 2, Name: n, PrivateKey: priv,
 			PublicKey: pub, PresharedKey: keys.NewSymmetric(), Keepalive: i == 0, Enabled: true})
 	}
 	return st
@@ -32,7 +32,7 @@ func state(t *testing.T) *config.State {
 func TestServerConf(t *testing.T) {
 	st := state(t)
 	st.Peers[1].Enabled = false
-	f, err := render.Server(st, config.ActiveOf(st))
+	f, err := render.Server(st)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -41,7 +41,7 @@ func TestServerConf(t *testing.T) {
 		"Address = 10.5.5.1/24", "ListenPort = 51820", "MTU = 1280",
 		"PostUp = iptables -t nat -A POSTROUTING -o eth+ -j MASQUERADE",
 		"PostUp = ip6tables -I FORWARD -i %i -j DROP",
-		"RandomTrailers = on", "# #1 phone", "AllowedIPs = 10.5.5.2/32", "PersistentKeepalive = 25",
+		"RandomTrailers = on", "# #2 phone", "AllowedIPs = 10.5.5.2/32", "PersistentKeepalive = 25",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("missing %q in\n%s", want, out)
@@ -54,23 +54,6 @@ func TestServerConf(t *testing.T) {
 	head := out[:strings.Index(out, "[Peer]")]
 	if !strings.Contains(head, "I1 = ") || !strings.Contains(head, "HeaderProtectionKey = ") {
 		t.Errorf("AWG keys must be in [Interface]:\n%s", head)
-	}
-}
-
-func TestServerConfUsesActiveInterface(t *testing.T) {
-	st := state(t)
-	active := config.ActiveOf(st)
-	d := st.Clone()
-	d.Settings["net.subnet"] = "10.77.0.0/24"
-	d.Settings["server.private_key"] = keys.NewPrivate()
-	d.AWG["jc"] = "99"
-	f, _ := render.Server(d, active)
-	out := f.String()
-	if !strings.Contains(out, "Address = 10.5.5.1/24") || !strings.Contains(out, "AllowedIPs = 10.5.5.2/32") {
-		t.Errorf("a pending subnet leaked into the live conf:\n%s", out)
-	}
-	if !strings.Contains(out, "PrivateKey = "+active["server.private_key"]) || strings.Contains(out, "Jc = 99") {
-		t.Errorf("a pending key or AWG value leaked into the live conf")
 	}
 }
 
@@ -92,12 +75,16 @@ func TestPeerConf(t *testing.T) {
 			t.Errorf("[Peer] lacks %q", want)
 		}
 	}
+	// The id is the last octet of the address.
+	if f, _ := render.Peer(st, st.Peers[1]); !strings.Contains(f.String(), "Address = 10.5.5.7/32") {
+		t.Errorf("peer 7 does not get .7:\n%s", f)
+	}
 }
 
 func TestZeroPeersAndDnsmasq(t *testing.T) {
 	st := state(t)
 	st.Peers = nil
-	f, _ := render.Server(st, config.ActiveOf(st))
+	f, _ := render.Server(st)
 	if strings.Contains(f.String(), "[Peer]") {
 		t.Fatal("peer section with zero peers")
 	}

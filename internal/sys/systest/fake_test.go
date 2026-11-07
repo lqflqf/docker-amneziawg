@@ -58,11 +58,8 @@ func TestDnsmasqTest(t *testing.T) {
 	}
 }
 
-func TestShowAndSyncconf(t *testing.T) {
+func TestShow(t *testing.T) {
 	f := New()
-	if _, _, err := run(f, "awg", "show", "wg0"); err == nil {
-		t.Error("show wg0 must fail when down")
-	}
 	if out, _, _ := run(f, "awg", "show", "interfaces"); strings.TrimSpace(out) != "" {
 		t.Errorf("interfaces when down = %q", out)
 	}
@@ -71,20 +68,10 @@ func TestShowAndSyncconf(t *testing.T) {
 	}
 
 	f.Up = true
-	if out, _, err := run(f, "awg", "show", "wg0"); err != nil || !strings.Contains(out, "wg0") {
-		t.Errorf("show wg0 = %q, %v", out, err)
-	}
 	if out, _, _ := run(f, "awg", "show", "interfaces"); out != "wg0\n" {
 		t.Errorf("interfaces when up = %q", out)
 	}
-
-	f.Ghost = "ghost"
-	if _, _, err := run(f, "awg", "syncconf", "wg0", write(t, "[Peer]\nPublicKey = a\n[Peer]\nPublicKey= b\n")); err != nil {
-		t.Fatal(err)
-	}
-	if out, _, _ := run(f, "awg", "show", "wg0", "peers"); out != "a\nb\nghost\n" {
-		t.Errorf("peers = %q", out)
-	}
+	f.Peers = []string{"a", "b", "c"}
 	out, _, err := run(f, "awg", "show", "wg0", "dump")
 	if err != nil || len(strings.Split(strings.TrimSpace(out), "\n")) != 4 || !strings.HasPrefix(out, "priv\tpub") {
 		t.Errorf("dump = %q, %v", out, err)
@@ -93,9 +80,6 @@ func TestShowAndSyncconf(t *testing.T) {
 
 func TestOtherCommands(t *testing.T) {
 	f := New()
-	if _, _, err := run(f, "s6-svc", "-r", "/run/service/svc-dnsmasq"); err != nil {
-		t.Error(err)
-	}
 	if out, _, err := run(f, "dnsmasq", "--version"); err != nil || out != "dnsmasq v0-test\n" {
 		t.Errorf("version = %q, %v", out, err)
 	}
@@ -104,18 +88,14 @@ func TestOtherCommands(t *testing.T) {
 	}
 }
 
-func TestFailCalledReset(t *testing.T) {
+func TestFailAndCalled(t *testing.T) {
 	f := New()
 	f.Up = true
 	f.Fail["awg show"] = "boom"
-	if _, errb, err := run(f, "awg", "show", "wg0"); err == nil || errb != "boom" {
+	if _, errb, err := run(f, "awg", "show", "interfaces"); err == nil || errb != "boom" {
 		t.Errorf("Fail: %v %q", err, errb)
 	}
-	if !f.Called("awg show wg0") || f.Called("awg syncconf") {
+	if !f.Called("awg show interfaces") || f.Called("awg setconf") {
 		t.Errorf("Called is wrong: %v", f.Calls)
-	}
-	f.Reset()
-	if f.Called("awg") || len(f.Calls) != 0 {
-		t.Errorf("Reset kept %v", f.Calls)
 	}
 }

@@ -2,8 +2,9 @@
 #
 # 1. Set PUID/PGID and, before the first start, SERVERURL.
 # 2. docker compose up -d
-# 3. Add a peer and show its QR code:
-#      docker exec -it amneziawg awgctl peer add phone --qr
+# 3. Add a peer and show its QR code, then restart to apply it:
+#      docker exec -it amneziawg awgctl peer add --name phone --qr
+#      docker restart amneziawg
 #
 # The container reads the variables marked "first start" only once, when
 # ./config has no database. Later, change these values with awgctl
@@ -71,7 +72,7 @@ services:
       # - AWG_RANDOM_TRAILERS=on            # Default on for 3.1, off for the other versions. Not with 1.5. The same on each end
       # - AWG_DISABLE_COOKIES=on            # Default off. Removes the WireGuard DoS protection. Can be different on each end
     volumes:
-      - ./config:/config                    # amneziawg.db (all keys: keep it private), backups/
+      - ./config:/config                    # amneziawg.db (all keys: keep it private)
     ports:
       - 51820:51820/udp                     # SERVERPORT:51820/udp
     sysctls:

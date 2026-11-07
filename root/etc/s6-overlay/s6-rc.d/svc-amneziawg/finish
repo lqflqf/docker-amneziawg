@@ -6,7 +6,7 @@ main() {
     rm -f /run/amneziawg-settled
     if awg show wg0 >/dev/null 2>&1; then
         echo "**** Disabling tunnel wg0 ****"
-        flock /run/awgctl.lock awg-quick down /run/amneziawg/wg0.conf || :
+        awg-quick down /run/amneziawg/wg0.conf || :
         echo "**** Tunnel wg0 is down ****"
     fi
 }

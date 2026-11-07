@@ -40,6 +40,6 @@ services:
 - **Port**: the container always listens on 51820. A custom `SERVERPORT=32948` maps as `"32948:51820/udp"`. Never map it as `"32948:32948/udp"`.
 - **Capabilities**: use `NET_ADMIN` only. `SYS_MODULE` is not necessary. The container never runs `modprobe`. Keep it only on minimal hosts that do not auto-load the iptables NAT modules. A `/lib/modules` mount does nothing.
 - **`PUID`/`PGID`**: use `id -u` and `id -g` of the user that owns the deploy directory. `0` (root) stops the container.
-- **Peers**: do not put peers in the environment. The container ignores `PEERS`. Add each peer with `awgctl peer add <name>` after the start.
+- **Peers**: do not put peers in the environment. The container ignores `PEERS`. Add each peer with `awgctl peer add --name <name>` after the start, then restart the container.
 - **`restart`**: keep `unless-stopped`. A fatal error at start stops the container with exit code 1, and the policy starts it again.
 - **Changes after the first start**: edit the compose file only for `PUID`, `PGID`, ports and sysctls. Change other values with `awgctl` (README "Settings").

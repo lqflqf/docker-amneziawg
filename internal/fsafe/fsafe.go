@@ -61,14 +61,14 @@ func CheckPath(path string, wantDir, anyOwner bool, o Owner) error {
 	return nil
 }
 
-// CheckConfig checks /config itself, the DB, its journal and backups/. With
-// anyOwner (awgctl init, which then gives /config to PUID:PGID), a volume of
-// an earlier PUID is accepted; symlinks and wrong file kinds never are.
-func CheckConfig(configDir, db, backups string, anyOwner bool, o Owner) error {
+// CheckConfig checks /config itself, the DB and its journal. With anyOwner
+// (awgctl init, which then gives /config to PUID:PGID), a volume of an
+// earlier PUID is accepted; symlinks and wrong file kinds never are.
+func CheckConfig(configDir, db string, anyOwner bool, o Owner) error {
 	for _, c := range []struct {
 		path string
 		dir  bool
-	}{{configDir, true}, {db, false}, {db + "-journal", false}, {backups, true}} {
+	}{{configDir, true}, {db, false}, {db + "-journal", false}} {
 		if err := CheckPath(c.path, c.dir, anyOwner, o); err != nil {
 			return err
 		}
@@ -76,8 +76,8 @@ func CheckConfig(configDir, db, backups string, anyOwner bool, o Owner) error {
 	return nil
 }
 
-// Harden sets the modes of what awgctl owns in /config: the DB 600, backups
-// and legacy-* directories 700 with files 600. Symlinks are skipped.
+// Harden sets the modes of what awgctl owns in /config: the DB 600 and the
+// legacy-* directories 700 with files 600. Symlinks are skipped.
 func Harden(configDir string) error {
 	var firstErr error
 	keep := func(err error) {
@@ -90,7 +90,7 @@ func Harden(configDir string) error {
 	}
 	entries, _ := os.ReadDir(configDir)
 	for _, e := range entries {
-		if !e.IsDir() || !(e.Name() == "backups" || strings.HasPrefix(e.Name(), "legacy-")) {
+		if !e.IsDir() || !strings.HasPrefix(e.Name(), "legacy-") {
 			continue
 		}
 		dir := filepath.Join(configDir, e.Name())

@@ -37,8 +37,9 @@ services:
 
 1. Start the container: `docker compose up -d`.
 2. Wait for `Config initialization finished` and `Tunnel wg0 is up` in `docker logs amneziawg`.
-3. Add a peer and show its QR code: `docker exec -it amneziawg awgctl peer add phone --qr`.
-4. Scan the QR code with the [Amnezia app](https://amnezia.org/).
+3. Add a peer and show its QR code: `docker exec -it amneziawg awgctl peer add --name phone --qr`.
+4. Restart the container to apply the new peer: `docker restart amneziawg`.
+5. Scan the QR code with the [Amnezia app](https://amnezia.org/).
 
 A new server has no peers. Add one peer for each device. [`docker-compose.yml`](docker-compose.yml) lists each first-start variable with comments.
 
@@ -66,28 +67,28 @@ On the first start, `/config` has no database. `awgctl init` reads the environme
 
 If `SERVERURL` is not set, the container asks 3 HTTPS services for the public IPv4. It tries 3 times, after 0 s, 5 s and 15 s. If all attempts fail, the container stops and writes nothing. Set `SERVERURL` and start again.
 
-After the first start, the database is the only source of the configuration. If a variable above has a different value, the container ignores it. It writes a `WARNING` with the `awgctl` command that makes the change. `PUID` and `PGID` apply at each start:
+After the first start, the database is the only source of the configuration. The container ignores the variables above, also when they have a different value. To change a value, use `awgctl`. `PUID` and `PGID` apply at each start:
 
 | Variable | Default | Function |
 |---|---|---|
 | `PUID` / `PGID` | `911` | Owner of `/config` and of the database. Use a number from 1 to 4294967294. A value that is not valid, or `0` (root), stops the container with exit code 1 |
 
-The container ignores `PEERS`, `PERSISTENTKEEPALIVE_PEERS`, `LOG_CONFS`, `PEERDNS`, `USE_DNS` and `HEALTHCHECK_DNS_NAME`, with a `WARNING`.
+The container ignores `PEERS`, `PERSISTENTKEEPALIVE_PEERS`, `LOG_CONFS`, `PEERDNS`, `USE_DNS` and `HEALTHCHECK_DNS_NAME`.
 
 ## `awgctl`
 
 Run `awgctl` in the running container: `docker exec amneziawg awgctl <command>`. `awgctl help` shows each command. Before `awgctl` saves a change, it checks the full config with the `awg` parser and `dnsmasq --test`. If a check fails, nothing changes.
 
+`awgctl` changes only the database. The running tunnel and dnsmasq do not change. **Restart the container to apply the saved changes**: `docker restart amneziawg`. At each start, `awgctl init` reads the database and writes the configs in `/run`. A restart stops all tunnels for some seconds.
+
 | Command | Function |
 |---|---|
-| `status` | Tunnel, endpoint, AWG version, peers, pending restart and apply state |
 | `health` | The health check (see [Health check](#health-check-and-troubleshooting)) |
-| `apply` | Applies the saved state again, after exit code 4 |
-| `version` | Versions of `awgctl`, `awg`, `amneziawg-go` and the database schema |
+| `version` | Versions of `awgctl`, `awg` and `amneziawg-go` |
 | `get [key] [--show-secrets]`, `set <key> <value> [--yes]`, `reset <key> [--yes]` | [Settings](#settings) |
 | `server rotate-key --yes` | Makes a new server key. Each peer needs its new config |
 | `awg show`, `awg version`, `awg set`, `awg regenerate` | [AWG parameters](#protocol-versions-and-obfuscation) |
-| `peer add`, `list`, `show`, `export`, `rename`, `set`, `disable`, `enable`, `rotate`, `rm` | [Peers](#peers) |
+| `peer add`, `add-many`, `list`, `show`, `export`, `rename`, `set`, `disable`, `enable`, `rotate`, `rm` | [Peers](#peers) |
 | `import-legacy <dir>` | Imports a volume of an older release once. See [Upgrading](#from-the-releases-before-awgctl) |
 
 | Exit code | Meaning |
@@ -96,29 +97,31 @@ Run `awgctl` in the running container: `docker exec amneziawg awgctl <command>`.
 | 1 | Error. Nothing changed |
 | 2 | Usage error |
 | 3 | Refused: the change needs `--yes` |
-| 4 | Saved, but not applied. Run `awgctl apply` or restart the container |
 
 A command needs `--yes` when a peer needs a new config after the change. `peer rm` and `server rotate-key` always need `--yes`. Without `--yes`, the command exits with code 3 and changes nothing.
 
 ### Peers
 
 ```bash
-docker exec -it amneziawg awgctl peer add laptop --qr     # new peer, QR code in the terminal
-docker exec amneziawg awgctl peer list                     # addresses, handshakes, traffic
-docker exec amneziawg awgctl peer export laptop > laptop.conf
-docker exec -it amneziawg awgctl peer export laptop --qr
-docker exec amneziawg awgctl peer disable laptop           # keeps the keys
-docker exec amneziawg awgctl peer rotate laptop --yes      # new keys, export again
-docker exec amneziawg awgctl peer rm laptop --yes          # removes the peer and its keys
+docker exec -it amneziawg awgctl peer add --name laptop --qr   # new peer, QR code in the terminal
+docker exec amneziawg awgctl peer add-many 5                    # 5 new peers: "peer 3" to "peer 7"
+docker exec amneziawg awgctl peer list                          # ids, names, addresses, handshakes, traffic
+docker exec amneziawg awgctl peer export 2 > laptop.conf
+docker exec -it amneziawg awgctl peer export 2 --qr
+docker exec amneziawg awgctl peer rename 2 "work laptop"        # or: peer rename 2 --clear
+docker exec amneziawg awgctl peer disable 2                     # keeps the keys
+docker exec amneziawg awgctl peer rotate 2 --yes                # new keys, export again
+docker exec amneziawg awgctl peer rm 2 --yes                    # removes the peer and its keys
+docker restart amneziawg                                        # applies the peer changes
 ```
 
-- A name has 1-32 letters, digits, `.`, `_` or `-`, and starts with a letter or a digit.
-- `<peer>` is an ID, `#ID`, a name, or `name:<digits>` for a name that has only digits.
-- Each peer gets the lowest free address, or the address from `--octet N` (2-254). The maximum is 253 peers.
-- IDs never change. `awgctl` never uses an ID again after `peer rm`.
-- Keepalive is on (25 s) for a new peer. To save phone batteries, use `--no-keepalive` or `peer set <peer> --keepalive off`.
-- The container does not keep peer configs or QR codes on disk. Use `peer export` (`--qr`, `--png FILE` or `--conf FILE`) each time.
-- Peer changes apply at once with `awg syncconf`. Other peers stay connected. If `wg0` is down, the change applies when the tunnel starts.
+- Each peer command takes the peer id, a number from 2 to 254. The id is also the last octet of the peer address: peer 5 has `10.13.13.5`. A name or `#5` is a usage error.
+- A new peer gets the lowest free id. The maximum is 253 peers. After `peer rm`, a new peer can get the same id.
+- `peer add-many <count>` adds 1 to 253 peers in one change. If there are not enough free ids, it adds no peer.
+- A name has 1-32 letters, digits, spaces, `.`, `_` or `-`. It starts with a letter or a digit and does not end with a space. Each name is unique.
+- A peer without `--name` gets the name `peer <id>`, for example `peer 5`. Only peer 5 can have the name `peer 5`. `peer rename <id> --clear` sets this name again.
+- Keepalive is on (25 s) for a new peer. To save phone batteries, use `--no-keepalive` or `peer set <id> --keepalive off`.
+- The container does not keep peer configs or QR codes on disk. Use `peer export` (`--qr`, `--png FILE` or `--conf FILE`) each time. An export shows the saved config, which works after the next restart.
 
 ### Settings
 
@@ -126,19 +129,19 @@ docker exec amneziawg awgctl peer rm laptop --yes          # removes the peer an
 
 | Key | First-start variable | Default | After a change |
 |---|---|---|---|
-| `server.endpoint_host` | `SERVERURL` | detected | New peer configs |
-| `server.endpoint_port` | `SERVERPORT` | `51820` | New peer configs |
+| `server.endpoint_host` | `SERVERURL` | detected | Restart, new peer configs |
+| `server.endpoint_port` | `SERVERPORT` | `51820` | Restart, new peer configs |
 | `net.subnet` | `INTERNAL_SUBNET` | `10.13.13.0/24` | Restart, new peer configs |
 | `net.mtu` | `MTU` | `1280` | Restart |
-| `net.peer_mtu` | `MTU` | `1280` | New peer configs |
-| `peer.default_allowed_ips` | `ALLOWEDIPS` | `0.0.0.0/0, ::/0` | New peer configs |
-| `peer.keepalive_seconds` | — | `25` | Applies at once |
+| `net.peer_mtu` | `MTU` | `1280` | Restart, new peer configs |
+| `peer.default_allowed_ips` | `ALLOWEDIPS` | `0.0.0.0/0, ::/0` | Restart, new peer configs |
+| `peer.keepalive_seconds` | — | `25` | Restart |
 | `fw.nat_interface` | — | `eth+` | Restart |
 | `fw.ipv6_forward_drop` | — | `true` | Restart |
-| `dns.upstream` | `DNS_UPSTREAM` | `1.1.1.1,1.0.0.1` | dnsmasq restarts |
+| `dns.upstream` | `DNS_UPSTREAM` | `1.1.1.1,1.0.0.1` | Restart |
 | `server.private_key` | — | generated | Only `awgctl server rotate-key --yes`. Restart, new peer configs |
 
-- **Restart**: the database keeps the new value, and `wg0` uses it after `docker restart amneziawg`. Until then, `awgctl status` shows `pending restart`.
+- **Restart**: the database keeps the new value, and the container uses it after `docker restart amneziawg`.
 - **New peer configs**: the command needs `--yes`. Then export each peer config again and import it on the device.
 - `fw.nat_interface` is the interface of the `MASQUERADE` rule: a name, or a prefix with `+`. `fw.ipv6_forward_drop` drops IPv6 that peers send through `wg0`.
 
@@ -188,7 +191,7 @@ Tags: `<b 0xHEX>` static bytes, `<r N>` random bytes, `<rd N>` random digits, `<
 
 ## Kernel module
 
-The bundled userspace `amneziawg-go` works without a kernel module. For better throughput, install the [AmneziaWG kernel module](https://github.com/amnezia-vpn/amneziawg-linux-kernel-module) on the host. The container detects it at start-up and logs `AmneziaWG kernel module is active` or `using userspace amneziawg-go`. `awgctl status` shows the datapath.
+The bundled userspace `amneziawg-go` works without a kernel module. For better throughput, install the [AmneziaWG kernel module](https://github.com/amnezia-vpn/amneziawg-linux-kernel-module) on the host. The container detects it at start-up and logs `AmneziaWG kernel module is active` or `using userspace amneziawg-go`.
 
 - The container never calls `modprobe`, so it does not need `SYS_MODULE`. Keep `SYS_MODULE` only on hosts that do not load the iptables NAT modules automatically.
 - The kernel datapath applies only the options that the module knows. A module older than 3.1 rejects `RandomTrailers` and `DisableCookies` with `Unable to modify interface: Invalid argument`. The container gives a warning if it can read `/sys/module/amneziawg/version`.
@@ -200,7 +203,7 @@ Each peer config gets `DNS = <subnet>.1`, the server end of the tunnel. dnsmasq 
 
 dnsmasq runs as the unprivileged `dnsmasq` user. It answers only queries that come through the tunnel (`interface=wg0`), plus loopback in the container. Do not publish port 53.
 
-`awgctl` writes the full dnsmasq config to `/run/dnsmasq/dnsmasq.conf` at each start. There are no templates and no custom dnsmasq options. To change the upstreams, run `awgctl set dns.upstream 9.9.9.9,149.112.112.112`. `awgctl` tests the new config with `dnsmasq --test` and then restarts dnsmasq. The peer configs do not change.
+`awgctl` writes the full dnsmasq config to `/run/dnsmasq/dnsmasq.conf` at each start. There are no templates and no custom dnsmasq options. To change the upstreams, run `awgctl set dns.upstream 9.9.9.9,149.112.112.112`, then restart the container. `awgctl` tests the new config with `dnsmasq --test` before it saves it. The peer configs do not change.
 
 ## Recommended: Unbound on the host
 
@@ -227,7 +230,7 @@ Let dnsmasq forward to Unbound on the host. Peer lookups then leave the server o
              gateway: 172.31.53.1
    ```
 
-   On an existing server, add only the network. After step 4, run `docker exec amneziawg awgctl set dns.upstream 172.31.53.1`.
+   On an existing server, add only the network. After step 4, run `docker exec amneziawg awgctl set dns.upstream 172.31.53.1` and `docker restart amneziawg`.
 
 2. Install Unbound (`sudo apt install unbound`). Make it listen only on the gateway, in `/etc/unbound/unbound.conf.d/amneziawg.conf`:
 
@@ -263,7 +266,6 @@ A new server uses `MTU = 1280` for the server (`net.mtu`) and for each peer conf
 The Docker health check is `awgctl health`. The container is `healthy` while these conditions are true:
 
 - `wg0` is up. A server with no peers is healthy.
-- No saved change waits more than 30 s for its apply.
 - dnsmasq runs and answers on the tunnel address.
 
 The health check does not test the DNS upstream. A failed tunnel gets two more attempts. Docker does not restart unhealthy containers, so use the status for monitoring or with a tool such as autoheal.
@@ -271,7 +273,7 @@ The health check does not test the DNS upstream. A failed tunnel gets two more a
 ```bash
 docker logs amneziawg
 docker exec amneziawg awgctl health          # healthy or not, and why
-docker exec amneziawg awgctl status          # tunnel, peers, pending restart, apply state
+docker exec amneziawg awgctl peer list       # peers, handshakes, traffic
 docker exec amneziawg awg show
 docker exec amneziawg awgctl version
 docker exec amneziawg nslookup example.com 10.13.13.1   # test the upstream
@@ -282,12 +284,11 @@ docker exec amneziawg nslookup example.com 10.13.13.1   # test the upstream
 | Exit code 1 at start, log says `holds files of an older release` | Import the old volume. See [Upgrading](#from-the-releases-before-awgctl) |
 | Exit code 1 at start, log says `public IPv4 address could not be detected` | Set `SERVERURL` and start again |
 | Exit code 1 at start, log says `is not a numeric ID` or `(root) is not supported` | Set `PUID`/`PGID` to the owner of `./config` (`id -u`, `id -g`), not to 0 |
-| `WARNING: ... differs from the saved ...` | The variable applies only on the first start. Run the `awgctl` command in the warning, or remove the variable |
-| `awgctl` exits with code 4, or `health` says `a saved change is not applied` | Run `awgctl apply`, or restart the container. `awgctl status` shows the error |
-| `awgctl status` shows `pending restart` | Restart the container |
+| A variable change has no effect | The variables apply only on the first start. Use `awgctl`, then restart the container |
+| An `awgctl` change has no effect | Restart the container: `docker restart amneziawg` |
 | Custom `SERVERPORT` cannot be reached | Map `SERVERPORT:51820/udp` |
 | Amnezia app shows AWG 1.5 | H1-H4 are integers. Run `awgctl awg version 2.0 --yes`, or select a 3.x version |
-| Connection fails after a parameter change | Give the peers their new configs (`awgctl peer export <peer> --qr`) |
+| Connection fails after a parameter change | Give the peers their new configs (`awgctl peer export <id> --qr`) |
 | An old app cannot connect to the 3.1 default | Use an app with AWG 3.1 support, or run `awgctl awg version 2.0 --yes` |
 | Peers get no DNS | Run `awgctl health`. If dnsmasq answers but names do not resolve, the container cannot reach `dns.upstream` |
 | Connects and pings, but downloads are very slow | Fragmentation. See [Performance and MTU](#performance-and-mtu) |
@@ -300,7 +301,7 @@ docker exec amneziawg nslookup example.com 10.13.13.1   # test the upstream
 - **Backup**: stop the container, copy `/config/amneziawg.db`, and start the container again.
 - **Restore**: stop the container, and put the file back as `/config/amneziawg.db`. If `/config/amneziawg.db-journal` exists, remove it. Then start the container.
 
-Before a schema upgrade, the container writes a copy to `/config/backups/`. An older image cannot open a database of a newer image. To go back to an older image, restore a copy from `/config/backups/`.
+The database schema has no upgrade path. If a new image changes the schema, its release notes tell how to create the database again.
 
 ## containerd and nerdctl (Alpine)
 
@@ -344,12 +345,12 @@ The import keeps the server key, the peer keys, the addresses, the AWG version a
 - `changed`: the report names the keys. Export the peer config again.
 - `unverifiable`: there is no old peer config to compare.
 
-An old `peer_laptop` becomes `laptop`, and `peer1` stays `peer1`. If two old names give the same new name, add `--rename OLD=NEW`. Custom `PostUp`/`PostDown` lines, custom dnsmasq options and site-to-site routes stop the import. To import without them, add `--force-partial`. The import moves the old files to `/config/legacy-<timestamp>/`. It does not import `removed_peers/`.
+An old `peer_laptop` becomes `laptop`, and `peer1` stays `peer1`. Each peer keeps its old address, and the last octet of the address becomes its id. If two old names give the same new name, add `--rename OLD=NEW`. Custom `PostUp`/`PostDown` lines, custom dnsmasq options and site-to-site routes stop the import. To import without them, add `--force-partial`. The import moves the old files to `/config/legacy-<timestamp>/`. It does not import `removed_peers/`.
 
 Breaking changes:
 
 1. The environment applies only on the first start. Use `awgctl` for later changes.
-2. `/config` holds only `amneziawg.db`, `backups/` and, after an import, `legacy-<timestamp>/`.
+2. `/config` holds only `amneziawg.db` and, after an import, `legacy-<timestamp>/`.
 3. `awgctl peer export` replaces `show-peer`, the peer files and `LOG_CONFS`.
 4. `awgctl peer add` replaces `PEERS` and `PERSISTENTKEEPALIVE_PEERS`. A new server has no peers.
 5. Client mode, site-to-site routes (`SERVER_ALLOWEDIPS_PEER_*`), templates, custom firewall rules and custom dnsmasq options are not available.
@@ -365,7 +366,7 @@ Change `image:`, then import the volume as above. The main difference is DNS: th
 
 ## Security
 
-The database and the backups have mode `600`, and the `PUID` user owns `/config`. **Treat write access to `/config` as root access**: the database holds every key, and root processes read it. See [SECURITY.md](SECURITY.md) for details and vulnerability reports.
+The database has mode `600`, and the `PUID` user owns `/config`. **Treat write access to `/config` as root access**: the database holds every key, and root processes read it. See [SECURITY.md](SECURITY.md) for details and vulnerability reports.
 
 ## Links
 

@@ -23,18 +23,13 @@ func TestDefaultPaths(t *testing.T) {
 	p := sys.DefaultPaths()
 	for _, c := range [][2]string{
 		{p.DB(), "/c/amneziawg.db"},
-		{p.Backups(), "/c/backups"},
 		{p.RunDir(), "/r/amneziawg"},
 		{p.WG0(), "/r/amneziawg/wg0.conf"},
-		{p.ActiveJSON(), "/r/amneziawg/active.json"},
-		{p.StateJSON(), "/r/amneziawg/state.json"},
-		{p.Lock(), "/r/awgctl.lock"},
 		{p.Settled(), "/r/amneziawg-settled"},
 		{p.DNSDir(), "/r/dnsmasq"},
 		{p.DNSConf(), "/r/dnsmasq/dnsmasq.conf"},
 		{p.DNSAddress(), "/r/dnsmasq/address"},
 		{p.DNSState(), "/r/dnsmasq-state"},
-		{p.S6DNS(), "/r/service/svc-dnsmasq"},
 	} {
 		if c[0] != c[1] {
 			t.Errorf("got %s, want %s", c[0], c[1])

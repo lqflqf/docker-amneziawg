@@ -86,15 +86,6 @@ func TestBuildDetects(t *testing.T) {
 	}
 }
 
-func TestDrift(t *testing.T) {
-	st, _, _ := Build(context.Background(), rnd(), env(map[string]string{"SERVERURL": "a.example"}), noDetect)
-	got := Drift(st, env(map[string]string{"SERVERURL": "a.example", "SERVERPORT": "51820", "MTU": "1400", "PEERS": "3"}))
-	joined := strings.Join(got, "\n")
-	if len(got) != 2 || !strings.Contains(joined, "awgctl set net.mtu 1400") || !strings.Contains(joined, "PEERS") {
-		t.Fatalf("drift = %v", got)
-	}
-}
-
 func TestDetectIPv4PrefersListOrder(t *testing.T) {
 	slow := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		time.Sleep(100 * time.Millisecond)
@@ -150,40 +141,6 @@ func TestBuildAWGPinErrors(t *testing.T) {
 		_, _, err := Build(context.Background(), rnd(), env(c.env), noDetect)
 		if err == nil || !strings.Contains(err.Error(), c.want) {
 			t.Errorf("%s: got %v, want %q", name, err, c.want)
-		}
-	}
-}
-
-func TestDriftMessages(t *testing.T) {
-	st, _, err := Build(context.Background(), rnd(), env(map[string]string{"SERVERURL": "a.example"}), noDetect)
-	if err != nil {
-		t.Fatal(err)
-	}
-	got := strings.Join(Drift(st, env(map[string]string{
-		"SERVERPORT":           "abc",
-		"ALLOWEDIPS":           "10.0.0.0/8, 192.168.0.0/16",
-		"AWG_VERSION":          "2.0",
-		"AWG_JC":               st.AWG["jc"] + "0",
-		"AWG_JMIN":             st.AWG["jmin"],
-		"AWG_DISABLE_COOKIES":  "no",
-		"AWG_RANDOM_TRAILERS":  "true",
-		"HEALTHCHECK_DNS_NAME": "x",
-	})), "\n")
-	for _, want := range []string{
-		"SERVERPORT=abc differs from the saved server.endpoint_port (51820)",
-		"awgctl set peer.default_allowed_ips '10.0.0.0/8, 192.168.0.0/16'",
-		"AWG_VERSION=2.0 differs from the saved version 3.1",
-		"AWG_JC differs from the saved value",
-		"HEALTHCHECK_DNS_NAME is not supported",
-	} {
-		if !strings.Contains(got, want) {
-			t.Errorf("missing %q in:\n%s", want, got)
-		}
-	}
-	// Same values in another spelling are not drift.
-	for _, no := range []string{"AWG_JMIN", "AWG_DISABLE_COOKIES", "AWG_RANDOM_TRAILERS"} {
-		if strings.Contains(got, no) {
-			t.Errorf("%s reported as drift:\n%s", no, got)
 		}
 	}
 }

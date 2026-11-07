@@ -27,7 +27,7 @@ func (r renameFlag) Set(v string) error {
 
 // keepInConfig are the entries of /config that are not legacy files.
 func keepInConfig(name string) bool {
-	return name == "amneziawg.db" || name == "backups" || strings.HasPrefix(name, "legacy-") ||
+	return name == "amneziawg.db" || strings.HasPrefix(name, "legacy-") ||
 		strings.HasPrefix(name, ".amneziawg.db")
 }
 
@@ -102,17 +102,7 @@ func (a *App) cmdImportLegacy(ctx context.Context, args []string) error {
 			return err
 		}
 		for _, p := range st.Peers {
-			if _, err := tx.AddPeer(p); err != nil {
-				return err
-			}
-		}
-		for k, v := range map[string]string{
-			"created_at":  time.Now().UTC().Format(time.RFC3339),
-			"created_by":  Version,
-			"seeded_from": "import-legacy",
-			"generation":  "1",
-		} {
-			if err := tx.SetMeta(k, v); err != nil {
+			if err := tx.AddPeer(p); err != nil {
 				return err
 			}
 		}
@@ -123,21 +113,32 @@ func (a *App) cmdImportLegacy(ctx context.Context, args []string) error {
 	}
 	fmt.Fprintf(a.Out, "imported: %s\n", a.P.DB())
 	if filepath.Clean(dir) == filepath.Clean(a.P.Config) {
-		dst := filepath.Join(a.P.Config, "legacy-"+time.Now().UTC().Format("20060102T150405Z"))
-		if err := os.Mkdir(dst, 0o700); err != nil {
-			return err
+		// The database is saved: a failed move is only a warning, because a
+		// second run refuses the existing database.
+		if dst, err := a.archiveLegacy(); err != nil {
+			fmt.Fprintf(a.Out, "WARNING:  the old files were not all moved (%v). Move the rest out of %s by hand\n", err, a.P.Config)
+		} else {
+			fmt.Fprintf(a.Out, "moved:    the old files to %s\n", dst)
 		}
-		entries, _ := os.ReadDir(a.P.Config)
-		for _, e := range entries {
-			if keepInConfig(e.Name()) {
-				continue
-			}
-			if err := os.Rename(filepath.Join(a.P.Config, e.Name()), filepath.Join(dst, e.Name())); err != nil {
-				return fmt.Errorf("move %s to %s: %w", e.Name(), dst, err)
-			}
-		}
-		fmt.Fprintf(a.Out, "moved:    the old files to %s\n", dst)
 	}
 	fmt.Fprintln(a.Out, "next:     start the container as usual")
 	return nil
+}
+
+// archiveLegacy moves the old files of /config into a new legacy-<time> directory.
+func (a *App) archiveLegacy() (string, error) {
+	dst := filepath.Join(a.P.Config, "legacy-"+time.Now().UTC().Format("20060102T150405Z"))
+	if err := os.Mkdir(dst, 0o700); err != nil {
+		return "", err
+	}
+	entries, _ := os.ReadDir(a.P.Config)
+	for _, e := range entries {
+		if keepInConfig(e.Name()) {
+			continue
+		}
+		if err := os.Rename(filepath.Join(a.P.Config, e.Name()), filepath.Join(dst, e.Name())); err != nil {
+			return "", fmt.Errorf("move %s to %s: %w", e.Name(), dst, err)
+		}
+	}
+	return dst, nil
 }

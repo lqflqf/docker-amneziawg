@@ -9,14 +9,11 @@ import (
 	"io"
 	"math/rand/v2"
 	"os"
-	"strings"
-	"time"
 
-	"github.com/lqflqf/docker-amneziawg/internal/apply"
 	"github.com/lqflqf/docker-amneziawg/internal/awg"
+	"github.com/lqflqf/docker-amneziawg/internal/check"
 	"github.com/lqflqf/docker-amneziawg/internal/config"
 	"github.com/lqflqf/docker-amneziawg/internal/fsafe"
-	"github.com/lqflqf/docker-amneziawg/internal/lock"
 	"github.com/lqflqf/docker-amneziawg/internal/seed"
 	"github.com/lqflqf/docker-amneziawg/internal/store"
 	"github.com/lqflqf/docker-amneziawg/internal/sys"
@@ -24,11 +21,10 @@ import (
 
 // Exit codes.
 const (
-	ExitOK         = 0
-	ExitError      = 1 // nothing changed
-	ExitUsage      = 2
-	ExitNeedYes    = 3
-	ExitNotApplied = 4 // saved, not applied
+	ExitOK      = 0
+	ExitError   = 1 // nothing changed
+	ExitUsage   = 2
+	ExitNeedYes = 3
 )
 
 // Version is set at build time with -ldflags "-X .../cli.Version=...".
@@ -36,15 +32,14 @@ var Version = "dev"
 
 // App is awgctl with its outside world.
 type App struct {
-	P       sys.Paths
-	R       sys.Runner
-	Out     io.Writer
-	Err     io.Writer
-	Getenv  seed.Getenv
-	Detect  seed.Detector
-	Rand    *rand.Rand
-	Owner   func() (fsafe.Owner, error)
-	LockTTL time.Duration
+	P      sys.Paths
+	R      sys.Runner
+	Out    io.Writer
+	Err    io.Writer
+	Getenv seed.Getenv
+	Detect seed.Detector
+	Rand   *rand.Rand
+	Owner  func() (fsafe.Owner, error)
 }
 
 // New returns the real App.
@@ -58,9 +53,8 @@ func New() *App {
 			v, ok := os.LookupEnv(k)
 			return v, ok && v != ""
 		},
-		Rand:    awg.NewRand(),
-		Owner:   fsafe.LookupOwner,
-		LockTTL: 2 * time.Minute,
+		Rand:  awg.NewRand(),
+		Owner: fsafe.LookupOwner,
 	}
 	a.Detect = seed.Retrying(func(ctx context.Context) (string, error) {
 		return seed.DetectIPv4(ctx, seed.DetectURLs, nil)
@@ -68,7 +62,7 @@ func New() *App {
 	return a
 }
 
-func (a *App) env() apply.Env { return apply.Env{P: a.P, R: a.R} }
+func (a *App) env() check.Env { return check.Env{R: a.R} }
 
 func (a *App) logf(format string, args ...any) {
 	fmt.Fprintf(a.Out, "**** "+format+" ****\n", args...)
@@ -96,12 +90,12 @@ func needYes(format string, args ...any) error {
 
 const usage = `Usage: awgctl <command> [arguments]
 
+Each change is saved in the database. Restart the container to apply it.
+
 System:
-  init                                  s6 start-up: seed or check the DB, render /run
+  init                                  s6 start-up: create or check the DB, render /run
   health                                Docker health check
-  status                                tunnel, peers, pending restart and apply state
-  apply                                 apply the saved state again (after exit code 4)
-  version                               versions of awgctl, awg, amneziawg-go and the schema
+  version                               versions of awgctl, awg and amneziawg-go
 
 Settings (not AWG):
   get [key] [--show-secrets]
@@ -115,22 +109,22 @@ AmneziaWG parameters:
   awg set <key>=<value>... [--yes]        (s=<n> sets S1-S4 together)
   awg regenerate [keys...] --yes
 
-Peers (<peer> = id, #id, name, or name:<digits>):
-  peer add <name> [--no-keepalive] [--octet N] [--qr]
+Peers (<id> = the peer id, a number 2-254, also the last octet of its address):
+  peer add [--name NAME] [--no-keepalive] [--qr]
+  peer add-many <count> [--no-keepalive]
   peer list [--json]
-  peer show <peer>
-  peer export <peer> [--qr | --png FILE | --conf FILE]
-  peer rename <peer> <new-name>
-  peer set <peer> --keepalive on|off
-  peer disable <peer> | peer enable <peer>
-  peer rotate <peer> --yes
-  peer rm <peer> --yes
+  peer show <id>
+  peer export <id> [--qr | --png FILE | --conf FILE]
+  peer rename <id> <new-name> | peer rename <id> --clear
+  peer set <id> --keepalive on|off
+  peer disable <id> | peer enable <id>
+  peer rotate <id> --yes
+  peer rm <id> --yes
 
-Migration:
+Migration (run with: docker run --rm --entrypoint awgctl -v <dir>:/config <image>):
   import-legacy <dir> [--dry-run] [--force-partial] [--rename OLD=NEW]...
 
-Exit codes: 0 done, 1 error (nothing changed), 2 usage, 3 refused without --yes,
-4 saved but not applied (run awgctl apply or restart the container).
+Exit codes: 0 done, 1 error (nothing changed), 2 usage, 3 refused without --yes.
 `
 
 // Main runs one command and returns the exit code.
@@ -166,10 +160,6 @@ func (a *App) dispatch(ctx context.Context, args []string) error {
 		return a.cmdInit(ctx, rest)
 	case "health":
 		return a.cmdHealth(ctx, rest)
-	case "status":
-		return a.cmdStatus(ctx, rest)
-	case "apply":
-		return a.cmdApply(ctx, rest)
 	case "version":
 		return a.cmdVersion(ctx, rest)
 	case "get":
@@ -213,13 +203,13 @@ func (a *App) openDB() (*store.DB, error) {
 	if err != nil {
 		return nil, fmt.Errorf("volume owner: %w", err)
 	}
-	if err := fsafe.CheckConfig(a.P.Config, a.P.DB(), a.P.Backups(), false, o); err != nil {
+	if err := fsafe.CheckConfig(a.P.Config, a.P.DB(), false, o); err != nil {
 		return nil, err
 	}
 	if _, err := os.Lstat(a.P.DB()); err != nil {
 		return nil, fmt.Errorf("no database at %s: the container has not finished its first start", a.P.DB())
 	}
-	return store.Open(a.P.DB(), a.P.Backups())
+	return store.Open(a.P.DB())
 }
 
 func (a *App) view(ctx context.Context) (*config.State, error) {
@@ -237,28 +227,21 @@ func (a *App) view(ctx context.Context) (*config.State, error) {
 	return st, err
 }
 
-func (a *App) lock(ctx context.Context) (*lock.Lock, error) {
-	ctx, cancel := context.WithTimeout(ctx, a.LockTTL)
-	defer cancel()
-	return lock.Acquire(ctx, a.P.Lock())
-}
-
 // plan is what a mutation reports before the commit.
 type plan struct {
-	class   config.Class
+	noop    bool   // nothing changes; nothing is saved
 	reissue string // who needs a new conf ("" = nobody)
 	summary []string
 }
 
-// change runs one admin command: lock, load, mutate in memory, refuse without
-// --yes when peers need new confs, validate everything with the real parsers,
-// commit, then apply and record the result.
+// errNoop rolls back a mutation that changes nothing.
+var errNoop = errors.New("no change")
+
+// change runs one admin command in one write transaction: load, mutate in
+// memory, refuse without --yes when peers need new confs, check everything
+// with the real parsers, commit. The running system does not change: the
+// next container start applies the saved configuration.
 func (a *App) change(ctx context.Context, yes bool, mutate func(*config.State) (plan, error)) error {
-	l, err := a.lock(ctx)
-	if err != nil {
-		return err
-	}
-	defer l.Release()
 	db, err := a.openDB()
 	if err != nil {
 		return err
@@ -266,7 +249,6 @@ func (a *App) change(ctx context.Context, yes bool, mutate func(*config.State) (
 	defer db.Close()
 
 	var pl plan
-	var gen int64
 	err = db.Update(ctx, func(tx *store.Tx) error {
 		old, err := config.Load(tx)
 		if err != nil {
@@ -275,6 +257,9 @@ func (a *App) change(ctx context.Context, yes bool, mutate func(*config.State) (
 		d := old.Clone()
 		if pl, err = mutate(d); err != nil {
 			return err
+		}
+		if pl.noop {
+			return errNoop
 		}
 		if pl.reissue != "" && !yes {
 			return needYes("%s needs a new conf after this change; run again with --yes", pl.reissue)
@@ -285,95 +270,50 @@ func (a *App) change(ctx context.Context, yes bool, mutate func(*config.State) (
 		if err := d.SaveSettings(tx); err != nil {
 			return err
 		}
-		if err := syncPeers(tx, old, d); err != nil {
-			return err
-		}
-		gen, err = tx.BumpGeneration()
-		return err
+		return syncPeers(tx, old, d)
 	})
-	if err != nil {
+	if err != nil && !errors.Is(err, errNoop) {
 		return err
 	}
 	for _, s := range pl.summary {
 		fmt.Fprintln(a.Out, s)
 	}
-	return a.applySaved(ctx, db, gen, pl)
-}
-
-// applySaved applies the committed generation and records the result.
-func (a *App) applySaved(ctx context.Context, db *store.DB, gen int64, pl plan) error {
-	var d *config.State
-	if err := db.View(ctx, func(tx *store.Tx) error {
-		var err error
-		d, err = config.Load(tx)
-		return err
-	}); err != nil {
-		return &exitError{ExitNotApplied, fmt.Errorf("saved, not applied: %w", err)}
-	}
-	e := a.env()
-	active, aerr := e.ReadActive()
-	var pending []string
-	if aerr == nil {
-		pending = config.PendingRestart(d, active)
-	}
-	applyErr := aerr
-	if applyErr == nil {
-		applyErr = e.Live(ctx, d)
-	}
-	recErr := e.Record(gen, applyErr, pending)
-	if recErr != nil {
-		recErr = fmt.Errorf("could not write the apply state, so the health check does not see this change: %w. Run awgctl apply", recErr)
-	}
-	switch {
-	case applyErr == nil:
-		if pl.class.Has(config.Live) || pl.class.Has(config.DNS) {
-			fmt.Fprintln(a.Out, "Applied.")
-		}
-	case errors.Is(applyErr, apply.ErrNotUp):
-		fmt.Fprintln(a.Out, "Saved. wg0 is not up; the change is applied when the tunnel starts.")
-	default:
-		return &exitError{ExitNotApplied, errors.Join(
-			fmt.Errorf("saved, not applied: %v. Run awgctl apply or restart the container", applyErr), recErr)}
-	}
-	if len(pending) > 0 {
-		fmt.Fprintf(a.Out, "Pending restart: %s. Restart the container to apply.\n", strings.Join(pending, ", "))
+	if pl.noop {
+		return nil
 	}
 	if pl.reissue != "" {
-		fmt.Fprintf(a.Out, "New conf needed for %s: awgctl peer export <peer> --qr\n", pl.reissue)
+		fmt.Fprintf(a.Out, "New conf needed for %s after the restart: awgctl peer export <id> --qr\n", pl.reissue)
 	}
-	if recErr != nil {
-		return &exitError{ExitNotApplied, recErr}
-	}
+	fmt.Fprintln(a.Out, "Saved. Restart the container to apply.")
 	return nil
 }
 
-// syncPeers writes the peer changes between old and d: new peers (ID 0) are
-// inserted, missing ones deleted, changed ones updated.
+// syncPeers writes the peer changes between old and d: missing peers are
+// deleted first, then peers with an id that old does not have are inserted
+// and changed ones updated.
 func syncPeers(tx *store.Tx, old, d *config.State) error {
-	byID := map[int64]store.Peer{}
+	keep := map[int]bool{}
+	for _, p := range d.Peers {
+		keep[p.ID] = true
+	}
+	byID := map[int]store.Peer{}
 	for _, p := range old.Peers {
 		byID[p.ID] = p
-	}
-	keep := map[int64]bool{}
-	for i, p := range d.Peers {
-		if p.ID == 0 {
-			id, err := tx.AddPeer(p)
-			if err != nil {
+		if !keep[p.ID] {
+			if err := tx.DeletePeer(p.ID); err != nil {
 				return err
 			}
-			d.Peers[i].ID = id
-			continue
 		}
-		keep[p.ID] = true
-		if o := byID[p.ID]; o != p {
+	}
+	for _, p := range d.Peers {
+		o, ok := byID[p.ID]
+		switch {
+		case !ok:
+			if err := tx.AddPeer(p); err != nil {
+				return err
+			}
+		case o != p:
 			if err := tx.UpdatePeer(p); err != nil {
-				return err
-			}
-		}
-	}
-	for id := range byID {
-		if !keep[id] {
-			if err := tx.DeletePeer(id); err != nil {
 				return err
 			}
 		}

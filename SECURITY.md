@@ -11,11 +11,11 @@ Do **not** open a public issue. Send a private report through GitHub: in the rep
 ## What the image does
 
 - **Pinned supply chain**: the Dockerfile pins base images by digest and upstream sources by commit. `go.sum` pins the Go modules. Images have SLSA provenance and an SBOM. CI fails on fixable critical vulnerabilities.
-- **Private secrets**: the database `/config/amneziawg.db` and the copies in `/config/backups/` have mode `600`. The rendered `wg0.conf` in `/run/amneziawg/` has mode `600`. The container does not keep peer configs or QR codes on disk, and it never writes them to the log. `awgctl get` and `awgctl awg show` hide secrets unless you add `--show-secrets`.
+- **Private secrets**: the database `/config/amneziawg.db` has mode `600`. The rendered `wg0.conf` in `/run/amneziawg/` has mode `600`. The container does not keep peer configs or QR codes on disk, and it never writes them to the log. `awgctl get` and `awgctl awg show` hide secrets unless you add `--show-secrets`.
 - **No user commands**: the container makes all confs from the database. There are no templates. The only `PostUp`/`PostDown` lines are the built-in firewall rules. Their one variable, `fw.nat_interface`, must match a strict pattern, and `awgctl` examines it again at each start.
 - **Least-privilege DNS**: dnsmasq runs as the unprivileged `dnsmasq` user, not as `PUID`. Thus dnsmasq cannot write the database. It answers only queries that come through the tunnel (`interface=wg0`).
 - **Checked changes**: before `awgctl` saves a change, it checks the full config with the `awg` parser, `dnsmasq --test` and key checks. At each start, it examines each value in the database again. It gets the auto-detected public address through HTTPS and checks it.
-- **No symlinks**: `awgctl` refuses a symlink in place of `/config`, the database, its journal or `backups/`. It never follows a symlink when it changes owners in `/config`.
+- **No symlinks**: `awgctl` refuses a symlink in place of `/config`, the database or its journal. It never follows a symlink when it changes owners in `/config`.
 
 The container runs as root, because it needs `NET_ADMIN`. The `abc` user (`PUID`:`PGID`) only owns `/config` and runs no process.
 

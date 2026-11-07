@@ -388,7 +388,7 @@ func Analyze(opts Options) (*Report, error) {
 			block("%s and %s both map to the name %q; use --rename %s=<new name>", other, id, name, id)
 		}
 		names[name] = id
-		st.Peers = append(st.Peers, store.Peer{Name: name, Octet: octet, PrivateKey: ppriv, PublicKey: ppub,
+		st.Peers = append(st.Peers, store.Peer{ID: octet, Name: name, PrivateKey: ppriv, PublicKey: ppub,
 			PresharedKey: psk, Keepalive: srv.Get("PersistentKeepalive") != "", Enabled: true})
 		if pc, err := readConf(filepath.Join(pdir, id+".conf")); err == nil {
 			legacyConfs[name] = pc
@@ -464,7 +464,7 @@ func Analyze(opts Options) (*Report, error) {
 		}
 	}
 
-	sort.Slice(st.Peers, func(i, j int) bool { return st.Peers[i].Octet < st.Peers[j].Octet })
+	sort.Slice(st.Peers, func(i, j int) bool { return st.Peers[i].ID < st.Peers[j].ID })
 	if errs, warns := st.Validate(); len(errs) > 0 {
 		for _, e := range errs {
 			block("%v", e)
@@ -495,7 +495,7 @@ func Analyze(opts Options) (*Report, error) {
 				rep.Verdicts = append(rep.Verdicts, Verdict{Name: p.Name, Result: "same"})
 			}
 		}
-		if srv, err := render.Server(st, config.ActiveOf(st)); err == nil {
+		if srv, err := render.Server(st); err == nil {
 			for _, k := range conf.Diff(wg0, srv, normalizeForDiff) {
 				// The rules are split into one command per line now, and the
 				// server address gained its /24; neither changes the tunnel.

@@ -12,16 +12,13 @@ import (
 	"regexp"
 	"strings"
 	"testing"
-	"time"
 
 	_ "modernc.org/sqlite"
 
-	"github.com/lqflqf/docker-amneziawg/internal/apply"
 	"github.com/lqflqf/docker-amneziawg/internal/awg"
 	"github.com/lqflqf/docker-amneziawg/internal/config"
 	"github.com/lqflqf/docker-amneziawg/internal/fsafe"
 	"github.com/lqflqf/docker-amneziawg/internal/keys"
-	"github.com/lqflqf/docker-amneziawg/internal/lock"
 	"github.com/lqflqf/docker-amneziawg/internal/store"
 	"github.com/lqflqf/docker-amneziawg/internal/sys"
 	"github.com/lqflqf/docker-amneziawg/internal/sys/systest"
@@ -49,8 +46,6 @@ func newHarness(t *testing.T) *harness {
 		Rand:   rand.New(rand.NewPCG(7, 8)),
 		Owner:  func() (fsafe.Owner, error) { return fsafe.Owner{UID: os.Getuid(), GID: os.Getgid()}, nil },
 	}
-	h.app.LockTTL = 5e9
-	os.MkdirAll(h.app.P.S6DNS(), 0o755)
 	return h
 }
 
@@ -64,13 +59,11 @@ func (h *harness) run(want int, args ...string) string {
 	return h.out.String()
 }
 
-// boot runs init and marks wg0 as up, the way svc-amneziawg would.
+// boot runs init and marks wg0 as up, the way a container start would.
 func (h *harness) boot() {
 	h.t.Helper()
 	h.run(ExitOK, "init")
 	h.fake.Up = true
-	os.WriteFile(h.app.P.Settled(), nil, 0o644)
-	h.run(ExitOK, "apply")
 }
 
 func (h *harness) state() *config.State {
@@ -82,9 +75,22 @@ func (h *harness) state() *config.State {
 	return st
 }
 
-func (h *harness) applyState() apply.State {
-	s, _ := apply.Env{P: h.app.P}.ReadState()
-	return s
+func (h *harness) peer(id int) store.Peer {
+	h.t.Helper()
+	p, err := h.state().FindPeer(id)
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	return *p
+}
+
+func (h *harness) wg0() string {
+	h.t.Helper()
+	b, err := os.ReadFile(h.app.P.WG0())
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	return string(b)
 }
 
 func TestInitSeedsAndRendersRuntime(t *testing.T) {
@@ -93,7 +99,7 @@ func TestInitSeedsAndRendersRuntime(t *testing.T) {
 	if !strings.Contains(out, "Config initialization finished") || !strings.Contains(out, "No peers yet") {
 		t.Fatalf("init output:\n%s", out)
 	}
-	for _, p := range []string{h.app.P.DB(), h.app.P.WG0(), h.app.P.ActiveJSON(), h.app.P.StateJSON(), h.app.P.DNSConf(), h.app.P.DNSAddress()} {
+	for _, p := range []string{h.app.P.DB(), h.app.P.WG0(), h.app.P.DNSConf(), h.app.P.DNSAddress()} {
 		if _, err := os.Stat(p); err != nil {
 			t.Errorf("missing %s", p)
 		}
@@ -108,11 +114,10 @@ func TestInitSeedsAndRendersRuntime(t *testing.T) {
 	if strings.TrimSpace(string(b)) != "10.13.13.1" {
 		t.Errorf("dns address %q", b)
 	}
-	// A second start does not change the DB, and warns about env drift.
-	gen := h.state().Generation
+	// A second start does not read the env again.
 	h.env["SERVERPORT"] = "443"
 	out = h.run(ExitOK, "init")
-	if !strings.Contains(out, "SERVERPORT=443 differs") || h.state().Generation != gen {
+	if strings.Contains(out, "SERVERPORT") || h.state().Get("server.endpoint_port") != "51820" {
 		t.Fatalf("second start:\n%s", out)
 	}
 }
@@ -137,120 +142,137 @@ func TestInitRefusesLegacyVolumeAndBadDB(t *testing.T) {
 	}
 }
 
-func TestPeerLifecycleLive(t *testing.T) {
+func TestPeerLifecycle(t *testing.T) {
 	h := newHarness(t)
 	h.boot()
-	out := h.run(ExitOK, "peer", "add", "phone")
-	if !strings.Contains(out, "Peer #1 phone added") || !strings.Contains(out, "Applied.") {
-		t.Fatalf("add:\n%s", out)
+	before := h.wg0()
+	out := h.run(ExitOK, "peer", "add", "--name", "phone")
+	for _, want := range []string{`Peer 2 "phone" added: address 10.13.13.2`, "Saved. Restart the container to apply.",
+		"Export: awgctl peer export 2 --qr"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("add: no %q:\n%s", want, out)
+		}
 	}
-	h.run(ExitOK, "peer", "add", "laptop", "--no-keepalive")
-	if len(h.fake.Peers) != 2 || !h.fake.Called("awg syncconf wg0") {
-		t.Fatalf("wg0 peers %v", h.fake.Peers)
+	if out := h.run(ExitOK, "peer", "add", "--no-keepalive"); !strings.Contains(out, "Peer 3 added: address 10.13.13.3") {
+		t.Fatalf("add without a name:\n%s", out)
 	}
-	h.run(ExitError, "peer", "add", "phone")     // duplicate name
-	h.run(ExitUsage, "peer", "add", "bad name!") // invalid name
-	h.run(ExitOK, "peer", "disable", "phone")
-	if len(h.fake.Peers) != 1 {
-		t.Fatalf("disabled peer still in wg0: %v", h.fake.Peers)
+	if p := h.peer(3); p.Name != "peer 3" || p.Keepalive {
+		t.Fatalf("default peer %+v", p)
 	}
-	h.run(ExitOK, "peer", "enable", "1")
-	h.run(ExitOK, "peer", "rename", "#1", "phone2")
-	h.run(ExitNeedYes, "peer", "rm", "phone2")
-	h.run(ExitNeedYes, "peer", "rotate", "laptop")
-	h.run(ExitOK, "peer", "rotate", "laptop", "--yes")
-	h.run(ExitOK, "peer", "rm", "phone2", "--yes")
+	h.run(ExitError, "peer", "add", "--name", "phone")     // duplicate name
+	h.run(ExitUsage, "peer", "add", "--name", "bad name!") // invalid name
+	h.run(ExitError, "peer", "add", "--name", "peer 9")    // the default name of another id
+	h.run(ExitOK, "peer", "disable", "2")
+	if h.peer(2).Enabled {
+		t.Fatal("peer 2 is still enabled")
+	}
+	h.run(ExitOK, "peer", "enable", "2")
+	h.run(ExitOK, "peer", "rename", "2", "my phone")
+	h.run(ExitOK, "peer", "rename", "3", "laptop")
+	h.run(ExitOK, "peer", "rename", "3", "--clear")
+	if a, b := h.peer(2).Name, h.peer(3).Name; a != "my phone" || b != "peer 3" {
+		t.Fatalf("names %q %q", a, b)
+	}
+	h.run(ExitNeedYes, "peer", "rm", "2")
+	h.run(ExitNeedYes, "peer", "rotate", "3")
+	key := h.peer(3).PublicKey
+	if out := h.run(ExitOK, "peer", "rotate", "3", "--yes"); !strings.Contains(out, "New conf needed for peer 3 after the restart") {
+		t.Fatalf("rotate:\n%s", out)
+	}
+	if h.peer(3).PublicKey == key {
+		t.Fatal("rotate kept the key")
+	}
+	h.run(ExitOK, "peer", "rm", "2", "--yes")
 	st := h.state()
-	if len(st.Peers) != 1 || st.Peers[0].Name != "laptop" {
+	if len(st.Peers) != 1 || st.Peers[0].ID != 3 {
 		t.Fatalf("peers %+v", st.Peers)
 	}
-	// The id of a deleted peer is not used again.
-	h.run(ExitOK, "peer", "add", "tablet")
-	if p, _ := h.state().FindPeer("tablet"); p.ID != 3 {
-		t.Fatalf("tablet got id %d, want 3", p.ID)
+	// The id is the address: a new peer takes the lowest free one.
+	h.run(ExitOK, "peer", "add", "--name", "tablet")
+	if p := h.peer(2); p.Name != "tablet" {
+		t.Fatalf("peer 2 is %+v, want tablet", p)
 	}
-	if out := h.run(ExitOK, "peer", "export", "tablet"); !strings.Contains(out, "Endpoint = vpn.example.com:51820") {
+	if out := h.run(ExitOK, "peer", "export", "2"); !strings.Contains(out, "Endpoint = vpn.example.com:51820") {
 		t.Fatalf("export:\n%s", out)
 	}
-	if out := h.run(ExitOK, "peer", "list", "--json"); !strings.Contains(out, `"name": "tablet"`) {
+	if out := h.run(ExitOK, "peer", "list", "--json"); !strings.Contains(out, `"name": "tablet"`) || strings.Contains(out, "created_at") {
 		t.Fatalf("list:\n%s", out)
 	}
-	if s := h.applyState(); s.Pending() {
-		t.Fatalf("apply state pending: %+v", s)
+	// Nothing reaches the running system before the restart.
+	if h.wg0() != before || h.fake.Called("awg syncconf") || h.fake.Called("s6-svc") {
+		t.Fatalf("a peer command changed the running system:\n%s", h.wg0())
+	}
+	h.boot()
+	if w := h.wg0(); !strings.Contains(w, "# #2 tablet") || !strings.Contains(w, "# #3 peer 3") ||
+		!strings.Contains(w, "AllowedIPs = 10.13.13.2/32") {
+		t.Fatalf("restart did not apply the peers:\n%s", w)
 	}
 }
 
-func TestPendingRestartNeverReachesLiveInterface(t *testing.T) {
+func TestPeerAddMany(t *testing.T) {
 	h := newHarness(t)
 	h.boot()
-	h.run(ExitOK, "peer", "add", "phone")
-	before, _ := os.ReadFile(h.app.P.WG0())
+	h.run(ExitOK, "peer", "add", "--name", "phone")
+	out := h.run(ExitOK, "peer", "add-many", "3", "--no-keepalive")
+	for _, want := range []string{"Peer 3 added: address 10.13.13.3", "Peer 5 added: address 10.13.13.5",
+		"3 peer(s) added. Export each one: awgctl peer export <id> --qr", "Saved. Restart the container to apply."} {
+		if !strings.Contains(out, want) {
+			t.Errorf("add-many: no %q:\n%s", want, out)
+		}
+	}
+	h.run(ExitOK, "peer", "rm", "4", "--yes")
+	h.run(ExitOK, "peer", "add-many", "2")
+	var ids []int
+	for _, p := range h.state().Peers {
+		ids = append(ids, p.ID)
+		if p.ID != 2 && p.Name != fmt.Sprintf("peer %d", p.ID) {
+			t.Errorf("peer %d is named %q", p.ID, p.Name)
+		}
+	}
+	if fmt.Sprint(ids) != "[2 3 4 5 6]" {
+		t.Fatalf("ids %v, want [2 3 4 5 6]", ids)
+	}
+	// All or nothing: too few free addresses change nothing.
+	if out := h.run(ExitError, "peer", "add-many", "249"); !strings.Contains(out, "only 248 free address(es)") {
+		t.Fatalf("too many:\n%s", out)
+	}
+	if n := len(h.state().Peers); n != 5 {
+		t.Fatalf("%d peers after a refused add-many", n)
+	}
+	h.run(ExitOK, "peer", "add-many", "248")
+	if n := len(h.state().Peers); n != config.MaxPeers {
+		t.Fatalf("%d peers, want %d", n, config.MaxPeers)
+	}
+	h.run(ExitError, "peer", "add")
+}
+
+func TestChangesApplyAtRestart(t *testing.T) {
+	h := newHarness(t)
+	h.boot()
+	h.run(ExitOK, "peer", "add")
+	before := h.wg0()
 	h.run(ExitNeedYes, "set", "net.subnet", "10.77.0.0/24")
-	out := h.run(ExitOK, "set", "net.subnet", "10.77.0.0/24", "--yes")
-	if !strings.Contains(out, "Pending restart: net.subnet") {
+	if out := h.run(ExitOK, "set", "net.subnet", "10.77.0.0/24", "--yes"); !strings.Contains(out, "Saved. Restart the container to apply.") {
 		t.Fatalf("set:\n%s", out)
 	}
 	h.run(ExitOK, "awg", "set", "jc=99", "--yes")
-	h.run(ExitOK, "peer", "add", "laptop")
-	after, _ := os.ReadFile(h.app.P.WG0())
-	iface := func(b []byte) string { s := string(b); return s[:strings.Index(s, "[Peer]")] }
-	if iface(before) != iface(after) {
-		t.Fatalf("a peer command changed [Interface]:\n%s\n---\n%s", iface(before), iface(after))
+	h.run(ExitOK, "set", "dns.upstream", "9.9.9.9")
+	if h.wg0() != before {
+		t.Fatal("a command changed wg0.conf before the restart")
 	}
-	if !strings.Contains(string(after), "AllowedIPs = 10.13.13.3/32") {
-		t.Fatalf("the new peer must use the active subnet:\n%s", after)
+	if b, _ := os.ReadFile(h.app.P.DNSConf()); strings.Contains(string(b), "9.9.9.9") {
+		t.Fatal("a command changed the dnsmasq conf before the restart")
 	}
-	if out := h.run(ExitOK, "status"); !strings.Contains(out, "pending     restart for: awg.jc, net.subnet") {
-		t.Fatalf("status:\n%s", out)
-	}
-	// After the restart the pending values are active.
 	h.boot()
-	b, _ := os.ReadFile(h.app.P.WG0())
-	if !strings.Contains(string(b), "Address = 10.77.0.1/24") || !strings.Contains(string(b), "Jc = 99") {
-		t.Fatalf("restart did not apply:\n%s", b)
+	w := h.wg0()
+	if !strings.Contains(w, "Address = 10.77.0.1/24") || !strings.Contains(w, "Jc = 99") || !strings.Contains(w, "AllowedIPs = 10.77.0.2/32") {
+		t.Fatalf("restart did not apply:\n%s", w)
 	}
-}
-
-func TestApplyFailureIsVisible(t *testing.T) {
-	h := newHarness(t)
-	h.boot()
-	h.run(ExitOK, "peer", "add", "phone")
-	h.fake.Fail["awg syncconf"] = "Unable to modify interface"
-	out := h.run(ExitNotApplied, "peer", "add", "laptop")
-	if !strings.Contains(out, "saved, not applied") {
-		t.Fatalf("output:\n%s", out)
+	if b, _ := os.ReadFile(h.app.P.DNSConf()); !strings.Contains(string(b), "server=9.9.9.9\n") {
+		t.Fatalf("restart did not apply the dnsmasq conf:\n%s", b)
 	}
-	if s := h.applyState(); !s.Pending() || s.ApplyError == "" {
-		t.Fatalf("state %+v", s)
-	}
-	if len(h.state().Peers) != 2 {
-		t.Fatal("the saved peer is missing from the DB")
-	}
-	delete(h.fake.Fail, "awg syncconf")
-	h.run(ExitOK, "apply")
-	if s := h.applyState(); s.Pending() || len(h.fake.Peers) != 2 {
-		t.Fatalf("after apply: %+v %v", s, h.fake.Peers)
-	}
-	// A removed peer that stays in wg0 is a failure, not a success.
-	h.fake.Ghost = h.fake.Peers[0]
-	h.run(ExitNotApplied, "peer", "rm", "phone", "--yes")
-}
-
-func TestChangesWhileDownAreAppliedLater(t *testing.T) {
-	h := newHarness(t)
-	h.run(ExitOK, "init")
-	out := h.run(ExitOK, "peer", "add", "phone")
-	if !strings.Contains(out, "applied when the tunnel starts") || h.fake.Called("awg syncconf") {
-		t.Fatalf("down:\n%s", out)
-	}
-	if !h.applyState().Pending() {
-		t.Fatal("not pending while down")
-	}
-	h.fake.Up = true
-	os.WriteFile(h.app.P.Settled(), nil, 0o644)
-	h.run(ExitOK, "apply")
-	if h.applyState().Pending() || len(h.fake.Peers) != 1 {
-		t.Fatal("apply after up did not apply")
+	if b, _ := os.ReadFile(h.app.P.DNSAddress()); strings.TrimSpace(string(b)) != "10.77.0.1" {
+		t.Fatalf("dns address %q", b)
 	}
 }
 
@@ -262,10 +284,6 @@ func TestSettingsCommands(t *testing.T) {
 	h.run(ExitUsage, "set", "nope", "1")
 	h.run(ExitError, "set", "fw.nat_interface", "eth0;reboot")
 	h.run(ExitOK, "set", "dns.upstream", "9.9.9.9, 149.112.112.112")
-	b, _ := os.ReadFile(h.app.P.DNSConf())
-	if !strings.Contains(string(b), "server=9.9.9.9\nserver=149.112.112.112\n") || !h.fake.Called("s6-svc -r") {
-		t.Fatalf("dns not applied:\n%s", b)
-	}
 	if out := h.run(ExitOK, "get"); !regexp.MustCompile(`dns\.upstream\s+9\.9\.9\.9,149\.112\.112\.112\n`).MatchString(out) ||
 		!strings.Contains(out, "******** (secret") {
 		t.Fatalf("get:\n%s", out)
@@ -276,7 +294,7 @@ func TestSettingsCommands(t *testing.T) {
 	}
 	// No peers: an endpoint change needs no --yes.
 	h.run(ExitOK, "set", "server.endpoint_host", "vpn2.example.com")
-	h.run(ExitOK, "peer", "add", "phone")
+	h.run(ExitOK, "peer", "add")
 	h.run(ExitNeedYes, "set", "server.endpoint_host", "vpn3.example.com")
 	h.run(ExitNeedYes, "server", "rotate-key")
 }
@@ -284,7 +302,7 @@ func TestSettingsCommands(t *testing.T) {
 func TestAWGCommands(t *testing.T) {
 	h := newHarness(t)
 	h.boot()
-	h.run(ExitOK, "peer", "add", "phone")
+	h.run(ExitOK, "peer", "add")
 	h.run(ExitNeedYes, "awg", "version", "2.0")
 	h.run(ExitOK, "awg", "version", "2.0", "--yes")
 	st := h.state()
@@ -304,7 +322,7 @@ func TestAWGCommands(t *testing.T) {
 func TestHandEditedDBFailsInit(t *testing.T) {
 	h := newHarness(t)
 	h.run(ExitOK, "init")
-	db, err := store.Open(h.app.P.DB(), h.app.P.Backups())
+	db, err := store.Open(h.app.P.DB())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -335,14 +353,14 @@ func (h *harness) sqlExec(stmts ...string) {
 func TestUsageErrors(t *testing.T) {
 	h := newHarness(t)
 	h.boot()
-	h.run(ExitOK, "peer", "add", "phone")
+	h.run(ExitOK, "peer", "add", "--name", "phone")
 	for _, args := range [][]string{
 		{},
 		{"bogus"},
 		{"init", "--bogus"},
 		{"health", "--bogus"},
-		{"status", "--bogus"},
-		{"apply", "--bogus"},
+		{"status"},
+		{"apply"},
 		{"version", "--bogus"},
 		{"get", "--bogus"},
 		{"get", "a", "b"},
@@ -369,18 +387,34 @@ func TestUsageErrors(t *testing.T) {
 		{"peer"},
 		{"peer", "bogus"},
 		{"peer", "list", "--bogus"},
-		{"peer", "add"},
-		{"peer", "add", "x", "--octet", "1"},
+		{"peer", "add", "phone2"},
+		{"peer", "add", "--octet", "9"},
+		{"peer", "add", "--name", " x"},
+		{"peer", "add-many"},
+		{"peer", "add-many", "0"},
+		{"peer", "add-many", "254"},
+		{"peer", "add-many", "x"},
+		{"peer", "add-many", "1", "2"},
 		{"peer", "list", "x"},
 		{"peer", "show"},
+		{"peer", "show", "phone"},
+		{"peer", "show", "#2"},
 		{"peer", "export"},
-		{"peer", "rename", "phone"},
-		{"peer", "rename", "phone", "bad name!"},
+		{"peer", "export", "name:phone"},
+		{"peer", "rename", "2"},
+		{"peer", "rename", "2", "x", "--clear"},
+		{"peer", "rename", "--clear"},
+		{"peer", "rename", "2", "bad name!"},
+		{"peer", "rename", "phone", "x"},
 		{"peer", "set"},
-		{"peer", "set", "phone", "--keepalive", "maybe"},
+		{"peer", "set", "2", "--keepalive", "maybe"},
+		{"peer", "set", "phone", "--keepalive", "on"},
 		{"peer", "enable"},
+		{"peer", "disable", "phone"},
 		{"peer", "rotate"},
+		{"peer", "rotate", "phone", "--yes"},
 		{"peer", "rm"},
+		{"peer", "rm", "phone", "--yes"},
 		{"import-legacy"},
 		{"import-legacy", "--rename", "nope", "/x"},
 	} {
@@ -392,15 +426,15 @@ func TestUsageErrors(t *testing.T) {
 	if out := h.run(ExitOK, "help"); !strings.HasPrefix(out, "Usage: awgctl") {
 		t.Fatalf("help:\n%s", out)
 	}
-	if p, _ := h.state().FindPeer("phone"); p.Name != "phone" {
+	if p := h.peer(2); p.Name != "phone" || !p.Enabled {
 		t.Fatal("a usage error changed the peer")
 	}
 }
 
 func TestCommandsNeedSafeDatabase(t *testing.T) {
 	h := newHarness(t)
-	cmds := [][]string{{"status"}, {"get"}, {"apply"}, {"awg", "show"}, {"peer", "list"},
-		{"peer", "show", "1"}, {"peer", "export", "1"}, {"set", "net.mtu", "1300"}}
+	cmds := [][]string{{"get"}, {"awg", "show"}, {"peer", "list"},
+		{"peer", "show", "2"}, {"peer", "export", "2"}, {"set", "net.mtu", "1300"}}
 	for _, c := range cmds {
 		if out := h.run(ExitError, c...); !strings.Contains(out, "no database") {
 			t.Errorf("%v before init:\n%s", c, out)
@@ -415,33 +449,10 @@ func TestCommandsNeedSafeDatabase(t *testing.T) {
 	}
 	h2 := newHarness(t)
 	h2.run(ExitOK, "init")
-	os.RemoveAll(h2.app.P.Backups())
-	os.Symlink(t.TempDir(), h2.app.P.Backups())
-	h2.run(ExitError, "status")
-	h2.run(ExitError, "peer", "add", "phone")
+	os.Symlink(filepath.Join(t.TempDir(), "x"), h2.app.P.DB()+"-journal")
+	h2.run(ExitError, "get")
+	h2.run(ExitError, "peer", "add")
 	h2.run(ExitError, "init")
-}
-
-func TestLockContention(t *testing.T) {
-	h := newHarness(t)
-	h.run(ExitOK, "init")
-	l, err := lock.Acquire(context.Background(), h.app.P.Lock())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer l.Release()
-	h.app.LockTTL = 50 * time.Millisecond
-	h.run(ExitError, "peer", "add", "phone")
-	h.run(ExitError, "apply")
-	h.run(ExitError, "init")
-	if len(h.state().Peers) != 0 {
-		t.Fatal("a command changed the DB without the lock")
-	}
-	for _, p := range []string{h.app.P.ActiveJSON(), h.app.P.StateJSON(), h.app.P.WG0()} {
-		if _, err := os.Stat(p); err != nil {
-			t.Errorf("a refused init removed %s", p)
-		}
-	}
 }
 
 func TestHealthVersionAndNew(t *testing.T) {
@@ -453,7 +464,7 @@ func TestHealthVersionAndNew(t *testing.T) {
 	Version = "1.2.3-r4"
 	defer func() { Version = "dev" }()
 	out := h.run(ExitOK, "version")
-	for _, want := range []string{"awgctl        1.2.3-r4", "awg           awg v0-test", "amneziawg-go  amneziawg-go v0-test", "schema        "} {
+	for _, want := range []string{"awgctl        1.2.3-r4", "awg           awg v0-test", "amneziawg-go  amneziawg-go v0-test"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("version: no %q:\n%s", want, out)
 		}
@@ -464,7 +475,7 @@ func TestHealthVersionAndNew(t *testing.T) {
 	}
 
 	a := New()
-	if a.P != sys.DefaultPaths() || a.LockTTL <= 0 || a.Rand == nil || a.Owner == nil {
+	if a.P != sys.DefaultPaths() || a.Rand == nil || a.Owner == nil {
 		t.Fatalf("New: %+v", a)
 	}
 	var buf bytes.Buffer
@@ -501,69 +512,72 @@ func TestPeerListShowExport(t *testing.T) {
 	if out := h.run(ExitOK, "peer", "list", "--json"); strings.TrimSpace(out) != "[]" {
 		t.Fatalf("empty json list:\n%s", out)
 	}
-	h.run(ExitOK, "peer", "add", "phone", "--octet", "9")
-	h.run(ExitError, "peer", "add", "laptop", "--octet", "9")
-	if out := h.run(ExitOK, "peer", "add", "--qr", "laptop"); !strings.Contains(out, "the QR code holds the peer's private key") {
+	h.run(ExitOK, "peer", "add", "--name", "phone")
+	out := h.run(ExitOK, "peer", "add", "--qr", "--name", "laptop")
+	if !strings.Contains(out, `Peer 3 "laptop" (the QR code holds the peer's private key; it works after the restart):`) ||
+		strings.Contains(out, "Export:") {
 		t.Fatalf("add --qr:\n%s", out)
 	}
-	h.run(ExitOK, "peer", "set", "laptop", "--keepalive", "off")
-	if p, _ := h.state().FindPeer("laptop"); p.Keepalive {
+	h.run(ExitOK, "peer", "set", "3", "--keepalive", "off")
+	if h.peer(3).Keepalive {
 		t.Fatal("keepalive is still on")
 	}
-	h.run(ExitError, "peer", "show", "nobody")
-	h.run(ExitError, "peer", "export", "nobody")
-	h.run(ExitError, "peer", "enable", "nobody")
-	h.run(ExitError, "peer", "rm", "nobody", "--yes")
+	if out := h.run(ExitOK, "peer", "set", "3", "--keepalive", "off"); !strings.Contains(out, "keepalive is already off") ||
+		strings.Contains(out, "Saved.") {
+		t.Fatalf("set the same value:\n%s", out)
+	}
+	for _, c := range [][]string{{"show", "9"}, {"export", "9"}, {"enable", "9"}, {"rm", "9", "--yes"}, {"rename", "9", "x"}} {
+		if out := h.run(ExitError, append([]string{"peer"}, c...)...); !strings.Contains(out, "no peer with id 9") {
+			t.Errorf("peer %v:\n%s", c, out)
+		}
+	}
 
-	phone, _ := h.state().FindPeer("phone")
+	phone := h.peer(2)
 	h.app.R = dumpRunner{Fake: h.fake, dump: "priv\tpub\t51820\toff\n" + phone.PublicKey +
-		"\tpsk\t(none)\t10.13.13.9/32\t1700000000\t1536\t3221225472\toff\nshort line\n"}
-	out := h.run(ExitOK, "peer", "list")
-	if !regexp.MustCompile(`(?m)^1\s+phone\s+10\.13\.13\.9\s+true\s+true\s+2023-11-14T22:13:20Z\s+1\.5KiB/3\.0GiB$`).MatchString(out) ||
-		!regexp.MustCompile(`(?m)^2\s+laptop\s+10\.13\.13\.2\s+true\s+false\s+-\s+0B/0B$`).MatchString(out) {
+		"\tpsk\t(none)\t10.13.13.2/32\t1700000000\t1536\t3221225472\toff\nshort line\n"}
+	out = h.run(ExitOK, "peer", "list")
+	if !regexp.MustCompile(`(?m)^2\s+phone\s+10\.13\.13\.2\s+true\s+true\s+2023-11-14T22:13:20Z\s+1\.5KiB/3\.0GiB$`).MatchString(out) ||
+		!regexp.MustCompile(`(?m)^3\s+laptop\s+10\.13\.13\.3\s+true\s+false\s+-\s+0B/0B$`).MatchString(out) {
 		t.Fatalf("list:\n%s", out)
 	}
 	if out := h.run(ExitOK, "peer", "list", "--json"); !strings.Contains(out, `"last_handshake": "2023-11-14T22:13:20Z"`) ||
 		!strings.Contains(out, `"rx_bytes": 1536`) {
 		t.Fatalf("json list:\n%s", out)
 	}
-	out = h.run(ExitOK, "peer", "show", "phone")
-	for _, want := range []string{"address     10.13.13.9/32", "preshared   true", "keepalive   true",
+	out = h.run(ExitOK, "peer", "show", "2")
+	for _, want := range []string{"address     10.13.13.2/32", "preshared   true", "keepalive   true",
 		"handshake   2023-11-14T22:13:20Z", "transfer    1.5KiB received, 3.0GiB sent"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("show: no %q:\n%s", want, out)
 		}
 	}
-	if out := h.run(ExitOK, "peer", "show", "laptop"); strings.Contains(out, "handshake") {
+	if out := h.run(ExitOK, "peer", "show", "3"); strings.Contains(out, "handshake") || strings.Contains(out, "created") {
 		t.Fatalf("show without a handshake:\n%s", out)
 	}
 	h.app.R = h.fake
 
 	dir := t.TempDir()
 	conf, png := filepath.Join(dir, "phone.conf"), filepath.Join(dir, "phone.png")
-	out = h.run(ExitOK, "peer", "export", "phone", "--conf", conf, "--png", png)
+	out = h.run(ExitOK, "peer", "export", "2", "--conf", conf, "--png", png)
 	if strings.Contains(out, "[Interface]") || !strings.Contains(out, "Wrote "+conf) || !strings.Contains(out, "Wrote "+png) {
 		t.Fatalf("export to files:\n%s", out)
 	}
-	if b, _ := os.ReadFile(conf); !strings.Contains(string(b), "Address = 10.13.13.9/32") {
+	if b, _ := os.ReadFile(conf); !strings.Contains(string(b), "Address = 10.13.13.2/32") {
 		t.Fatalf("conf file:\n%s", b)
 	}
 	if b, _ := os.ReadFile(png); !bytes.HasPrefix(b, []byte("\x89PNG")) {
 		t.Fatal("the png file is not a PNG")
 	}
-	h.run(ExitError, "peer", "export", "phone", "--conf", filepath.Join(dir, "no", "x.conf"))
-	h.run(ExitError, "peer", "export", "phone", "--png", filepath.Join(dir, "no", "x.png"))
+	h.run(ExitError, "peer", "export", "2", "--conf", filepath.Join(dir, "no", "x.conf"))
+	h.run(ExitError, "peer", "export", "2", "--png", filepath.Join(dir, "no", "x.png"))
 
-	// A pending restart that changes the peer conf gives a warning.
-	if out := h.run(ExitOK, "peer", "export", "phone"); strings.Contains(out, "WARNING") {
-		t.Fatalf("export without a pending restart:\n%s", out)
-	}
+	// An export shows the saved configuration.
 	h.run(ExitOK, "set", "net.subnet", "10.77.0.0/24", "--yes")
-	h.run(ExitOK, "awg", "regenerate", "h1", "--yes")
-	h.run(ExitOK, "awg", "set", "jc=7")
-	out = h.run(ExitOK, "peer", "export", "phone")
-	if !strings.Contains(out, "WARNING: a restart is pending for awg.h1, net.subnet;") || !strings.Contains(out, "Address = 10.77.0.9/32") {
-		t.Fatalf("export with a pending restart:\n%s", out)
+	if out := h.run(ExitOK, "peer", "export", "2"); !strings.Contains(out, "Address = 10.77.0.2/32") {
+		t.Fatalf("export after a saved change:\n%s", out)
+	}
+	if out := h.run(ExitOK, "peer", "export", "2", "--qr"); !strings.Contains(out, `Peer 2 "phone" (the QR code holds`) {
+		t.Fatalf("export --qr:\n%s", out)
 	}
 }
 
@@ -584,7 +598,7 @@ func TestSettingsGetResetAndServerKey(t *testing.T) {
 	if !strings.Contains(out, key) || !regexp.MustCompile(`net\.mtu\s+1280  \(default\)`).MatchString(out) {
 		t.Fatalf("get --show-secrets:\n%s", out)
 	}
-	if out := h.run(ExitOK, "set", "net.mtu", "1280"); !strings.Contains(out, "net.mtu is already 1280.") {
+	if out := h.run(ExitOK, "set", "net.mtu", "1280"); !strings.Contains(out, "net.mtu is already 1280.") || strings.Contains(out, "Saved.") {
 		t.Fatalf("set the same value:\n%s", out)
 	}
 	h.run(ExitOK, "set", "net.mtu", "1300")
@@ -597,7 +611,7 @@ func TestSettingsGetResetAndServerKey(t *testing.T) {
 		t.Fatalf("rotate-key:\n%s", out)
 	}
 	out = h.run(ExitOK, "server", "rotate-key", "--yes")
-	if !strings.Contains(out, "New server public key: ") || !strings.Contains(out, "Pending restart: server.private_key") ||
+	if !strings.Contains(out, "New server public key: ") || !strings.Contains(out, "Saved. Restart the container to apply.") ||
 		h.state().Get("server.private_key") == key {
 		t.Fatalf("rotate-key --yes:\n%s", out)
 	}
@@ -634,24 +648,6 @@ func TestAWGShowAndNoChange(t *testing.T) {
 	h.run(ExitOK, "init")
 }
 
-func TestStatusShowsDatapathAndApplyError(t *testing.T) {
-	h := newHarness(t)
-	h.boot()
-	h.env["WG_QUICK_USERSPACE_IMPLEMENTATION"] = "amneziawg-go"
-	h.run(ExitOK, "peer", "add", "phone")
-	h.run(ExitOK, "peer", "disable", "phone")
-	h.fake.Fail["awg syncconf"] = "Unable to modify interface"
-	h.run(ExitNotApplied, "peer", "add", "laptop")
-	out := h.run(ExitOK, "status")
-	for _, want := range []string{"tunnel      wg0 up (userspace (amneziawg-go))", "endpoint    vpn.example.com:51820",
-		"subnet      10.13.13.0/24", "awg         3.1 (RandomTrailers on, DisableCookies", "peers       2 (1 enabled)",
-		"apply       generation 4 saved, 3 applied: "} {
-		if !strings.Contains(out, want) {
-			t.Errorf("status: no %q:\n%s", want, out)
-		}
-	}
-}
-
 func TestStoreFailuresChangeNothing(t *testing.T) {
 	for _, c := range []struct {
 		name string
@@ -659,56 +655,34 @@ func TestStoreFailuresChangeNothing(t *testing.T) {
 		args []string
 	}{
 		{"settings", "CREATE TRIGGER f BEFORE UPDATE ON settings BEGIN SELECT RAISE(ABORT, 'no'); END", []string{"set", "net.mtu", "1300"}},
-		{"insert peer", "CREATE TRIGGER f BEFORE INSERT ON peers BEGIN SELECT RAISE(ABORT, 'no'); END", []string{"peer", "add", "tablet"}},
-		{"update peer", "CREATE TRIGGER f BEFORE UPDATE ON peers BEGIN SELECT RAISE(ABORT, 'no'); END", []string{"peer", "disable", "phone"}},
-		{"delete peer", "CREATE TRIGGER f BEFORE DELETE ON peers BEGIN SELECT RAISE(ABORT, 'no'); END", []string{"peer", "rm", "phone", "--yes"}},
-		{"load", "ALTER TABLE peers RENAME TO gone", []string{"peer", "add", "tablet"}},
+		{"insert peer", "CREATE TRIGGER f BEFORE INSERT ON peers BEGIN SELECT RAISE(ABORT, 'no'); END", []string{"peer", "add-many", "2"}},
+		{"update peer", "CREATE TRIGGER f BEFORE UPDATE ON peers BEGIN SELECT RAISE(ABORT, 'no'); END", []string{"peer", "disable", "2"}},
+		{"delete peer", "CREATE TRIGGER f BEFORE DELETE ON peers BEGIN SELECT RAISE(ABORT, 'no'); END", []string{"peer", "rm", "2", "--yes"}},
+		{"load", "ALTER TABLE peers RENAME TO gone", []string{"peer", "add"}},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			h := newHarness(t)
 			h.boot()
-			h.run(ExitOK, "peer", "add", "phone")
-			gen := h.state().Generation
+			h.run(ExitOK, "peer", "add")
 			h.sqlExec(c.sql)
 			if out := h.run(ExitError, c.args...); !strings.Contains(out, "awgctl: ") {
 				t.Fatalf("output:\n%s", out)
 			}
 			if c.name == "load" {
 				h.run(ExitError, "init")
-				h.run(ExitError, "status")
+				h.run(ExitError, "peer", "list")
 				return
 			}
-			if st := h.state(); st.Generation != gen || len(st.Peers) != 1 || !st.Peers[0].Enabled || st.Get("net.mtu") != "1280" {
+			if st := h.state(); len(st.Peers) != 1 || !st.Peers[0].Enabled || st.Get("net.mtu") != "1280" {
 				t.Fatalf("the DB changed: %+v", st)
 			}
 		})
 	}
 }
 
-func TestApplyStateWriteFailureIsReported(t *testing.T) {
-	h := newHarness(t)
-	h.boot()
-	os.Remove(h.app.P.StateJSON())
-	os.Mkdir(h.app.P.StateJSON(), 0o700)
-	out := h.run(ExitNotApplied, "peer", "add", "phone")
-	if !strings.Contains(out, "could not write the apply state") || !strings.Contains(out, "Applied.") {
-		t.Fatalf("output:\n%s", out)
-	}
-	os.Remove(h.app.P.ActiveJSON())
-	if out := h.run(ExitNotApplied, "apply"); !strings.Contains(out, "saved, not applied") {
-		t.Fatalf("apply without active.json:\n%s", out)
-	}
-}
-
 func TestInitFailures(t *testing.T) {
 	h := newHarness(t)
 	h.run(ExitOK, "init")
-	h.sqlExec("PRAGMA user_version = 99")
-	if out := h.run(ExitError, "init"); !strings.Contains(out, "restore a backup made by this one") {
-		t.Fatalf("newer schema:\n%s", out)
-	}
-	h.sqlExec("PRAGMA user_version = 1")
-
 	h.fake.Fail["awg-quick strip"] = "parse error"
 	if out := h.run(ExitError, "init"); !strings.Contains(out, "config check failed") {
 		t.Fatalf("check:\n%s", out)

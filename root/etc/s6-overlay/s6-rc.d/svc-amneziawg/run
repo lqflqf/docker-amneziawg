@@ -1,14 +1,12 @@
 #!/usr/bin/with-contenv bash
 # shellcheck shell=bash
 
-# Brings up wg0 from the conf that awgctl init rendered. Each awg-quick call
-# holds /run/awgctl.lock, the lock that every awgctl command takes, so no
-# command changes wg0 or its conf while the interface is half up.
+# Brings up wg0 from the conf that awgctl init rendered. awgctl commands only
+# change the database, so nothing else changes wg0 or its conf.
 
 ATTEMPTS=3
 RETRY_DELAY=5
 CONF=/run/amneziawg/wg0.conf
-LOCK=/run/awgctl.lock
 
 # svc-dnsmasq waits for this marker, so that dnsmasq starts after wg0. It is
 # written after the first attempt, also on failure, so DNS never waits for the
@@ -27,20 +25,18 @@ main() {
 
     for (( attempt = 1; attempt <= ATTEMPTS; attempt++ )); do
         echo "**** Activating tunnel wg0 ****"
-        if flock "${LOCK}" awg-quick up "${CONF}"; then
+        if awg-quick up "${CONF}"; then
             # awg-quick adds the address before "link set up", and dnsmasq's
             # bind-dynamic can miss it. A restart makes dnsmasq bind it.
             if pgrep -x dnsmasq >/dev/null; then
                 s6-svc -r /run/service/svc-dnsmasq 2>/dev/null || :
             fi
             tunnel_settled
-            # Apply what was saved while wg0 was down (a no-op otherwise).
-            awgctl apply >/dev/null || echo "**** WARNING: awgctl apply failed, see: awgctl status ****"
             echo "**** Tunnel wg0 is up ****"
             exit 0
         fi
         echo "**** Tunnel wg0 failed (attempt ${attempt} of ${ATTEMPTS}) ****"
-        flock "${LOCK}" awg-quick down "${CONF}" 2>/dev/null || :
+        awg-quick down "${CONF}" 2>/dev/null || :
         tunnel_settled
         if (( attempt < ATTEMPTS )); then
             sleep "${RETRY_DELAY}"

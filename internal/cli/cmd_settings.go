@@ -89,11 +89,11 @@ func (a *App) setOne(ctx context.Context, k, v string, yes bool) error {
 	return a.change(ctx, yes, func(d *config.State) (plan, error) {
 		old := d.Get(k)
 		if old == n {
-			return plan{summary: []string{fmt.Sprintf("%s is already %s.", k, n)}}, nil
+			return plan{noop: true, summary: []string{fmt.Sprintf("%s is already %s.", k, n)}}, nil
 		}
 		d.Settings[k] = n
-		pl := plan{class: s.Class, summary: []string{fmt.Sprintf("%s: %s -> %s", k, old, n)}}
-		if s.Class.Has(config.Reissue) {
+		pl := plan{summary: []string{fmt.Sprintf("%s: %s -> %s", k, old, n)}}
+		if s.Reissue {
 			pl.reissue = allPeers(d)
 		}
 		return pl, nil
@@ -146,7 +146,7 @@ func (a *App) cmdServer(ctx context.Context, args []string) error {
 	return a.change(ctx, *yes, func(d *config.State) (plan, error) {
 		d.Settings["server.private_key"] = keys.NewPrivate()
 		pub, _ := keys.Public(d.Settings["server.private_key"])
-		return plan{class: config.Restart | config.Reissue, reissue: allPeersOrServer(d),
+		return plan{reissue: allPeersOrServer(d),
 			summary: []string{"New server public key: " + pub}}, nil
 	})
 }

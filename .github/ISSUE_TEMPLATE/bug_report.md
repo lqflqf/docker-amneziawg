@@ -23,7 +23,7 @@ Give your `docker-compose.yml` (or `docker run` command) and the steps that caus
 
 ```
 docker exec amneziawg awgctl health
-docker exec amneziawg awgctl status
+docker exec amneziawg awgctl version
 docker logs amneziawg
 ```
 

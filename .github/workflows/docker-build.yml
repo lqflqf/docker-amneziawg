@@ -575,8 +575,8 @@ jobs:
           grep -q '▸ uid:gid  1234:2345' <<<"$logs"
           grep -q 'Config initialization finished' <<<"$logs"
           docker exec arm64-boot test -s /config/amneziawg.db
-          docker exec arm64-boot awgctl peer add arm64 >/dev/null
-          docker exec arm64-boot awgctl peer export arm64 --qr >/dev/null
+          docker exec arm64-boot awgctl peer add --name arm64 >/dev/null
+          docker exec arm64-boot awgctl peer export 2 --qr >/dev/null
           [ "$(docker exec arm64-boot id -u abc)" = 1234 ]
           services=$(docker exec arm64-boot s6-rc -a list)
           grep -qx init-amneziawg-config <<<"$services"

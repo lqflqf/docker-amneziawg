@@ -67,8 +67,8 @@ func (a *App) cmdAWG(ctx context.Context, args []string) error {
 	return usagef("unknown awg command %q", sub)
 }
 
-// awgChange applies f to the AWG set. Every AWG change is restart-class; a
-// change to a value that must match on every peer also needs new peer confs.
+// awgChange applies f to the AWG set. A change to a value that must match on
+// every peer also needs new peer confs.
 func (a *App) awgChange(ctx context.Context, yes bool, f func(awg.Params) (awg.Params, error)) error {
 	return a.change(ctx, yes, func(d *config.State) (plan, error) {
 		n, err := f(d.AWG)
@@ -77,10 +77,10 @@ func (a *App) awgChange(ctx context.Context, yes bool, f func(awg.Params) (awg.P
 		}
 		changed := awg.Changed(d.AWG, n)
 		if len(changed) == 0 {
-			return plan{summary: []string{"No change."}}, nil
+			return plan{noop: true, summary: []string{"No change."}}, nil
 		}
 		_, warns := awg.Validate(n)
-		pl := plan{class: config.Restart}
+		var pl plan
 		for _, k := range changed {
 			v := n[k]
 			if v == "" {

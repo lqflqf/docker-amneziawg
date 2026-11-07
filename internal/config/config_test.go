@@ -8,7 +8,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/lqflqf/docker-amneziawg/internal/awg"
 	"github.com/lqflqf/docker-amneziawg/internal/config"
 	"github.com/lqflqf/docker-amneziawg/internal/keys"
 	"github.com/lqflqf/docker-amneziawg/internal/seed"
@@ -26,9 +25,9 @@ func state(t *testing.T) *config.State {
 	return st
 }
 
-func addPeer(st *config.State, name string, octet int) {
+func addPeer(st *config.State, name string, id int) {
 	priv, pub := keys.Pair()
-	st.Peers = append(st.Peers, store.Peer{ID: int64(len(st.Peers) + 1), Name: name, Octet: octet,
+	st.Peers = append(st.Peers, store.Peer{ID: id, Name: name,
 		PrivateKey: priv, PublicKey: pub, PresharedKey: keys.NewSymmetric(), Enabled: true})
 }
 
@@ -64,57 +63,65 @@ func TestValidateCatchesBadPeers(t *testing.T) {
 func TestFindPeer(t *testing.T) {
 	st := state(t)
 	addPeer(st, "phone", 2)
-	addPeer(st, "123", 3)
-	for sel, want := range map[string]string{"1": "phone", "#2": "123", "phone": "phone", "name:123": "123"} {
-		p, err := st.FindPeer(sel)
-		if err != nil || p.Name != want {
-			t.Errorf("%s: %v %v", sel, p, err)
+	addPeer(st, "laptop", 5)
+	if p, err := st.FindPeer(5); err != nil || p.Name != "laptop" {
+		t.Errorf("id 5: %v %v", p, err)
+	}
+	if _, err := st.FindPeer(9); err == nil || err.Error() != "no peer with id 9" {
+		t.Errorf("missing id: %v", err)
+	}
+	p, _ := st.FindPeer(2)
+	p.Enabled = false
+	if st.Peers[0].Enabled {
+		t.Error("FindPeer does not return a pointer into the state")
+	}
+}
+
+func TestParseID(t *testing.T) {
+	for in, want := range map[string]int{"5": 5, "254": 254, "0": 0, "007": 7} {
+		if got, ok := config.ParseID(in); !ok || got != want {
+			t.Errorf("%q: %d %v, want %d", in, got, ok, want)
 		}
 	}
-	if _, err := st.FindPeer("9"); err == nil {
-		t.Error("missing id found")
+	for _, in := range []string{"", "#5", "+5", "-5", " 5", "5 ", "phone", "name:5", "0x5", "1e3", "1234567890"} {
+		if got, ok := config.ParseID(in); ok {
+			t.Errorf("%q accepted as id %d", in, got)
+		}
 	}
 }
 
-func TestPendingRestartIsComputed(t *testing.T) {
-	st := state(t)
-	active := config.ActiveOf(st)
-	if p := config.PendingRestart(st, active); len(p) != 0 {
-		t.Fatalf("pending %v right after start", p)
+func TestPeerNames(t *testing.T) {
+	for n, want := range map[string]bool{
+		"phone": true, "my phone": true, "peer 5": true, "a.b_c-d": true, strings.Repeat("a", 32): true,
+		"": false, " phone": false, "phone ": false, "-x": false, "a/b": false, strings.Repeat("a", 33): false,
+	} {
+		if got := config.ValidPeerName(n); got != want {
+			t.Errorf("ValidPeerName(%q) = %v, want %v", n, got, want)
+		}
 	}
-	d := st.Clone()
-	d.Settings["net.subnet"] = "10.99.0.0/24"
-	d.Settings["peer.keepalive_seconds"] = "10" // live: never pending
-	d.AWG["jc"] = "99"
-	got := strings.Join(config.PendingRestart(d, active), ",")
-	if got != "awg.jc,net.subnet" && !(strings.Contains(got, "net.subnet") && strings.Contains(got, "awg.jc")) {
-		t.Fatalf("pending = %s", got)
+	if config.DefaultPeerName(7) != "peer 7" {
+		t.Errorf("default name %q", config.DefaultPeerName(7))
 	}
-	if strings.Contains(got, "keepalive") {
-		t.Fatalf("a live setting is pending: %s", got)
+	for _, c := range []struct {
+		name string
+		id   int
+		want bool
+	}{{"peer 5", 5, true}, {"peer 5", 6, false}, {"peer 05", 5, false}, {"peer5", 6, true}, {"phone", 6, true}} {
+		if got := config.NameFitsID(c.name, c.id); got != c.want {
+			t.Errorf("NameFitsID(%q, %d) = %v, want %v", c.name, c.id, got, c.want)
+		}
 	}
 }
 
-func TestFreeOctet(t *testing.T) {
+func TestFreeIDs(t *testing.T) {
 	st := state(t)
 	addPeer(st, "a", 2)
 	addPeer(st, "b", 4)
-	if o, _ := st.FreeOctet(); o != 3 {
-		t.Fatalf("free octet %d, want 3", o)
+	if ids, err := st.FreeIDs(3); err != nil || len(ids) != 3 || ids[0] != 3 || ids[1] != 5 || ids[2] != 6 {
+		t.Fatalf("free ids %v %v, want [3 5 6]", ids, err)
 	}
-}
-
-func TestClassString(t *testing.T) {
-	for c, want := range map[config.Class]string{
-		0:                               "none",
-		config.Live:                     "live",
-		config.Restart | config.Reissue: "restart + reissue",
-		config.Live | config.DNS:        "live + dns",
-		config.DNS | config.Restart | config.Reissue: "dns + restart + reissue",
-	} {
-		if got := c.String(); got != want {
-			t.Errorf("Class(%d) = %q, want %q", int(c), got, want)
-		}
+	if _, err := st.FreeIDs(252); err == nil || err.Error() != "only 251 free address(es) in 10.13.13.0/24 (at most 253 peers)" {
+		t.Fatalf("too few free ids: %v", err)
 	}
 }
 
@@ -189,7 +196,6 @@ func TestGetAndAddresses(t *testing.T) {
 func TestSaveSettingsAndLoad(t *testing.T) {
 	st := state(t)
 	addPeer(st, "phone", 2)
-	st.Generation = 5
 	st.Settings["net.mtu"] = "1400"
 	st.AWG["i2"] = "<r 10>"
 	path := filepath.Join(t.TempDir(), "amneziawg.db")
@@ -197,15 +203,12 @@ func TestSaveSettingsAndLoad(t *testing.T) {
 		if err := st.SaveSettings(tx); err != nil {
 			return err
 		}
-		if _, err := tx.AddPeer(st.Peers[0]); err != nil {
-			return err
-		}
-		return tx.SetMeta("generation", "5")
+		return tx.AddPeer(st.Peers[0])
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	db, err := store.Open(path, t.TempDir())
+	db, err := store.Open(path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -225,8 +228,8 @@ func TestSaveSettingsAndLoad(t *testing.T) {
 	if err := db.View(ctx, func(tx *store.Tx) (err error) { got, err = config.Load(tx); return err }); err != nil {
 		t.Fatal(err)
 	}
-	if got.Generation != 5 || len(got.Peers) != 1 || got.Peers[0].PublicKey != st.Peers[0].PublicKey {
-		t.Errorf("loaded generation %d peers %+v", got.Generation, got.Peers)
+	if len(got.Peers) != 1 || got.Peers[0] != st.Peers[0] {
+		t.Errorf("loaded peers %+v", got.Peers)
 	}
 	if _, ok := got.Settings["net.mtu"]; ok || got.Get("net.mtu") != "1280" {
 		t.Errorf("net.mtu %q was not removed", got.Settings["net.mtu"])
@@ -272,18 +275,21 @@ func TestValidateReportsEachProblem(t *testing.T) {
 		{"not normal form", func(s *config.State) { s.Settings["net.mtu"] = " 1400" }, `net.mtu: " 1400" is not in its normal form "1400"`},
 		{"bad value", func(s *config.State) { s.Settings["net.mtu"] = "99" }, "net.mtu: must be 576-1500 or none"},
 		{"AWG rule", func(s *config.State) { s.AWG["jc"] = "200" }, "AWG Jc (200) must be 0-128"},
-		{"bad name", func(s *config.State) { s.Peers[0].Name = "-x" }, `peer #1: name "-x" must match`},
-		{"octet", func(s *config.State) { s.Peers[0].Octet = 255 }, "peer #1: address octet 255 is out of range"},
-		{"same octet", func(s *config.State) { s.Peers[1].Octet = 2 }, "peer #2: address octet 2 is out of range or used twice"},
-		{"private key", func(s *config.State) { s.Peers[0].PrivateKey = "x" }, "peer #1: private key:"},
-		{"same key", func(s *config.State) { s.Peers[1] = withID(s.Peers[0], "b", 3, 2) }, "peer #2: the public key is used twice"},
+		{"bad name", func(s *config.State) { s.Peers[0].Name = "-x" }, `peer 2: name "-x" is not valid`},
+		{"same name", func(s *config.State) { s.Peers[1].Name = "a" }, `peer 3: name "a" is used twice`},
+		{"other default name", func(s *config.State) { s.Peers[0].Name = "peer 3" }, `peer 2: name "peer 3" is the default name of peer 3 only`},
+		{"id 1", func(s *config.State) { s.Peers[0].ID = 1 }, "peer 1: the id must be 2-254"},
+		{"id 255", func(s *config.State) { s.Peers[0].ID = 255 }, "peer 255: the id must be 2-254"},
+		{"same id", func(s *config.State) { s.Peers[1].ID = 2 }, "peer 2: the id is used twice"},
+		{"private key", func(s *config.State) { s.Peers[0].PrivateKey = "x" }, "peer 2: private key:"},
+		{"same key", func(s *config.State) { s.Peers[1] = withID(s.Peers[0], "b", 3) }, "peer 3: the public key is used twice"},
 		{"server key", func(s *config.State) {
 			priv, _ := keys.Pair()
 			s.Settings["server.private_key"] = priv
 			s.Peers[0].PrivateKey = priv
 			s.Peers[0].PublicKey, _ = keys.Public(priv)
-		}, "peer #1: the public key is used twice"},
-		{"psk", func(s *config.State) { s.Peers[0].PresharedKey = keys.NewSymmetric()[:10] }, "peer #1: the preshared key is not"},
+		}, "peer 2: the public key is used twice"},
+		{"psk", func(s *config.State) { s.Peers[0].PresharedKey = keys.NewSymmetric()[:10] }, "peer 2: the preshared key is not"},
 	}
 	for _, c := range cases {
 		st := state(t)
@@ -303,6 +309,11 @@ func TestValidateReportsEachProblem(t *testing.T) {
 	if errs, warns := st.Validate(); len(errs) > 0 || len(warns) == 0 || !strings.Contains(strings.Join(warns, "\n"), "S4 (25)") {
 		t.Errorf("AWG warnings are not passed on: errs %v warns %v", errs, warns)
 	}
+	own := state(t)
+	addPeer(own, "peer 2", 2)
+	if err := own.Err(); err != nil {
+		t.Errorf("a peer with its own default name: %v", err)
+	}
 	full := state(t)
 	for i := 0; i <= config.MaxPeers; i++ {
 		addPeer(full, "p"+strconv.Itoa(i), 2+i%253)
@@ -312,75 +323,7 @@ func TestValidateReportsEachProblem(t *testing.T) {
 	}
 }
 
-func withID(p store.Peer, name string, octet int, id int64) store.Peer {
-	p.Name, p.Octet, p.ID = name, octet, id
+func withID(p store.Peer, name string, id int) store.Peer {
+	p.Name, p.ID = name, id
 	return p
-}
-
-func TestFreeOctetFull(t *testing.T) {
-	st := state(t)
-	for o := 2; o <= 254; o++ {
-		st.Peers = append(st.Peers, store.Peer{ID: int64(o), Octet: o})
-	}
-	if _, err := st.FreeOctet(); err == nil || err.Error() != "no free address in 10.13.13.0/24 (at most 253 peers)" {
-		t.Fatalf("full subnet: %v", err)
-	}
-}
-
-func TestFindPeerErrors(t *testing.T) {
-	st := state(t)
-	addPeer(st, "phone", 2)
-	for sel, want := range map[string]string{
-		"name:1": `no peer named "1"`,
-		"tablet": `no peer named "tablet"`,
-		"#9":     "no peer with id 9",
-		"+1":     `no peer named "+1"`,
-		"-1":     `no peer named "-1"`,
-		"#":      `no peer named "#"`,
-	} {
-		if p, err := st.FindPeer(sel); err == nil || err.Error() != want {
-			t.Errorf("%s: %v %v, want %q", sel, p, err, want)
-		}
-	}
-	p, _ := st.FindPeer("phone")
-	p.Enabled = false
-	if st.Peers[0].Enabled {
-		t.Error("FindPeer does not return a pointer into the state")
-	}
-}
-
-func TestActiveRoundTrip(t *testing.T) {
-	st := state(t)
-	st.AWG["i2"] = ""
-	a := config.ActiveOf(st)
-	if _, ok := a["awg.i2"]; ok {
-		t.Error("an empty AWG value is in the active snapshot")
-	}
-	if _, ok := a["peer.keepalive_seconds"]; ok {
-		t.Error("a live setting is in the active snapshot")
-	}
-	if a["net.mtu"] != "1280" {
-		t.Errorf("a missing restart setting must take its default, got %q", a["net.mtu"])
-	}
-	got := a.AWG()
-	if changed := awg.Changed(got, st.AWG); len(changed) != 0 {
-		t.Errorf("AWG round trip changed %v", changed)
-	}
-	for k, v := range got {
-		if v == "" || st.AWG[k] != v {
-			t.Errorf("AWG round trip: %s = %q, want %q", k, v, st.AWG[k])
-		}
-	}
-}
-
-func TestPendingRestartListsRemovedKeys(t *testing.T) {
-	st := state(t)
-	active := config.ActiveOf(st)
-	active["awg.i3"] = "<r 5>"
-	d := st.Clone()
-	d.Settings["fw.nat_interface"] = "eth0"
-	got := config.PendingRestart(d, active)
-	if strings.Join(got, ",") != "awg.i3,fw.nat_interface" {
-		t.Fatalf("pending = %v, want [awg.i3 fw.nat_interface]", got)
-	}
 }
