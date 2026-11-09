@@ -334,8 +334,14 @@ jobs:
   #            is stopped first: only nerdctl's containerd may own the
   #            containerd socket. nerdctl needs root, so the tests run with
   #            sudo.
+  # The master ruleset requires `smoke (docker)` and `smoke (nerdctl)`. A
+  # skipped job does not expand its matrix, so these checks never report and
+  # the PR stays blocked. Thus the job also runs when `version` is skipped
+  # (validate is false), and then each step is skipped. If a needed job
+  # fails, the job is skipped and the PR stays blocked.
   smoke:
     needs: [changes, version, lint]
+    if: ${{ !failure() && !cancelled() }}
     runs-on: ubuntu-24.04
     strategy:
       # A failure under one engine must not hide the result of the other.
@@ -343,17 +349,24 @@ jobs:
       matrix:
         engine: [docker, nerdctl]
     env:
+      VALIDATE: ${{ needs.changes.outputs.validate }}
       ENGINE: ${{ matrix.engine }}
       BUILD_DATE: ${{ needs.version.outputs.build_date }}
       NERDCTL_VERSION: 2.4.2
       NERDCTL_SHA256: 1f12c1a5840744fdf7029483c55a69813d44aa2ec1ef879d52d81ff6a3049ecd
     steps:
+      - name: No image or test changes
+        if: env.VALIDATE != 'true'
+        run: echo "No image or test changes. The smoke tests are skipped." >> "$GITHUB_STEP_SUMMARY"
+
       - name: Checkout code
+        if: env.VALIDATE == 'true'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
       - name: Build test image (linux/amd64)
+        if: env.VALIDATE == 'true'
         env:
           IMAGE_VERSION: ${{ needs.version.outputs.version }}
           AWG_GO: ${{ needs.version.outputs.amneziawg_go }}
@@ -371,7 +384,7 @@ jobs:
             .
 
       - name: Replace Docker with containerd + nerdctl
-        if: matrix.engine == 'nerdctl'
+        if: env.VALIDATE == 'true' && matrix.engine == 'nerdctl'
         run: |
           docker save -o "${RUNNER_TEMP}/test-image.tar" test-image
           curl -fsSLo "${RUNNER_TEMP}/nerdctl-full.tar.gz" \
@@ -390,6 +403,7 @@ jobs:
       # nerdctl needs root. sudo resets the environment, so pass what the test
       # scripts read.
       - name: Unit and smoke tests
+        if: env.VALIDATE == 'true'
         run: |
           as_root=()
           if [[ "$ENGINE" == nerdctl ]]; then
@@ -403,7 +417,7 @@ jobs:
       # release never ships one that a rebuild would remove. The image is the
       # same for both engines, so it is scanned once.
       - name: Vulnerability scan
-        if: matrix.engine == 'docker'
+        if: env.VALIDATE == 'true' && matrix.engine == 'docker'
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           image-ref: test-image

@@ -194,6 +194,8 @@ A change is one write transaction: load, change in memory, `--yes` check, `check
 - `BUILD_DATE` is the UTC time that `version` calculates once. Each build of the run uses it. The Dockerfile declares `BUILD_DATE` and `VERSION` after the package layers, so a new date keeps the cache of those layers.
 - On the default branch, the gate compares with the **last release tag**, so a failed run does not lose a change. Manual runs always build.
 - `smoke`: one job for each engine in `matrix.engine`, in parallel, with `fail-fast: false`. Each builds the amd64 image (with the Go unit tests in the builder stage) and runs `integration-test.sh` and `smoke-test.sh`. PRs run only the lint, test and script-test jobs.
+  - The `master` ruleset requires `smoke (docker)` and `smoke (nerdctl)`. A skipped job does not expand its matrix, so these checks never report.
+  - Thus `smoke` runs unless a needed job fails or is cancelled. If `validate` is not `true`, each step is skipped and the job passes.
   - `docker`: then Trivy (fails on fixable CRITICAL findings).
   - `nerdctl`: rootful containerd + nerdctl (pinned `nerdctl-full`, sha256). It stops Docker first, so that one containerd owns the socket. The tests run with `sudo env`, which passes `ENGINE`, `BUILD_DATE` and the GitHub variables.
 - Release (push to the default branch, or `workflow_dispatch` without overrides): boots arm64 under QEMU and runs `awgctl version`, `awgctl peer add` and `peer export` there. Then it pushes amd64+arm64 with provenance and SBOM as `:<tools>-r<N>` (immutable), `:<tools>`, `:latest`, `:sha-<short>`. It creates the tag `v<tools>-r<N>` and a GitHub Release. A superseded run publishes only its immutable tag.
