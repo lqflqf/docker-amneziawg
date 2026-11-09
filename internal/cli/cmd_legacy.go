@@ -53,7 +53,7 @@ func (a *App) cmdImportLegacy(ctx context.Context, args []string) error {
 	if _, err := os.Lstat(a.P.DB()); err == nil {
 		return fmt.Errorf("%s exists: import-legacy runs only once, into an empty volume", a.P.DB())
 	}
-	rep, err := legacy.Analyze(legacy.Options{Dir: dir, ForcePartial: *force, Rename: ren})
+	rep, err := legacy.Analyze(legacy.Options{Dir: dir, Rename: ren})
 	if err != nil {
 		return err
 	}

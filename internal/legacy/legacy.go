@@ -24,9 +24,8 @@ import (
 
 // Options of an import.
 type Options struct {
-	Dir          string
-	ForcePartial bool              // import without the items that cannot be imported
-	Rename       map[string]string // old peer dir (peer_x) or proposed name -> new name
+	Dir    string
+	Rename map[string]string // old peer dir (peer_x) or proposed name -> new name
 }
 
 // Verdict of one peer conf.
@@ -41,7 +40,7 @@ type Report struct {
 	State    *config.State
 	Notes    []string
 	Blockers []string // items that always stop the import
-	Dropped  []string // items that stop the import unless --force-partial drops them
+	Dropped  []string // items that stop the import, unless the caller accepts a partial import
 	Verdicts []Verdict
 	Server   []string // differing keys of wg0.conf (informational)
 }
@@ -87,12 +86,17 @@ func readKey(path string) string {
 	return strings.TrimSpace(string(b))
 }
 
+var (
+	digitsRe = regexp.MustCompile(`^[0-9]+$`)
+	alnumRe  = regexp.MustCompile(`^[[:alnum:]]+$`)
+)
+
 // oldPeerIDs returns the peer directory ids of the saved PEERS value, the
 // way the shell release made them: "3" -> peer1..peer3, "1,laptop" -> peer1,
 // peer_laptop.
 func oldPeerIDs(peers string) []string {
 	var ids []string
-	if regexp.MustCompile(`^[0-9]+$`).MatchString(peers) {
+	if digitsRe.MatchString(peers) {
 		n, _ := strconv.Atoi(peers)
 		for i := 1; i <= n; i++ {
 			ids = append(ids, "peer"+strconv.Itoa(i))
@@ -102,8 +106,8 @@ func oldPeerIDs(peers string) []string {
 	for _, e := range strings.Split(peers, ",") {
 		e = strings.TrimSpace(e)
 		switch {
-		case e == "" || !regexp.MustCompile(`^[[:alnum:]]+$`).MatchString(e):
-		case regexp.MustCompile(`^[0-9]+$`).MatchString(e):
+		case e == "" || !alnumRe.MatchString(e):
+		case digitsRe.MatchString(e):
 			ids = append(ids, "peer"+e)
 		default:
 			ids = append(ids, "peer_"+e)
@@ -132,7 +136,20 @@ func splitCommands(v string) []string {
 	return out
 }
 
-var masqRe = regexp.MustCompile(`^iptables -t nat -[AD] POSTROUTING -o (\S+) -j MASQUERADE$`)
+var (
+	masqRe = regexp.MustCompile(`^iptables -t nat -[AD] POSTROUTING -o (\S+) -j MASQUERADE$`)
+	// The other rules of the past default templates.
+	defaultRules = []*regexp.Regexp{
+		regexp.MustCompile(`^iptables -[AD] FORWARD -[io] %i -j ACCEPT$`),
+		regexp.MustCompile(`^ip6tables -[AID] FORWARD -[io] %i -j DROP$`),
+	}
+	// One past default forwarded and masqueraded IPv6 too. The tunnel is
+	// IPv4-only, so these rules map to the IPv6 DROP rules.
+	ipv6ForwardRules = []*regexp.Regexp{
+		regexp.MustCompile(`^ip6tables -[AD] FORWARD -[io] %i -j ACCEPT$`),
+		regexp.MustCompile(`^ip6tables -t nat -[AD] POSTROUTING -o \S+ -j MASQUERADE$`),
+	}
+)
 
 // knownRule reports whether c is a firewall command of a past default
 // template. It returns the NAT interface for the MASQUERADE rule and whether
@@ -141,21 +158,13 @@ func knownRule(c string) (known bool, nat string, v6drop bool) {
 	if m := masqRe.FindStringSubmatch(c); m != nil {
 		return true, m[1], false
 	}
-	for _, re := range []string{
-		`^iptables -[AD] FORWARD -[io] %i -j ACCEPT$`,
-		`^ip6tables -[AID] FORWARD -[io] %i -j DROP$`,
-	} {
-		if regexp.MustCompile(re).MatchString(c) {
+	for _, re := range defaultRules {
+		if re.MatchString(c) {
 			return true, "", strings.HasPrefix(c, "ip6tables")
 		}
 	}
-	// One past default forwarded and masqueraded IPv6 too; the tunnel is
-	// IPv4-only, so it maps to the IPv6 DROP rules.
-	for _, re := range []string{
-		`^ip6tables -[AD] FORWARD -[io] %i -j ACCEPT$`,
-		`^ip6tables -t nat -[AD] POSTROUTING -o \S+ -j MASQUERADE$`,
-	} {
-		if regexp.MustCompile(re).MatchString(c) {
+	for _, re := range ipv6ForwardRules {
+		if re.MatchString(c) {
 			return true, "", true
 		}
 	}
@@ -179,27 +188,89 @@ func normalizeForDiff(key, v string) string {
 	return strings.TrimSpace(v)
 }
 
+// analyzer holds the state of one Analyze run. Each step adds to st and rep.
+type analyzer struct {
+	dir  string
+	rep  *Report
+	st   *config.State
+	orig map[string]string // the saved env of the shell release
+	wg0  *conf.File
+	srv  *conf.Section // [Interface] of wg0.conf
+
+	subnet, prefix string                   // "10.13.13.0/24", "10.13.13."
+	srvPeers       map[string]*conf.Section // wg0.conf [Peer] by public key
+	peerConfs      map[string]*conf.File    // installed peer confs by new name
+	firstPeerConf  *conf.File
+}
+
+func (a *analyzer) block(format string, v ...any) {
+	a.rep.Blockers = append(a.rep.Blockers, fmt.Sprintf(format, v...))
+}
+
+func (a *analyzer) note(format string, v ...any) {
+	a.rep.Notes = append(a.rep.Notes, fmt.Sprintf(format, v...))
+}
+
+func (a *analyzer) drop(format string, v ...any) {
+	a.rep.Dropped = append(a.rep.Dropped, fmt.Sprintf(format, v...))
+}
+
+// set checks v with the registry and stores its normal form.
+func (a *analyzer) set(k, v string) {
+	s, _ := config.Lookup(k)
+	n, err := s.Check(v)
+	if err != nil {
+		a.block("%s: %q: %v", k, v, err)
+		return
+	}
+	a.st.Settings[k] = n
+}
+
+// def returns the registry default of k. A wrong key stops the import.
+func (a *analyzer) def(k string) string {
+	v, err := config.Default(k)
+	if err != nil {
+		a.block("%v", err)
+	}
+	return v
+}
+
 // Analyze reads an old volume and builds the state it describes. It changes
 // nothing on disk.
 func Analyze(opts Options) (*Report, error) {
-	dir := opts.Dir
-	rep := &Report{}
-	block := func(format string, a ...any) { rep.Blockers = append(rep.Blockers, fmt.Sprintf(format, a...)) }
-	note := func(format string, a ...any) { rep.Notes = append(rep.Notes, fmt.Sprintf(format, a...)) }
-	drop := func(format string, a ...any) { rep.Dropped = append(rep.Dropped, fmt.Sprintf(format, a...)) }
+	a := &analyzer{dir: opts.Dir, rep: &Report{},
+		st: &config.State{Settings: map[string]string{}, AWG: awg.Params{}}}
+	ids, err := a.load()
+	if err != nil {
+		return nil, err
+	}
+	if err := a.server(); err != nil {
+		return nil, err
+	}
+	a.firewall()
+	a.awgValues()
+	a.peers(ids, opts.Rename)
+	a.peerConfValues()
+	a.dns()
+	a.check()
+	a.verify()
+	return a.rep, nil
+}
 
-	orig, err := readKV(filepath.Join(dir, ".donoteditthisfile"))
+// load reads the saved env and wg0.conf, and returns the old peer dir ids.
+func (a *analyzer) load() ([]string, error) {
+	orig, err := readKV(filepath.Join(a.dir, ".donoteditthisfile"))
 	if err != nil {
 		orig = map[string]string{}
-		note("no .donoteditthisfile: the values come from the confs only")
+		a.note("no .donoteditthisfile: the values come from the confs only")
 	}
-	wg0, err := readConf(filepath.Join(dir, "wg_confs", "wg0.conf"))
-	if err != nil {
-		return nil, fmt.Errorf("no readable wg_confs/wg0.conf in %s: %v", dir, err)
+	a.orig = orig
+	if a.wg0, err = readConf(filepath.Join(a.dir, "wg_confs", "wg0.conf")); err != nil {
+		return nil, fmt.Errorf("no readable wg_confs/wg0.conf in %s: %v", a.dir, err)
 	}
 	ids := oldPeerIDs(orig["PEERS"])
 	if orig["PEERS"] == "" {
-		matches, _ := filepath.Glob(filepath.Join(dir, "peer*"))
+		matches, _ := filepath.Glob(filepath.Join(a.dir, "peer*"))
 		for _, m := range matches {
 			if fi, err := os.Stat(m); err == nil && fi.IsDir() {
 				ids = append(ids, filepath.Base(m))
@@ -209,66 +280,52 @@ func Analyze(opts Options) (*Report, error) {
 			return nil, fmt.Errorf("this is a client-mode volume (no PEERS and no peer directories); this image is a server only")
 		}
 	}
-	iface := wg0.Interface()
-	if iface == nil {
+	if a.srv = a.wg0.Interface(); a.srv == nil {
 		return nil, fmt.Errorf("wg0.conf has no [Interface]")
 	}
+	return ids, nil
+}
 
-	st := &config.State{Settings: map[string]string{}, AWG: awg.Params{}}
-	set := func(k, v string) {
-		s, _ := config.Lookup(k)
-		n, err := s.Check(v)
-		if err != nil {
-			block("%s: %q: %v", k, v, err)
-			return
-		}
-		st.Settings[k] = n
+// server reads the server key, the subnet and the MTU.
+func (a *analyzer) server() error {
+	priv := a.srv.Get("PrivateKey")
+	if f := readKey(filepath.Join(a.dir, "server", "privatekey-server")); f != "" && f != priv {
+		a.block("server/privatekey-server does not match the PrivateKey in wg0.conf")
 	}
-	// def returns the registry default of k. A wrong key stops the import.
-	def := func(k string) string {
-		v, err := config.Default(k)
-		if err != nil {
-			block("%v", err)
-		}
-		return v
-	}
-
-	// Server key
-	priv := iface.Get("PrivateKey")
-	if f := readKey(filepath.Join(dir, "server", "privatekey-server")); f != "" && f != priv {
-		block("server/privatekey-server does not match the PrivateKey in wg0.conf")
-	}
-	set(config.KeyServerPrivateKey, priv)
+	a.set(config.KeyServerPrivateKey, priv)
 
 	// Subnet from the installed address, not from the env or INTERFACE.
-	addr := strings.TrimSuffix(strings.Split(iface.Get("Address"), ",")[0], "/24")
+	addr := strings.TrimSuffix(strings.Split(a.srv.Get("Address"), ",")[0], "/24")
 	addr = strings.TrimSpace(addr)
 	if !netcheck.IsIPv4(addr) || !strings.HasSuffix(addr, ".1") {
-		return nil, fmt.Errorf("wg0.conf Address %q is not <subnet>.1", iface.Get("Address"))
+		return fmt.Errorf("wg0.conf Address %q is not <subnet>.1", a.srv.Get("Address"))
 	}
-	subnet := strings.TrimSuffix(addr, ".1") + ".0/24"
-	set(config.KeySubnet, subnet)
-	prefix := netcheck.Prefix24(subnet) + "."
+	a.subnet = strings.TrimSuffix(addr, ".1") + ".0/24"
+	a.set(config.KeySubnet, a.subnet)
+	a.prefix = netcheck.Prefix24(a.subnet) + "."
 
-	if m := iface.Get("MTU"); m != "" {
-		set(config.KeyMTU, m)
+	if m := a.srv.Get("MTU"); m != "" {
+		a.set(config.KeyMTU, m)
 	} else {
-		st.Settings[config.KeyMTU] = "none"
+		a.st.Settings[config.KeyMTU] = "none"
 	}
+	return nil
+}
 
-	// Firewall
+// firewall maps the PostUp/PostDown commands to the firewall settings.
+func (a *analyzer) firewall() {
 	nat, v6 := "", false
 	for _, k := range []string{"PostUp", "PostDown"} {
-		for _, v := range iface.All(k) {
+		for _, v := range a.srv.All(k) {
 			for _, c := range splitCommands(v) {
 				ok, n, d := knownRule(c)
 				if !ok {
-					drop("custom %s command %q: custom firewall rules are not supported", k, c)
+					a.drop("custom %s command %q: custom firewall rules are not supported", k, c)
 					continue
 				}
 				if n != "" {
 					if nat != "" && nat != n {
-						block("two different MASQUERADE interfaces (%s, %s)", nat, n)
+						a.block("two different MASQUERADE interfaces (%s, %s)", nat, n)
 					}
 					nat = n
 				}
@@ -277,164 +334,181 @@ func Analyze(opts Options) (*Report, error) {
 		}
 	}
 	if nat == "" {
-		nat = def(config.KeyNATInterface)
-		note("no MASQUERADE rule found; using %s", nat)
+		nat = a.def(config.KeyNATInterface)
+		a.note("no MASQUERADE rule found; using %s", nat)
 	}
-	set(config.KeyNATInterface, nat)
-	st.Settings[config.KeyIPv6ForwardDrop] = strconv.FormatBool(v6)
+	a.set(config.KeyNATInterface, nat)
+	a.st.Settings[config.KeyIPv6ForwardDrop] = strconv.FormatBool(v6)
+}
 
-	// AWG values from the installed conf
-	for _, l := range iface.Lines {
+// awgValues reads the AWG set from the installed conf, and the version from
+// the saved params. Without a saved version, it infers the version.
+func (a *analyzer) awgValues() {
+	p := a.st.AWG
+	for _, l := range a.srv.Lines {
 		if k := awg.KeyForConf(l.Key); k != "" {
-			st.AWG[k] = l.Value
+			p[k] = l.Value
 		}
 	}
 	for _, k := range awg.Switches {
-		if sw, ok := awg.NormalizeSwitch(st.AWG[k]); ok {
-			st.AWG[k] = sw
+		if sw, ok := awg.NormalizeSwitch(p[k]); ok {
+			p[k] = sw
 		} else {
-			st.AWG[k] = "off"
+			p[k] = "off"
 		}
 	}
 	version := ""
-	if p, err := readKV(filepath.Join(dir, "server", "awg_params")); err == nil {
-		version = p["AWG_VERSION"]
+	if saved, err := readKV(filepath.Join(a.dir, "server", "awg_params")); err == nil {
+		version = saved["AWG_VERSION"]
 	}
 	if version == "" {
-		version = awg.InferVersion(st.AWG)
-		note("no saved AWG_VERSION; inferred %s from wg0.conf", version)
+		version = awg.InferVersion(p)
+		a.note("no saved AWG_VERSION; inferred %s from wg0.conf", version)
 	}
-	st.AWG["version"] = version
+	p["version"] = version
+}
 
-	// Server-side peer entries by public key
-	srvPeers := map[string]*conf.Section{}
+// peers imports each old peer dir that matches a [Peer] of wg0.conf.
+func (a *analyzer) peers(ids []string, rename map[string]string) {
+	a.srvPeers = map[string]*conf.Section{}
 	keepaliveSeconds := ""
-	for _, p := range wg0.Peers() {
-		srvPeers[p.Get("PublicKey")] = p
+	for _, p := range a.wg0.Peers() {
+		a.srvPeers[p.Get("PublicKey")] = p
 		if ka := p.Get("PersistentKeepalive"); ka != "" {
 			keepaliveSeconds = ka
 		}
 	}
 	if keepaliveSeconds != "" {
-		set(config.KeyKeepaliveSeconds, keepaliveSeconds)
+		a.set(config.KeyKeepaliveSeconds, keepaliveSeconds)
 	}
 
-	// Peers
-	rename := opts.Rename
-	names := map[string]string{}
-	var firstPeerConf *conf.File
-	legacyConfs := map[string]*conf.File{}
+	names := map[string]string{} // new name -> old dir id
+	a.peerConfs = map[string]*conf.File{}
 	seenPub := map[string]bool{}
 	for _, id := range ids {
-		pdir := filepath.Join(dir, id)
-		if _, err := os.Stat(pdir); err != nil {
-			drop("%s is listed in PEERS but has no directory", id)
-			continue
-		}
-		ppriv := readKey(filepath.Join(pdir, "privatekey-"+id))
-		if ppriv == "" {
-			drop("%s has no privatekey-%s", id, id)
-			continue
-		}
-		ppub, err := keys.Public(ppriv)
-		if err != nil {
-			block("%s: private key: %v", id, err)
-			continue
-		}
-		srv, ok := srvPeers[ppub]
+		p, ok := a.peer(id, rename)
 		if !ok {
-			drop("%s is not in wg0.conf (its key does not match any [Peer])", id)
 			continue
 		}
-		seenPub[ppub] = true
-		psk := readKey(filepath.Join(pdir, "presharedkey-"+id))
-		if psk != "" && srv.Get("PresharedKey") != psk {
-			block("%s: the preshared key does not match wg0.conf", id)
+		seenPub[p.PublicKey] = true
+		if other, ok := names[p.Name]; ok {
+			a.block("%s and %s both map to the name %q; use --rename %s=<new name>", other, id, p.Name, id)
 		}
-		if psk == "" {
-			note("%s has no preshared key; it is imported without one", id)
-		}
-		octet := 0
-		var extra []string
-		for _, a := range strings.Split(srv.Get("AllowedIPs"), ",") {
-			a = strings.TrimSpace(a)
-			if ip, ok := strings.CutSuffix(a, "/32"); ok && strings.HasPrefix(ip, prefix) && octet == 0 {
-				octet, _ = strconv.Atoi(strings.TrimPrefix(ip, prefix))
-				continue
-			}
-			if a != "" {
-				extra = append(extra, a)
-			}
-		}
-		if octet == 0 {
-			block("%s: no /32 address in %s in its wg0.conf AllowedIPs", id, subnet)
-			continue
-		}
-		if len(extra) > 0 {
-			drop("%s routes %s (site-to-site): not supported; only its /32 is imported", id, strings.Join(extra, ", "))
-		}
-		name := nameFor(id)
-		if r, ok := rename[id]; ok {
-			name = r
-		} else if r, ok := rename[name]; ok {
-			name = r
-		}
-		if !config.ValidPeerName(name) {
-			block("%s: name %q is not valid; use --rename %s=<name>", id, name, id)
-		}
-		if other, ok := names[name]; ok {
-			block("%s and %s both map to the name %q; use --rename %s=<new name>", other, id, name, id)
-		}
-		names[name] = id
-		st.Peers = append(st.Peers, store.Peer{ID: octet, Name: name, PrivateKey: ppriv, PublicKey: ppub,
-			PresharedKey: psk, Keepalive: srv.Get("PersistentKeepalive") != "", Enabled: true})
-		if pc, err := readConf(filepath.Join(pdir, id+".conf")); err == nil {
-			legacyConfs[name] = pc
-			if firstPeerConf == nil {
-				firstPeerConf = pc
+		names[p.Name] = id
+		a.st.Peers = append(a.st.Peers, p)
+		if pc, err := readConf(filepath.Join(a.dir, id, id+".conf")); err == nil {
+			a.peerConfs[p.Name] = pc
+			if a.firstPeerConf == nil {
+				a.firstPeerConf = pc
 			}
 		}
 	}
-	for pub := range srvPeers {
+	for pub := range a.srvPeers {
 		if !seenPub[pub] {
-			drop("wg0.conf has a [Peer] (%s…) with no peer directory; it cannot be exported", pub[:min(8, len(pub))])
+			a.drop("wg0.conf has a [Peer] (%s…) with no peer directory; it cannot be exported", pub[:min(8, len(pub))])
 		}
 	}
+}
 
-	// Values that only the peer confs hold
-	endpointHost, endpointPort := orig["SERVERURL"], orig["SERVERPORT"]
-	allowed := orig["ALLOWEDIPS"]
+// peer reads one old peer dir. It returns false when the peer is not imported.
+func (a *analyzer) peer(id string, rename map[string]string) (store.Peer, bool) {
+	pdir := filepath.Join(a.dir, id)
+	if _, err := os.Stat(pdir); err != nil {
+		a.drop("%s is listed in PEERS but has no directory", id)
+		return store.Peer{}, false
+	}
+	priv := readKey(filepath.Join(pdir, "privatekey-"+id))
+	if priv == "" {
+		a.drop("%s has no privatekey-%s", id, id)
+		return store.Peer{}, false
+	}
+	pub, err := keys.Public(priv)
+	if err != nil {
+		a.block("%s: private key: %v", id, err)
+		return store.Peer{}, false
+	}
+	srv, ok := a.srvPeers[pub]
+	if !ok {
+		a.drop("%s is not in wg0.conf (its key does not match any [Peer])", id)
+		return store.Peer{}, false
+	}
+	psk := readKey(filepath.Join(pdir, "presharedkey-"+id))
+	if psk != "" && srv.Get("PresharedKey") != psk {
+		a.block("%s: the preshared key does not match wg0.conf", id)
+	}
+	if psk == "" {
+		a.note("%s has no preshared key; it is imported without one", id)
+	}
+	octet := 0
+	var extra []string
+	for _, ip := range strings.Split(srv.Get("AllowedIPs"), ",") {
+		ip = strings.TrimSpace(ip)
+		if host, ok := strings.CutSuffix(ip, "/32"); ok && strings.HasPrefix(host, a.prefix) && octet == 0 {
+			octet, _ = strconv.Atoi(strings.TrimPrefix(host, a.prefix))
+			continue
+		}
+		if ip != "" {
+			extra = append(extra, ip)
+		}
+	}
+	if octet == 0 {
+		a.block("%s: no /32 address in %s in its wg0.conf AllowedIPs", id, a.subnet)
+		return store.Peer{}, false
+	}
+	if len(extra) > 0 {
+		a.drop("%s routes %s (site-to-site): not supported; only its /32 is imported", id, strings.Join(extra, ", "))
+	}
+	name := nameFor(id)
+	if r, ok := rename[id]; ok {
+		name = r
+	} else if r, ok := rename[name]; ok {
+		name = r
+	}
+	if !config.ValidPeerName(name) {
+		a.block("%s: name %q is not valid; use --rename %s=<name>", id, name, id)
+	}
+	return store.Peer{ID: octet, Name: name, PrivateKey: priv, PublicKey: pub,
+		PresharedKey: psk, Keepalive: srv.Get("PersistentKeepalive") != "", Enabled: true}, true
+}
+
+// peerConfValues reads the values that only the peer confs hold: the
+// endpoint, AllowedIPs and the peer MTU.
+func (a *analyzer) peerConfValues() {
+	endpointHost, endpointPort := a.orig["SERVERURL"], a.orig["SERVERPORT"]
+	allowed := a.orig["ALLOWEDIPS"]
 	peerMTU := "none"
-	if firstPeerConf != nil {
-		if pi := firstPeerConf.Interface(); pi != nil && pi.Get("MTU") != "" {
+	if a.firstPeerConf != nil {
+		if pi := a.firstPeerConf.Interface(); pi != nil && pi.Get("MTU") != "" {
 			peerMTU = pi.Get("MTU")
 		}
-		if ps := firstPeerConf.Peers(); len(ps) > 0 {
+		if ps := a.firstPeerConf.Peers(); len(ps) > 0 {
 			if ep := ps[0].Get("Endpoint"); strings.LastIndexByte(ep, ':') > 0 {
 				i := strings.LastIndexByte(ep, ':')
 				endpointHost, endpointPort = ep[:i], ep[i+1:]
 			}
-			if a := ps[0].Get("AllowedIPs"); a != "" {
-				allowed = a
+			if v := ps[0].Get("AllowedIPs"); v != "" {
+				allowed = v
 			}
 		}
-	} else if iface.Get("MTU") != "" {
-		peerMTU = iface.Get("MTU")
+	} else if a.srv.Get("MTU") != "" {
+		peerMTU = a.srv.Get("MTU")
 	}
 	if endpointPort == "" {
-		endpointPort = def(config.KeyEndpointPort)
+		endpointPort = a.def(config.KeyEndpointPort)
 	}
-	set(config.KeyEndpointHost, endpointHost)
-	set(config.KeyEndpointPort, endpointPort)
+	a.set(config.KeyEndpointHost, endpointHost)
+	a.set(config.KeyEndpointPort, endpointPort)
 	if allowed == "" {
-		allowed = def(config.KeyAllowedIPs)
+		allowed = a.def(config.KeyAllowedIPs)
 	}
-	set(config.KeyAllowedIPs, allowed)
-	set(config.KeyPeerMTU, peerMTU)
+	a.set(config.KeyAllowedIPs, allowed)
+	a.set(config.KeyPeerMTU, peerMTU)
+}
 
-	// DNS
+// dns reads the upstream servers and refuses custom dnsmasq options.
+func (a *analyzer) dns() {
 	upstream := ""
-	if f, err := os.ReadFile(filepath.Join(dir, "dnsmasq", "dnsmasq.conf")); err == nil {
+	if f, err := os.ReadFile(filepath.Join(a.dir, "dnsmasq", "dnsmasq.conf")); err == nil {
 		var servers []string
 		for _, l := range strings.Split(string(f), "\n") {
 			if s, ok := strings.CutPrefix(strings.TrimSpace(l), "server="); ok {
@@ -444,64 +518,70 @@ func Analyze(opts Options) (*Report, error) {
 		upstream = strings.Join(servers, ",")
 	}
 	if upstream == "" {
-		if d, err := readKV(filepath.Join(dir, "dnsmasq", ".donoteditthisfile")); err == nil {
+		if d, err := readKV(filepath.Join(a.dir, "dnsmasq", ".donoteditthisfile")); err == nil {
 			upstream = d["DNS_UPSTREAM"]
 		}
 	}
 	if upstream == "" {
-		upstream = def(config.KeyDNSUpstream)
+		upstream = a.def(config.KeyDNSUpstream)
 	}
-	set(config.KeyDNSUpstream, upstream)
-	if b, err := os.ReadFile(filepath.Join(dir, "templates", "dnsmasq.conf")); err == nil {
+	a.set(config.KeyDNSUpstream, upstream)
+	if b, err := os.ReadFile(filepath.Join(a.dir, "templates", "dnsmasq.conf")); err == nil {
 		for _, l := range strings.Split(string(b), "\n") {
 			l = strings.TrimSpace(l)
 			if l == "" || strings.HasPrefix(l, "#") || dnsmasqDefaults[l] {
 				continue
 			}
-			drop("custom dnsmasq option %q: not supported", l)
+			a.drop("custom dnsmasq option %q: not supported", l)
 		}
 	}
+}
 
-	st.SortPeers()
-	if errs, warns := st.Validate(); len(errs) > 0 {
+// check validates the whole state and puts it in the report.
+func (a *analyzer) check() {
+	a.st.SortPeers()
+	if errs, warns := a.st.Validate(); len(errs) > 0 {
 		for _, e := range errs {
-			block("%v", e)
+			a.block("%v", e)
 		}
 	} else {
 		for _, w := range warns {
-			note("warning: %s", w)
+			a.note("warning: %s", w)
 		}
 	}
-	rep.State = st
+	a.rep.State = a.st
+}
 
-	// Per-peer verification: the new export against the installed peer conf.
-	if len(rep.Blockers) == 0 {
-		for _, p := range st.Peers {
-			old, ok := legacyConfs[p.Name]
-			if !ok {
-				rep.Verdicts = append(rep.Verdicts, Verdict{Name: p.Name, Result: "unverifiable"})
-				continue
-			}
-			nf, err := render.Peer(st, p)
-			if err != nil {
-				block("%s: %v", p.Name, err)
-				continue
-			}
-			if d := conf.Diff(old, nf, normalizeForDiff); len(d) > 0 {
-				rep.Verdicts = append(rep.Verdicts, Verdict{Name: p.Name, Result: "changed", Changed: d})
-			} else {
-				rep.Verdicts = append(rep.Verdicts, Verdict{Name: p.Name, Result: "same"})
-			}
+// verify compares each new peer export with the installed peer conf, and the
+// new wg0.conf with the old one. It runs only when there are no blockers.
+func (a *analyzer) verify() {
+	if len(a.rep.Blockers) > 0 {
+		return
+	}
+	for _, p := range a.st.Peers {
+		old, ok := a.peerConfs[p.Name]
+		if !ok {
+			a.rep.Verdicts = append(a.rep.Verdicts, Verdict{Name: p.Name, Result: "unverifiable"})
+			continue
 		}
-		if srv, err := render.Server(st); err == nil {
-			for _, k := range conf.Diff(wg0, srv, normalizeForDiff) {
-				// The rules are split into one command per line now, and the
-				// server address gained its /24; neither changes the tunnel.
-				if k != "Interface.postup" && k != "Interface.postdown" && k != "Interface.address" {
-					rep.Server = append(rep.Server, k)
-				}
+		nf, err := render.Peer(a.st, p)
+		if err != nil {
+			a.block("%s: %v", p.Name, err)
+			continue
+		}
+		if d := conf.Diff(old, nf, normalizeForDiff); len(d) > 0 {
+			a.rep.Verdicts = append(a.rep.Verdicts, Verdict{Name: p.Name, Result: "changed", Changed: d})
+		} else {
+			a.rep.Verdicts = append(a.rep.Verdicts, Verdict{Name: p.Name, Result: "same"})
+		}
+	}
+	if srv, err := render.Server(a.st); err == nil {
+		for _, k := range conf.Diff(a.wg0, srv, normalizeForDiff) {
+			// The rules are split into one command per line now, and the
+			// server address gained its /24; neither changes the tunnel.
+			if k != "Interface.postup" && k != "Interface.postdown" && k != "Interface.address" {
+				a.rep.Server = append(a.rep.Server, k)
 			}
 		}
 	}
-	return rep, nil
 }
