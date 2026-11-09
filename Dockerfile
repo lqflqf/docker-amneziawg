@@ -34,7 +34,7 @@ RUN CGO_ENABLED=1 go build -ldflags '-linkmode external -extldflags "-fno-PIC -s
 # ============================================================================
 # Stage 2: Compile awg-tools from source
 # ============================================================================
-FROM alpine:3.24.3@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a AS tools-builder
+FROM alpine:3.24.4@sha256:f59abe656b692d901e184be3445e084786602108599d2a51d229c0f5a48c71bf AS tools-builder
 
 ARG AMNEZIAWG_TOOLS_VERSION
 ARG AMNEZIAWG_TOOLS_COMMIT
@@ -74,7 +74,7 @@ RUN go build -trimpath -ldflags "-s -w -X github.com/lqflqf/docker-amneziawg/int
 # ============================================================================
 # Stage 4: Runtime image: Alpine + Alpine's s6-overlay package
 # ============================================================================
-FROM alpine:3.24.3@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a
+FROM alpine:3.24.4@sha256:f59abe656b692d901e184be3445e084786602108599d2a51d229c0f5a48c71bf
 
 ARG AMNEZIAWG_GO_VERSION
 ARG AMNEZIAWG_GO_COMMIT
