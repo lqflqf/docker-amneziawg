@@ -60,6 +60,7 @@ Set `ENGINE=nerdctl` to run `go.sh`, `integration-test.sh` and `smoke-test.sh` w
 
 - Each check must fail by itself. Do not use `test ... && echo`: errexit ignores the left side of `&&`.
 - Do not use `cmd | grep -q` (SIGPIPE + pipefail). Use `grep -q ... <<<"$(cmd)"`.
+- `nerdctl exec` exits 1 for each failure of the command, so it loses exit codes 2 and 3. To test an exit code, print `$?` in the container (see `code` in the script).
 - Only the end-to-end section gets `/dev/net/tun`. Other checks must accept a tunnel that is up (host amneziawg module) or down.
 
 ## Architecture

@@ -230,7 +230,9 @@ ok "dnsmasq runs as dnsmasq, only on wg0 and loopback, default upstreams"
 passed "dnsmasq"
 
 section "awgctl"
-code() { local rc=0; dx awgctl "$@" >/dev/null 2>&1 || rc=$?; echo "$rc"; }
+# code ARGS...: the exit code of awgctl ARGS. Read it in the container:
+# nerdctl exec exits 1 for each failure of the command.
+code() { dx sh -c 'awgctl "$@" >/dev/null 2>&1; echo "$?"' sh "$@"; }
 grep -q 'Peer 2 "phone" added' <<<"$(dx awgctl peer add --name phone)" || fail "peer add"
 grep -q 'Peer 3 added' <<<"$(dx awgctl peer add --no-keepalive)" || fail "peer add without a name"
 grep -q 'Endpoint = ci.example.com:51820' <<<"$(dx awgctl peer export 2)" || fail "peer export"
