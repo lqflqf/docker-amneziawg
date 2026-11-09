@@ -9,6 +9,7 @@ Tell what this PR changes and why.
 - [ ] CI/CD
 
 ## Testing
+- [ ] `.github/scripts/go.sh test ./...` and `.github/scripts/integration-test.sh` pass (if Go code changed)
 - [ ] `.github/scripts/smoke-test.sh` passes against a local build (paste the summary line here)
 - [ ] `.github/scripts/next-version.test.sh` and `release-tags.test.sh` pass (if `.github/scripts/` changed)
 - [ ] If tunnel behaviour changed: tested on a real host with `/dev/net/tun` (give the details below)

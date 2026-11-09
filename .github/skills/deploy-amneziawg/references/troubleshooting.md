@@ -1,39 +1,39 @@
 # Deployment troubleshooting
 
-Start with `docker compose logs --tail=200` and `docker exec amneziawg /app/healthcheck`. The healthcheck prints why the container is unhealthy. README "Health check and troubleshooting" lists common symptoms. Parameter-level problems are in the `amneziawg-config` skill's `references/troubleshooting.md`. These include slow tunnels, version errors, Keenetic `invalid I1 value`, and "AWG 1.5" in the app.
+Start with `docker compose logs --tail=200` and `docker exec amneziawg awgctl health`. The health check prints why the container is unhealthy. `docker exec amneziawg awgctl peer list` shows the peers and their handshakes. README "Health check and troubleshooting" lists common symptoms. To change a value after the first start, use `awgctl` and restart the container (README "Settings"). Parameter-level problems are in the `amneziawg-config` skill's `references/troubleshooting.md`. These include slow tunnels, version errors, Keenetic `invalid I1 value`, and "AWG 1.5" in the app.
 
 ## Container does not start
 
 | Error | Fix |
 |---|---|
 | `error gathering device information … /dev/net/tun` | TUN is missing on the host. See `references/system-setup.md` "TUN device". LXC/OpenVZ plans may not support it |
-| `port is already allocated` | Run `sudo ss -lunp 'sport = :51820'`. Stop the other process or change `SERVERPORT` |
+| `port is already allocated` | Run `sudo ss -lunp 'sport = :51820'`. Stop the other process or change the published port |
 | `RTNETLINK answers: Operation not permitted` | Add `NET_ADMIN` to `cap_add` |
-| Exit code 1, log says `PUID=0 (root) is not supported` | Set `PUID`/`PGID` to the owner of `./config`, for example `id -u` and `id -g` |
-| The host loses its internet connection | The compose file has `network_mode: host`. Remove it and publish `51820/udp` |
+
+## Container stops with exit code 1
+
+`awgctl init` stops the container on a fatal error. The restart policy starts it again, and the same error comes back until you fix it. Read the `ERROR` line before `The container is stopping`.
+
+| Log line | Cause and fix |
+|---|---|
+| `/config holds files of an older release (...) and no database` | The volume comes from a release before `awgctl`. Import it once with `awgctl import-legacy`, as in README "From the releases before `awgctl`". For a new server, use an empty `config/` directory |
+| `SERVERURL is not set and the public IPv4 address could not be detected` | The host cannot reach the detection services over HTTPS. Set `SERVERURL` and run `docker compose up -d` again. The container wrote nothing |
+| `SERVERURL=auto is not supported` | Remove the line, or set a DNS name or IP |
+| `<VARIABLE>: ...` or `the AWG_* values are not valid` | A first-start value breaks a rule. Fix the variable in the compose file and start again. The database does not exist yet |
+| `PUID=0 (root) is not supported` or `is not a numeric ID` | Set `PUID`/`PGID` to the owner of `./config`, for example `id -u` and `id -g` |
+| `... is a symlink; refusing to follow it` or `is owned by uid` | Replace the symlink with the real file or directory. Give `config/` to the `PUID` user |
 
 ## Container runs but is `unhealthy`
 
-| Log line / healthcheck output | Cause and fix |
+| `awgctl health` output / log line | Cause and fix |
 |---|---|
-| `Config generation failed` | The preceding line names the bad input. Examples are duplicate peers, more than 253 peers, invalid `SERVERURL`/`SERVERPORT`/`INTERNAL_SUBNET`, failed public IPv4 detection with `SERVERURL` unset on a fresh install, S < 12 under 3.x, and a broken template. Previous configs stay in use. Fix the input and run `docker compose up -d` |
-| `Peer … contains non-alphanumeric characters and thus will be skipped` | Rename the peer in `PEERS`. Use letters and digits only |
-| `Tunnel /config/wg_confs/wg0.conf failed` / `no active tunnels` | Read the `awg-quick` error above it. `Unable to modify interface: Invalid argument` with 3.1 switches means the host kernel module is older than 3.1. Upgrade it, or set `AWG_RANDOM_TRAILERS=off` and `AWG_DISABLE_COOKIES=off`. If you remove the variables, the saved value is reused |
-| `dnsmasq has no valid config` / `dnsmasq does not answer …` | The log shows `DNS config generation failed` for bad `DNS_UPSTREAM` or a bad template. It shows `No valid dnsmasq config` when dnsmasq rejects a hand edit. Fix `config/templates/dnsmasq.conf` or `DNS_UPSTREAM`. Or delete `config/dnsmasq/dnsmasq.conf` to render it again |
+| `tunnel wg0 is down` | Read the `awg-quick` error above `Tunnel wg0 is down` in the log. `Unable to modify interface: Invalid argument` with 3.1 switches means the host kernel module is older than 3.1. Upgrade it, or run `awgctl awg set random_trailers=off disable_cookies=off --yes` and restart |
+| `dnsmasq has no valid config` / `dnsmasq does not answer …` | Run `awgctl get dns.upstream`. Set a reachable IPv4/IPv6 upstream with `awgctl set dns.upstream <addr>`, then restart |
 
 ## Peer connects but nothing works
 
-- **No handshake** (`awg show` has no `latest handshake`): the cloud firewall is the usual cause. Then check that the client `Endpoint` matches `SERVERURL:SERVERPORT`. Also check that the client supports the AWG version. Run `sudo tcpdump -ni any udp port 51820` on the host to see if packets arrive.
-- **Handshake but no internet**: `sysctl net.ipv4.ip_forward` on the host must be `1`. `docker exec amneziawg iptables -t nat -S POSTROUTING` must show the `MASQUERADE` rule. If it is missing, a custom template dropped the `PostUp` lines. If the compose file has `network_mode: host`, remove it. See `system-setup.md` "Firewall".
-- **No DNS**: peers always use dnsmasq at `<subnet>.1`. Run `/app/healthcheck` and see the dnsmasq rows above. A healthy container does not prove that the upstream works. Run `docker exec amneziawg nslookup example.com <DNS_UPSTREAM address>`. For Unbound on the host, check its `interface` and `access-control`. Also check the host-firewall rule for the bridge. After upgrade from an Unbound release or AYastrebov's image, `PEERDNS`, `USE_DNS`, and `USE_COREDNS` are ignored. See README "DNS".
-- **Mobile data fails, Wi-Fi works**: try `SERVERPORT=443`, with map `443:51820/udp`. Or use a port ≤ 9999. Make sure `PERSISTENTKEEPALIVE_PEERS`, default `all`, includes that peer.
-
-## Regenerating
-
-Configs regenerate automatically when an env var, `AWG_*` value, or template changes. To redraw only the obfuscation values:
-
-```bash
-docker compose down && sudo rm <deploy-dir>/config/server/awg_params && docker compose up -d
-```
-
-Set `AWG_VERSION` explicitly first if you use a non-default version. The saved version is deleted too. Then give each peer its new conf (`/app/show-peer`). If you delete `config/server/` entirely, the server keypair is also replaced.
+- **No handshake** (`awgctl peer list` shows no handshake): the cloud firewall is the usual cause. Then check that the client `Endpoint` matches `awgctl get server.endpoint_host` and `server.endpoint_port`. Also check that the client supports the AWG version (`awgctl awg show`). Run `sudo tcpdump -ni any udp port 51820` on the host to see if packets arrive.
+- **Handshake but no internet**: `sysctl net.ipv4.ip_forward` on the host must be `1`. `docker exec amneziawg iptables -t nat -S POSTROUTING` must show the `MASQUERADE` rule. If the container uses an interface other than `eth*`, run `awgctl set fw.nat_interface <name>` and restart. If the compose file has `network_mode: host`, remove it. See `system-setup.md` "Firewall".
+- **No DNS**: peers always use dnsmasq at `<subnet>.1`. Run `awgctl health` and see the dnsmasq rows above. A healthy container does not prove that the upstream works. Run `docker exec amneziawg nslookup example.com <upstream address>`. For Unbound on the host, check its `interface` and `access-control`. Also check the host-firewall rule for the bridge.
+- **Mobile data fails, Wi-Fi works**: publish `443:51820/udp` and run `awgctl set server.endpoint_port 443 --yes`. Or use a port ≤ 9999. Then restart the container and export each peer conf again. Make sure that the peer has keepalive on (`awgctl peer set <id> --keepalive on`, then restart).
+- **The app cannot connect after the first start**: the default AWG version is 3.1. For an older app, run `awgctl awg version 2.0 --yes`, restart, and export each peer conf again.

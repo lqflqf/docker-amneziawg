@@ -34,7 +34,7 @@ sudo sysctl --system
 
 ## Firewall
 
-Open UDP `SERVERPORT`, which defaults to 51820. With the default bridge network, no NAT rule is necessary on the host. The server conf `PostUp` masquerades out of the container `eth+` interface. Docker bridge NAT then handles the rest. Do not use `network_mode: host`. In the host namespace, a failed tunnel makes the container remove the host default routes, and `PostUp` adds rules to the host firewall. See README "Quick start".
+Open UDP `SERVERPORT`, which defaults to 51820. With the default bridge network, no NAT rule is necessary on the host. The server conf `PostUp` masquerades out of the container `eth+` interface. Docker bridge NAT then handles the rest. Do not use `network_mode: host`. In the host namespace, `PostUp` adds rules to the host firewall. See README "Requirements".
 
 ```bash
 sudo ufw allow 51820/udp            # ufw: allow SSH first before any `ufw enable`, or you lock yourself out

@@ -1,7 +1,8 @@
 # syntax=docker/dockerfile:1
 
 # Dockerfile for AmneziaWG on Alpine Linux with s6-overlay
-# Multi-stage build: compile amneziawg-go, awg-tools, then create runtime image
+# Multi-stage build: compile amneziawg-go, awg-tools and awgctl, then create
+# the runtime image
 
 # Upstream version defaults — override via --build-arg or CI. Each tag is
 # pinned to the commit it pointed at when it was reviewed: a moved tag fails the
@@ -54,7 +55,24 @@ RUN make && \
     chmod +x /tools-install/usr/bin/awg-quick
 
 # ============================================================================
-# Stage 3: Runtime image: Alpine + Alpine's s6-overlay package
+# Stage 3: Build awgctl (this repository's Go code), after vet and unit tests
+# ============================================================================
+FROM golang:1.27.3-alpine@sha256:d200d2dd76b03a99b52651fd1325aff7dcd35422c35c01bac56571b0507f3deb AS awgctl-builder
+
+WORKDIR /src
+ENV CGO_ENABLED=0
+COPY go.mod go.sum ./
+RUN go mod download
+COPY cmd ./cmd
+COPY internal ./internal
+RUN go vet ./... && go test ./...
+# VERSION is declared after the tests, so a new version does not rerun them.
+ARG VERSION
+RUN go build -trimpath -ldflags "-s -w -X github.com/lqflqf/docker-amneziawg/internal/cli.Version=${VERSION:-dev}" \
+    -o /awgctl ./cmd/awgctl
+
+# ============================================================================
+# Stage 4: Runtime image: Alpine + Alpine's s6-overlay package
 # ============================================================================
 FROM alpine:3.24.3@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a
 
@@ -77,7 +95,7 @@ LABEL org.opencontainers.image.version="${AMNEZIAWG_TOOLS_VERSION}"
 
 # s6-overlay 3.2+ already waits forever when S6_CMD_WAIT_FOR_SERVICES_MAXTIME
 # is unset; it is set to make that explicit: a limit would fail stage 2 while
-# init-amneziawg-confs (IP detection) or svc-amneziawg (retries) still runs.
+# init-amneziawg-config (IP detection) or svc-amneziawg (retries) still runs.
 ENV HOME="/root" \
   TERM="xterm" \
   S6_CMD_WAIT_FOR_SERVICES_MAXTIME="0" \
@@ -99,8 +117,6 @@ RUN \
   apk add --no-cache \
     bash=5.3.9-r1 \
     ca-certificates-bundle=20261020-r0 \
-    coreutils=9.11-r0 \
-    curl=8.23.0-r0 \
     dnsmasq=2.92_p2-r0 \
     grep=3.12-r0 \
     iproute2=7.0.0-r0 \
@@ -109,15 +125,12 @@ RUN \
     iputils=20250605-r2 \
     kmod=34.2-r1 \
     libcap-utils=2.78-r0 \
-    libqrencode-tools=4.1.1-r3 \
     nftables=1.1.6-r1 \
-    openresolv=3.17.4-r0 \
-    shadow=4.18.0-r1 \
-    tzdata=2026e-r0 && \
-  echo "**** create abc user (PUID/PGID are applied at start) ****" && \
+    shadow=4.18.0-r1 && \
+  echo "**** create abc user, the owner of /config (PUID/PGID are applied at start) ****" && \
   groupadd -g 911 abc && \
   useradd -u 911 -g abc -G users -d /config -s /bin/false -M abc && \
-  mkdir -p /app /config /defaults && \
+  mkdir -p /config && \
   echo "**** cleanup ****" && \
   rm -rf \
     /tmp/*
@@ -126,17 +139,9 @@ RUN \
 COPY --from=go-builder /src/amneziawg-go /usr/bin/
 COPY --from=tools-builder /tools-install/usr/bin/awg /usr/bin/
 COPY --from=tools-builder /tools-install/usr/bin/awg-quick /usr/bin/
+COPY --from=awgctl-builder /awgctl /usr/local/bin/awgctl
 
-RUN chmod +x /usr/bin/awg /usr/bin/awg-quick /usr/bin/amneziawg-go
-
-# Apply awg-quick sysctl patch to avoid errors when sysctl is already set.
-# sed succeeds on zero matches, so check the patch took: an upstream change to
-# that line must fail the build rather than silently drop the fix.
-# The $ signs are literal shell code for awg-quick, so single quotes are right.
-# hadolint ignore=SC2016
-RUN sed -i 's|\[\[ $proto == -4 \]\] && cmd sysctl -q net\.ipv4\.conf\.all\.src_valid_mark=1|[[ $proto == -4 ]] \&\& [[ $(sysctl -n net.ipv4.conf.all.src_valid_mark) != 1 ]] \&\& cmd sysctl -q net.ipv4.conf.all.src_valid_mark=1|' /usr/bin/awg-quick && \
-  grep -qF '[[ $(sysctl -n net.ipv4.conf.all.src_valid_mark) != 1 ]]' /usr/bin/awg-quick || \
-  { echo "awg-quick src_valid_mark patch did not apply" >&2; exit 1; }
+RUN chmod +x /usr/bin/awg /usr/bin/awg-quick /usr/bin/amneziawg-go /usr/local/bin/awgctl
 
 # BUILD_DATE and VERSION change on every build. Declare them only here: each
 # RUN after an ARG depends on it, so an earlier ARG would make the package
@@ -154,10 +159,11 @@ RUN \
 # add local files
 COPY /root /
 
-# Healthy only while every tunnel in /config/wg_confs is up. Docker does not
-# restart unhealthy containers by itself; this is a signal for monitoring.
+# Healthy while wg0 is up and dnsmasq answers on the tunnel address. Docker
+# does not restart unhealthy containers by itself; this is a signal for
+# monitoring.
 HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
-  CMD ["/app/healthcheck"]
+  CMD ["/usr/local/bin/awgctl", "health"]
 
 # ports and volumes
 EXPOSE 51820/udp

@@ -13,7 +13,6 @@
 # existing interface of that name is never touched.
 main() {
     local probe
-    mkdir -p /config/templates
 
     echo "Uname info: $(uname -a)"
     probe="awgprobe$$"

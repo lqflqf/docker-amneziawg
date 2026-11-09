@@ -2,23 +2,15 @@
 # shellcheck shell=bash
 
 main() {
-    local tunnel AWG_CONFS=()
     # A restarted dnsmasq waits for the next svc-amneziawg run, not for this one.
     rm -f /run/amneziawg-settled
-
-    if [[ -f "/run/activeconfs" ]]; then
-        # shellcheck source=/dev/null # written by svc-amneziawg with declare -p
-        . /run/activeconfs
-        for tunnel in $(printf '%s\n' "${AWG_CONFS[@]}" | tac | tr '\n' ' '; echo); do
-            echo "**** Disabling tunnel ${tunnel} ****"
-            awg-quick down "${tunnel}" || :
-        done
-        echo "**** All tunnels are down ****"
-        rm -rf /run/activeconfs
+    if awg show wg0 >/dev/null 2>&1; then
+        echo "**** Disabling tunnel wg0 ****"
+        awg-quick down /run/amneziawg/wg0.conf || :
+        echo "**** Tunnel wg0 is down ****"
     fi
 }
 
-# Sourced (unit tests): define the functions only.
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
     main "$@"
 fi

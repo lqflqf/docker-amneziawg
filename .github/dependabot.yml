@@ -24,3 +24,15 @@ updates:
           - "*"
     commit-message:
       prefix: chore
+
+  # Go modules of awgctl (go.mod, go.sum).
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      go-modules:
+        patterns:
+          - "*"
+    commit-message:
+      prefix: chore

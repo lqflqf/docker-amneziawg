@@ -1,148 +1,60 @@
-# Docker Compose for AmneziaWG
+# Docker Compose for the AmneziaWG server
 #
-# Server Mode (auto-generate configs):
-#   Set PEERS to enable server mode with automatic peer generation
+# 1. Set PUID/PGID and, before the first start, SERVERURL.
+# 2. docker compose up -d
+# 3. Add a peer and show its QR code, then restart to apply it:
+#      docker exec -it amneziawg awgctl peer add --name phone --qr
+#      docker restart amneziawg
 #
-# Client Mode (manual configs):
-#   Don't set PEERS and mount your configs to /config/wg_confs/
+# The container reads the variables marked "first start" only once, when
+# ./config has no database, and ignores them later. Then change the values
+# with awgctl. README "Settings" and "Protocol versions and obfuscation" give
+# each default and rule.
 
 services:
   amneziawg:
     image: ghcr.io/lqflqf/docker-amneziawg:latest
     container_name: amneziawg
-    # Uncomment to build locally instead of using pre-built image
+    # Remove the comment marks to build the image locally
     # build:
     #   context: .
     #   dockerfile: Dockerfile
     cap_add:
       - NET_ADMIN
-      # SYS_MODULE is rarely needed — the container never loads kernel modules, it
-      # only detects an amneziawg module already loaded on the host. Keep it only
-      # on minimal hosts that don't auto-load the iptables NAT modules.
+      # The container never loads kernel modules. It only detects an amneziawg
+      # module that the host loaded. Keep SYS_MODULE only on minimal hosts that
+      # do not load the iptables NAT modules automatically.
       # - SYS_MODULE
     devices:
       - /dev/net/tun:/dev/net/tun
     environment:
-      # Owner of ./config (numeric IDs) and timezone
-      - PUID=1000
+      # ---- Each start ----
+      - PUID=1000                           # Owner of ./config and the database (numeric, not 0)
       - PGID=1000
-      - TZ=Etc/UTC
 
-      # ---- Server Mode Configuration ----
-      # Uncomment and configure for server mode
-      # - SERVERURL=vpn.example.com         # External URL/IP, recommended (unset: detect the public IPv4, and a changed IP re-issues every peer conf)
-      # - SERVERPORT=51820                  # Port advertised to peers (1-65535, no leading zero). Map it as SERVERPORT:51820/udp (the container always listens on 51820)
-      # - PEERS=3                           # Number or names: 3 or laptop,phone,tablet
-      # - INTERNAL_SUBNET=10.13.13.0        # VPN subnet
-      # - ALLOWEDIPS=0.0.0.0/0, ::/0        # Allowed IPs for peers
-      # - PERSISTENTKEEPALIVE_PEERS=all     # Which peers get keepalive: all (default), comma-separated, or none
-      # - LOG_CONFS=false                   # true prints QR codes (they contain private keys) to the logs; use /app/show-peer instead
+      # ---- First start only (then: awgctl set <key> <value>) ----
+      - SERVERURL=vpn.example.com           # server.endpoint_host. Change it before the first start: a DNS name or a fixed IP. Unset: detect the public IPv4 once
+      # - SERVERPORT=51820                  # server.endpoint_port: the port that peers dial. Map it as SERVERPORT:51820/udp
+      # - INTERNAL_SUBNET=10.13.13.0/24     # net.subnet: /24 only. .1 is the server
+      # - ALLOWEDIPS=0.0.0.0/0, ::/0        # peer.default_allowed_ips: what peers send into the tunnel
+      # - DNS_UPSTREAM=1.1.1.1,1.0.0.1      # dns.upstream: IPv4/IPv6, optional #port. For example 172.31.53.1 for Unbound on the host
+      # - MTU=1280                          # net.mtu and net.peer_mtu: 576-1500 or none (docs/mtu.md)
 
-      # ---- Per-peer server AllowedIPs (site-to-site VPN) ----
-      # - SERVER_ALLOWEDIPS_PEER_laptop=192.168.1.0/24
-
-      # ---- AmneziaWG Protocol Version ----
-      # - AWG_VERSION=2.0                   # "2.0" (default), "3.0" (header protection), "3.1" (3.0 + RandomTrailers) or "1.5" for legacy clients
-
-      # ---- AmneziaWG obfuscation (optional) ----
-      # Every value is generated on first start and saved; set one only to pin it.
-      # Defaults and constraints: README "Protocol versions and obfuscation".
-      # - AWG_JC=5                          # Junk packet count
-      # - AWG_JMIN=50                       # Min junk packet size (< JMAX)
-      # - AWG_JMAX=200                      # Max junk packet size (<= 1280)
-      # - AWG_S1=86                         # Init packet padding
-      # - AWG_S2=40                         # Response packet padding (S1 + 56 must not equal S2)
-      # - AWG_S3=30                         # Cookie padding
-      # - AWG_S4=16                         # Transport padding, keep <= 20 (see docs/mtu.md)
-      # - AWG_H1=90666522-140666522         # Header values: non-overlapping ranges in 2.0+
-      # - AWG_H2=623045912-673045912        # (integers make the Amnezia app report 1.5;
-      # - AWG_H3=1210341563-1260341563      #  use them only with AWG_VERSION=1.5)
-      # - AWG_H4=1820577390-1870577390
-      # - AWG_I1=<b 0xc3><b 0x00000001><b 0x08><r 8><b 0x00><b 0x00><b 0x449e><r 4><r 1178>  # default (QUIC Initial)
-      # - AWG_I2=                           # I2-I5: optional further signature packets
-
-      # ---- AWG 3.x (only used when AWG_VERSION=3.0 or 3.1) ----
-      # Timers are "lo-hi" ranges; each side picks its own value from the range.
-      # - AWG_HEADER_PROTECTION_KEY=            # Shared key, must match on server and all clients (needs S1-S4 >= 12)
-      # - AWG_CONTENT_PADDING=0                 # Extra padding per transport packet; 0 recommended (costs ~22% of download)
-      # - AWG_REKEY_AFTER_TIME=110-130          # Seconds before the initiator rekeys
-      # - AWG_REKEY_TIMEOUT=5-9                 # Handshake retransmit timeout, seconds
-      # - AWG_REJECT_AFTER_TIME=180-200         # Keypair lifetime, seconds
-      # - AWG_KEEPALIVE_TIMEOUT=10-18           # Keepalive interval when idle, seconds
-      # - AWG_MAX_HANDSHAKE_ATTEMPTS=15-22      # Handshake retries before giving up
-
-      # ---- AWG 3.1 interface switches (work with any AWG_VERSION) ----
-      # Written to the server conf and every peer conf when set; unset = key not written.
-      # Only "on" writes the key; "off" omits it (off is the default anyway) and is how you turn a switch back off.
-      # - AWG_RANDOM_TRAILERS=on                # Random-length handshake packets. Defaults to "on" when AWG_VERSION=3.1. Must match on every end
-      # - AWG_DISABLE_COOKIES=on                # No cookie-reply under load. Always opt-in; gives up DoS mitigation. Need not match
-
-      # ---- DNS for peers (server mode) ----
-      # Peers always use dnsmasq on the server's tunnel address; it forwards to DNS_UPSTREAM.
-      # Further dnsmasq options: ./config/templates/dnsmasq.conf (README "DNS").
-      # - DNS_UPSTREAM=1.1.1.1,1.0.0.1      # IPv4/IPv6, optional #port; e.g. 172.31.53.1 for Unbound on the host
+      # ---- AmneziaWG, first start only (then: awgctl awg version|set|regenerate) ----
+      # - AWG_VERSION=3.1                   # 3.1 (default), 3.0, 2.0 (AmneziaVPN 4.8.12.9+) or 1.5 for legacy apps
+      # The container makes each value below. Set one only to pin it, for example:
+      # - AWG_JC=5                          # also AWG_JMIN, AWG_JMAX
+      # - AWG_S1=16                         # also AWG_S2-AWG_S4. With RandomTrailers, S1 = S2 = S3 = S4
+      # - AWG_H1=90666522-140666522         # also AWG_H2-AWG_H4: ranges that do not overlap (2.0+)
+      # - AWG_I2=<r 64>                     # also AWG_I1, AWG_I3-AWG_I5: signature packets
+      # - AWG_HEADER_PROTECTION_KEY=        # 3.x: also AWG_CONTENT_PADDING, AWG_REKEY_AFTER_TIME, AWG_REKEY_TIMEOUT,
+      #                                     # AWG_REJECT_AFTER_TIME, AWG_KEEPALIVE_TIMEOUT, AWG_MAX_HANDSHAKE_ATTEMPTS
+      # - AWG_RANDOM_TRAILERS=on            # on/off. Default on for 3.1, off for the other versions
+      # - AWG_DISABLE_COOKIES=on            # on/off. Default off. Removes the WireGuard DoS protection
     volumes:
-      - ./config:/config
+      - ./config:/config                    # amneziawg.db (all keys: keep it private)
     ports:
-      - 51820:51820/udp
+      - 51820:51820/udp                     # SERVERPORT:51820/udp
     sysctls:
       - net.ipv4.ip_forward=1
-      - net.ipv4.conf.all.src_valid_mark=1
-      - net.ipv6.conf.all.disable_ipv6=0
-    restart: unless-stopped
-
-# ============================================================================
-# Example: Server Mode with 3 peers
-# ============================================================================
-# services:
-#   amneziawg:
-#     image: ghcr.io/lqflqf/docker-amneziawg:latest
-#     container_name: amneziawg
-#     cap_add:
-#       - NET_ADMIN
-#       # - SYS_MODULE  # rarely needed, see main config above
-#     environment:
-#       - PUID=1000
-#       - PGID=1000
-#       - TZ=Etc/UTC
-#       - SERVERURL=vpn.example.com
-#       - SERVERPORT=51820
-#       - PEERS=laptop,phone,tablet
-#       - INTERNAL_SUBNET=10.13.13.0
-#       - ALLOWEDIPS=0.0.0.0/0, ::/0
-#       - PERSISTENTKEEPALIVE_PEERS=all
-#     devices:
-#       - /dev/net/tun:/dev/net/tun
-#     volumes:
-#       - ./config:/config
-#     ports:
-#       - 51820:51820/udp
-#     sysctls:
-#       - net.ipv4.ip_forward=1
-#       - net.ipv4.conf.all.src_valid_mark=1
-#     restart: unless-stopped
-
-# ============================================================================
-# Example: Client Mode with manual config
-# ============================================================================
-# services:
-#   amneziawg:
-#     image: ghcr.io/lqflqf/docker-amneziawg:latest
-#     container_name: amneziawg
-#     cap_add:
-#       - NET_ADMIN
-#       # - SYS_MODULE  # rarely needed, see main config above
-#     environment:
-#       - PUID=1000
-#       - PGID=1000
-#       - TZ=Etc/UTC
-#     devices:
-#       - /dev/net/tun:/dev/net/tun
-#     volumes:
-#       - ./config:/config
-#       # Place your .conf files in ./config/wg_confs/ (wg0.conf -> interface wg0).
-#       # The conf's DNS line becomes the container's resolver; no dnsmasq runs.
-#     sysctls:
-#       - net.ipv4.ip_forward=1
-#       - net.ipv4.conf.all.src_valid_mark=1   # required for AllowedIPs = 0.0.0.0/0
-#     restart: unless-stopped
+    restart: unless-stopped                 # A fatal error at start stops the container. This policy starts it again

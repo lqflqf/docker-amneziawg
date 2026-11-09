@@ -12,7 +12,7 @@ AmneziaWG is WireGuard with obfuscation. Hand-written parameters usually fail *q
 ```bash
 # full set: keys, server conf, one conf per peer
 awg-genconf.sh --version 3.1 --peers laptop,phone --endpoint vpn.example.com:51820 --outdir ./awg-configs
-# parameter block only: conf lines, docker-compose env (this repo's AWG_* names), or shell exports
+# parameter block only: conf lines, docker-compose env (this repo's first-start AWG_* names), or shell exports
 awg-genconf.sh --params-only --version 2.0 [--format conf|compose|env]
 # lint; several files are also cross-checked for shared values
 awg-lint.py wg0.conf peer1.conf peer2.conf
@@ -31,7 +31,7 @@ When you debug, start with `references/troubleshooting.md`. For each parameter r
 | `3.0` | `HeaderProtectionKey`, `ContentPaddingAddition`, randomized timers |
 | `3.1` | 3.0 + `RandomTrailers = on` |
 
-Default to **2.0** unless the user says their endpoints are newer. Newer modes fail closed. A client that cannot parse a key does not connect. An old kernel module reports `Unable to modify interface: Invalid argument`. Do not invent per-app version support. Upstream publishes none except AWG 2.0 needs AmneziaVPN ≥ 4.8.12.9. Ask what the user runs. Or give 2.0 and say 3.x is cheap to try. On the server, `cat /sys/module/amneziawg/version` shows the kernel module generation. `RandomTrailers`/`DisableCookies` are independent switches valid with any version.
+For a standalone conf, default to **2.0** unless the user says their endpoints are newer. (This repository's container defaults to 3.1.) Newer modes fail closed. A client that cannot parse a key does not connect. An old kernel module reports `Unable to modify interface: Invalid argument`. Do not invent per-app version support. Upstream publishes none except AWG 2.0 needs AmneziaVPN ≥ 4.8.12.9. Ask what the user runs. Or give 2.0 and say 3.x is cheap to try. On the server, `cat /sys/module/amneziawg/version` shows the kernel module generation. `RandomTrailers`/`DisableCookies` are independent switches valid with any version.
 
 ## Constraints that cause real damage
 
@@ -51,4 +51,6 @@ If a shared value changes, every distributed peer conf becomes invalid. Warn bef
 
 ## Scope
 
-This skill deals with `.conf` content. For this repository's container, `--format compose` emits its `AWG_*` variables. The container auto-generates valid values anyway; see the README. For other wrappers, such as routers and other images, give `.conf` content or ask. Do not invent environment variable names.
+This skill deals with `.conf` content. For this repository's container, `--format compose` emits its `AWG_*` variables. The container reads them only on the first start, and it generates valid values if they are not set. After the first start, change the values with `awgctl awg` (README "Protocol versions and obfuscation").
+
+For other wrappers, such as routers and other images, give `.conf` content or ask. Do not invent environment variable names.

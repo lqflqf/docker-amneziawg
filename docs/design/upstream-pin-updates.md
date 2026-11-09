@@ -10,15 +10,15 @@ The `Dockerfile` has three types of pins:
 
 | Pin | Lines | Updated by (now) |
 |---|---|---|
-| amneziawg-tools, amneziawg-go (tag + commit) | `Dockerfile:10-13` | `upstream-check.yml` |
-| Base images (tag + digest) | `Dockerfile:19`, `:36`, `:59` | Dependabot (`docker`) |
-| `apk` packages (`name=version`) | `Dockerfile:23`, `:40`, `:92-122` | Manual |
+| amneziawg-tools, amneziawg-go (tag + commit) | `AMNEZIAWG_*` `ARG` defaults | `upstream-check.yml` |
+| Base images (tag + digest) | The `FROM` lines of the stages | Dependabot (`docker`) |
+| `apk` packages (`name=version`) | The `apk add` blocks of the stages | Manual |
 
 These problems occur now:
 
 - Alpine keeps only the newest version of each package in a branch. When Alpine publishes a fix, the old version goes out of the index. Then each build fails until a person updates the pin.
 - Dependabot can change a `FROM` line, but it cannot change the `apk` pins. A new Alpine branch makes all `apk` pins incorrect, so a Dependabot PR for a new branch cannot pass.
-- `golang:1.27.1-alpine` does not show its Alpine branch. A new digest can move the `go-builder` stage to a different branch without a visible change.
+- `golang:1.27.3-alpine` does not show its Alpine branch. A new digest can move the `go-builder` stage to a different branch without a visible change.
 - No automatic process brings security fixes from Alpine packages into the image.
 
 ## 2. Decisions
@@ -82,10 +82,10 @@ Resolve each `apk add` block separately, in the base image of its own stage:
 
 | Block | Base image |
 |---|---|
-| `go-builder` (`Dockerfile:23`) | the selected `golang@<digest>` |
-| `tools-builder` (`Dockerfile:40`) | the selected `alpine@<digest>` |
-| runtime, s6 stack (`Dockerfile:92-101`) | the selected `alpine@<digest>` |
-| runtime, other packages (`Dockerfile:103-122`) | the selected `alpine@<digest>` |
+| `go-builder` | the selected `golang@<digest>` |
+| `tools-builder` | the selected `alpine@<digest>` |
+| runtime, s6 stack | the selected `alpine@<digest>` |
+| runtime, other packages | the selected `alpine@<digest>` |
 
 Commands in a container of that image and platform:
 
@@ -148,7 +148,7 @@ Tag names and versions come from outside the repository. Give them to shells onl
       "index": 0,
       "name": "go-builder",
       "image": "golang",
-      "old": { "tag": "1.27.1-alpine",     "digest": "sha256:..." },
+      "old": { "tag": "1.27.3-alpine",     "digest": "sha256:..." },
       "new": { "tag": "1.28.0-alpine3.25", "digest": "sha256:..." },
       "blocks": [
         { "index": 0, "apk": [ { "name": "git", "old": "2.54.0-r0", "new": "2.55.1-r0" } ] }
@@ -178,8 +178,8 @@ smoke            (contents: read)          any failure stops the run
   1. update-pins.test.sh
   2. download and examine candidate.json
   3. update-pins.sh candidate.json
-  4. build linux/amd64 -> smoke-test.sh
-  5. Trivy: fixable CRITICAL fails (as docker-build.yml:272-279)
+  4. build linux/amd64 -> integration-test.sh, smoke-test.sh
+  5. Trivy: fixable CRITICAL fails (as in the docker-build.yml smoke job)
   6. build linux/arm64 under QEMU -> arm64-check.sh
 
 open-pr          (contents: write, pull-requests: write)
@@ -189,7 +189,7 @@ open-pr          (contents: write, pull-requests: write)
 ```
 
 - `check-upstream` needs QEMU (`docker/setup-qemu-action`) for the arm64 resolution.
-- Move the arm64 runtime check from `docker-build.yml:414-446` into `.github/scripts/arm64-check.sh`. Both workflows call it.
+- Move the arm64 runtime check from the release job of `docker-build.yml` into `.github/scripts/arm64-check.sh`. Both workflows call it.
 - Trivy and the updater tests run inside this workflow. Thus these gates do not depend on `UPSTREAM_PR_TOKEN`.
 - Set a `timeout-minutes` on `smoke`. A Go build under QEMU is slow.
 
@@ -216,8 +216,8 @@ The script replaces the current positional interface. Only `upstream-check.yml` 
 
 If a step fails, the `Dockerfile` does not change.
 
-- Accept an old `golang` tag without a branch (`1.27.1-alpine`).
-- Always write the new `golang` tag with a branch (`1.27.1-alpine3.24`).
+- Accept an old `golang` tag without a branch (`1.27.3-alpine`).
+- Always write the new `golang` tag with a branch (`1.27.3-alpine3.24`).
 - Use `jq` to read the JSON. The runners have `jq`.
 
 ### 8.3 Tests (`update-pins.test.sh`)
@@ -232,7 +232,7 @@ Use a fixture `Dockerfile` in the test. Test these cases:
 - A value that does not agree with its pattern.
 - After each failure, the fixture file is not changed.
 
-Add the test to the step "Test the release scripts" (`docker-build.yml:175-179`).
+Add the test to the step "Test the release scripts" in `docker-build.yml`.
 
 ## 9. The pull request
 
@@ -268,7 +268,7 @@ The workflow can update an open PR after a person reviews it, as it does now. Th
 
 ### 10.2 The PR that implements this design
 
-The release gate (`docker-build.yml:94`) builds when one of these paths changes: `Dockerfile`, `root/`, `.dockerignore`, `docker-build.yml`, `.github/scripts/`.
+The release gate (`IMAGE_PATHS` in `docker-build.yml`) builds when one of these paths changes: `Dockerfile`, `root/`, `cmd/`, `internal/`, `go.mod`, `go.sum`, `.golangci.yml`, `.dockerignore`, `docker-build.yml`, `.github/scripts/`. A change to Go tests alone does not publish.
 
 | File | Release on merge |
 |---|---|
@@ -299,11 +299,11 @@ The cost: the arm64 check stays in two places, and the PR test step does not run
 | File | Change |
 |---|---|
 | `.github/dependabot.yml` | Remove the `docker` section. Keep `github-actions`. |
-| `Dockerfile:18` | Change the comment: `upstream-check.yml` updates the base images. |
-| `Dockerfile:19` | Change `golang:1.27.1-alpine` to `golang:1.27.1-alpine3.24`. The digest is the same today. |
-| `docker-build.yml:111-112` | Change the comment about Dependabot. |
-| `docker-build.yml:175-179` | Add `update-pins.test.sh`. |
-| `docker-build.yml:414-446` | Call `arm64-check.sh`. |
+| `Dockerfile`, comment above the first `FROM` | Change it: `upstream-check.yml` updates the base images. |
+| `Dockerfile`, both `golang` `FROM` lines | Add the Alpine branch to the tag, for example `golang:1.27.3-alpine3.24`. |
+| `docker-build.yml`, the comment about Dependabot | Change it. |
+| `docker-build.yml`, the script-test step | Add `update-pins.test.sh`. |
+| `docker-build.yml`, the arm64 boot check of the release job | Call `arm64-check.sh`. |
 | `.github/copilot-instructions.md` | Update the Dockerfile and CI/CD sections. |
 | `upstream-check.yml` header | Describe the base images and `apk` pins. |
 

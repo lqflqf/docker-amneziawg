@@ -10,14 +10,15 @@ Do **not** open a public issue. Send a private report through GitHub: in the rep
 
 ## What the image does
 
-- **Pinned supply chain**: base images are pinned by digest, and upstream sources by commit. Images have SLSA provenance and an SBOM. CI fails on fixable critical vulnerabilities.
-- **Private secrets**: keys, peer confs, QR codes and saved AWG parameters have mode `600`, in directories with mode `700`. QR codes go into the logs only if `LOG_CONFS=true`.
-- **Least-privilege DNS**: dnsmasq (server mode) runs as the unprivileged user `abc`. It answers only queries that come through the tunnel (`interface=wg0`).
-- **Fail closed**: if no tunnel comes up, the container removes each IPv4 and IPv6 default route and reports `unhealthy`.
-- **Validated configs**: the parser of `awg` examines each generated config. The container installs all of the configs or none of them. It gets auto-detected addresses through HTTPS and validates them.
+- **Pinned supply chain**: the Dockerfile pins base images by digest and upstream sources by commit. `go.sum` pins the Go modules. Images have SLSA provenance and an SBOM. CI fails on fixable critical vulnerabilities.
+- **Private secrets**: the database `/config/amneziawg.db` has mode `600`. The rendered `wg0.conf` in `/run/amneziawg/` has mode `600`. The container does not keep peer configs or QR codes on disk, and it never writes them to the log. `awgctl get` and `awgctl awg show` hide secrets unless you add `--show-secrets`.
+- **No user commands**: the container makes all confs from the database. There are no templates. The only `PostUp`/`PostDown` lines are the built-in firewall rules. Their one variable, `fw.nat_interface`, must match a strict pattern, and `awgctl` examines it again at each start.
+- **Least-privilege DNS**: dnsmasq runs as the unprivileged `dnsmasq` user, not as `PUID`. Thus dnsmasq cannot write the database. It answers only queries that come through the tunnel (`interface=wg0`).
+- **Checked changes**: before `awgctl` saves a change, it checks the full config with the `awg` parser, `dnsmasq --test` and key checks. At each start, it examines each value in the database again. It gets the auto-detected public address through HTTPS and checks it.
+- **No symlinks**: `awgctl` refuses a symlink in place of `/config`, the database or its journal. It never follows a symlink when it changes owners in `/config`.
 
-The container runs as root, because it needs `NET_ADMIN`.
+The container runs as root, because it needs `NET_ADMIN`. The `abc` user (`PUID`:`PGID`) only owns `/config` and runs no process.
 
 ## Trust boundary: `/config`
 
-Write access to the `/config` volume is equal to root access to the container. `PostUp`/`PostDown` lines in each conf in `/config/wg_confs/` run as root. The templates in `/config/templates/` (also `dnsmasq.conf`) are shell heredocs, and root expands them. The container refuses world-writable templates. But a user who can write to the volume as its owner can run code. Make sure that `PUID` owns the volume and that other users cannot write to it.
+Write access to the `/config` volume is equal to root access to the container. The database holds every key, and root processes read it. A user who can write to the volume can change the server, the peers and the keys. Make sure that `PUID` owns the volume and that other users cannot write to it. A backup of `amneziawg.db` holds every private key. Keep it as private as the volume.
