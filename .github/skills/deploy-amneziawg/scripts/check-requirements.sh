@@ -165,10 +165,8 @@ if [ -n "${mem_mb:-}" ]; then
 fi
 
 # --- Sysctls ---
-# Only ip_forward genuinely matters on the host. disable_ipv6
-# is set inside the container's netns via compose 'sysctls:' — host values don't
-# need to be touched. Look in PATH first, then fall back to absolute path
-# (some minimal distros omit /sbin from non-root PATH).
+# Only ip_forward matters on the host. Look in PATH first, then fall back to
+# an absolute path (some minimal distros omit /sbin from non-root PATH).
 sysctl_bin=$(command -v sysctl 2>/dev/null || { [ -x /usr/sbin/sysctl ] && echo /usr/sbin/sysctl; } || { [ -x /sbin/sysctl ] && echo /sbin/sysctl; })
 if [ -n "${sysctl_bin:-}" ]; then
     ipfwd=$("$sysctl_bin" -n net.ipv4.ip_forward 2>/dev/null || echo "?")

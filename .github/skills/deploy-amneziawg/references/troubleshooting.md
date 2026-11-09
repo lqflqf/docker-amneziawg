@@ -1,6 +1,6 @@
 # Deployment troubleshooting
 
-Start with `docker compose logs --tail=200` and `docker exec amneziawg awgctl health`. The health check prints why the container is unhealthy. `docker exec amneziawg awgctl peer list` shows the peers and their handshakes. README "Health check and troubleshooting" lists common symptoms. Parameter-level problems are in the `amneziawg-config` skill's `references/troubleshooting.md`. These include slow tunnels, version errors, Keenetic `invalid I1 value`, and "AWG 1.5" in the app.
+Start with `docker compose logs --tail=200` and `docker exec amneziawg awgctl health`. The health check prints why the container is unhealthy. `docker exec amneziawg awgctl peer list` shows the peers and their handshakes. README "Health check and troubleshooting" lists common symptoms. To change a value after the first start, use `awgctl` and restart the container (README "Settings"). Parameter-level problems are in the `amneziawg-config` skill's `references/troubleshooting.md`. These include slow tunnels, version errors, Keenetic `invalid I1 value`, and "AWG 1.5" in the app.
 
 ## Container does not start
 
@@ -37,16 +37,3 @@ Start with `docker compose logs --tail=200` and `docker exec amneziawg awgctl he
 - **No DNS**: peers always use dnsmasq at `<subnet>.1`. Run `awgctl health` and see the dnsmasq rows above. A healthy container does not prove that the upstream works. Run `docker exec amneziawg nslookup example.com <upstream address>`. For Unbound on the host, check its `interface` and `access-control`. Also check the host-firewall rule for the bridge.
 - **Mobile data fails, Wi-Fi works**: publish `443:51820/udp` and run `awgctl set server.endpoint_port 443 --yes`. Or use a port ≤ 9999. Then restart the container and export each peer conf again. Make sure that the peer has keepalive on (`awgctl peer set <id> --keepalive on`, then restart).
 - **The app cannot connect after the first start**: the default AWG version is 3.1. For an older app, run `awgctl awg version 2.0 --yes`, restart, and export each peer conf again.
-
-## Changing values after the first start
-
-The container reads the environment only on the first start. It ignores a changed variable. Use `awgctl`, then restart the container:
-
-```bash
-docker exec amneziawg awgctl set server.endpoint_host vpn.example.com --yes
-docker exec amneziawg awgctl awg regenerate --yes      # new obfuscation values
-docker restart amneziawg                               # applies each saved change
-docker exec -it amneziawg awgctl peer export <id> --qr
-```
-
-`awgctl` changes only the database. Nothing changes in the running container until the restart. After a change to a shared value, give each peer its new conf.

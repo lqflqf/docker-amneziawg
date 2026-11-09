@@ -31,7 +31,7 @@ When you debug, start with `references/troubleshooting.md`. For each parameter r
 | `3.0` | `HeaderProtectionKey`, `ContentPaddingAddition`, randomized timers |
 | `3.1` | 3.0 + `RandomTrailers = on` |
 
-Default to **2.0** unless the user says their endpoints are newer. Newer modes fail closed. A client that cannot parse a key does not connect. An old kernel module reports `Unable to modify interface: Invalid argument`. Do not invent per-app version support. Upstream publishes none except AWG 2.0 needs AmneziaVPN ≥ 4.8.12.9. Ask what the user runs. Or give 2.0 and say 3.x is cheap to try. On the server, `cat /sys/module/amneziawg/version` shows the kernel module generation. `RandomTrailers`/`DisableCookies` are independent switches valid with any version.
+For a standalone conf, default to **2.0** unless the user says their endpoints are newer. (This repository's container defaults to 3.1.) Newer modes fail closed. A client that cannot parse a key does not connect. An old kernel module reports `Unable to modify interface: Invalid argument`. Do not invent per-app version support. Upstream publishes none except AWG 2.0 needs AmneziaVPN ≥ 4.8.12.9. Ask what the user runs. Or give 2.0 and say 3.x is cheap to try. On the server, `cat /sys/module/amneziawg/version` shows the kernel module generation. `RandomTrailers`/`DisableCookies` are independent switches valid with any version.
 
 ## Constraints that cause real damage
 

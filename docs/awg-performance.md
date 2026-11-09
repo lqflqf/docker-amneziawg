@@ -145,7 +145,7 @@ modinfo amneziawg | grep -E '^(filename|srcversion)'   # must match
 
 This does not affect the kernel check of `awgctl init`. That check only compares the `3.1` major/minor to decide if the module understands the 3.1 switches at all. Upstream does maintain those two components.
 
-Older images drew `S4` values up to 27. With `S4 = 27`, a 1420-MTU packet is 1507 bytes over IPv4. That packet fragments and causes the 75.5 Mbit/s row above.
+The 75.5 Mbit/s row above is fragmentation: the old container drew `S4` up to 27, and with `S4 = 27` a 1420-MTU packet is 1507 bytes over IPv4 ([mtu.md](mtu.md)).
 
 ## Recommended parameters
 

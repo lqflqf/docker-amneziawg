@@ -32,7 +32,7 @@ The client side has the same problem in the other direction. Usually, it has a *
 
 1280 leaves 220 bytes of headroom on a 1500-byte IPv4 path. That is enough for `S4`, UDP, IP, and a few hops of extra encapsulation. Its wire packets, `1280 + 60 + S4`, clear PPPoE (1492), LTE (~1400), and every ordinary path. This is why people converge on it. It is also why Amnezia's installers, the 3.1 upgrade guides, and the defaults of this container use it.
 
-Be precise about the "IPv6 minimum" argument. The 1280-byte floor applies to the packet **on the wire**. A tunnel MTU of 1280 produces wire packets of `1340 + S4` bytes over an IPv4 endpoint. It produces `1360 + S4` over an IPv6 one. On a path whose own MTU really is 1280, those packets still fragment. Examples are DS-Lite, some LTE, and tunnel-in-tunnel setups. The truly-safe-everywhere tunnel MTU is `1280 − 60 − S4` for an IPv4 endpoint. It is `1280 − 80 − S4` for IPv6. These values keep the outer packet at or below 1280. At `S4 = 12`, the values are 1208 and 1188. A capture verified this on such a path ([measurement](awg-performance.md#per-packet-overhead-and-the-handshake-burst-fix)). Measure your path with a `ping -M do` binary search. Use 1280 when the path is normal or unknown-but-probably-normal. Use `path − 60 − S4` (IPv4) or `path − 80 − S4` (IPv6) when you know the path is constrained.
+The 1280-byte IPv6 minimum applies to the packet **on the wire**, not to the tunnel MTU. A tunnel MTU of 1280 makes wire packets of `1340 + S4` bytes (IPv4 endpoint) or `1360 + S4` bytes (IPv6 endpoint). On a path that is really limited to 1280, such as DS-Lite, some LTE and tunnel-in-tunnel setups, these packets still fragment. A capture on such a path verified this ([measurement](awg-performance.md#per-packet-overhead-and-the-handshake-burst-fix)).
 
 ## Which value to pick
 
@@ -44,7 +44,7 @@ Be precise about the "IPv6 minimum" argument. The 1280-byte floor applies to the
 | IPv6 endpoint on a 1500-byte path | 1388-1400 | `1500 − 40 − 8 − 32 − S4`: 1400 for `S4 = 20`, 1388 for `S4 = 32` |
 | You set `S4` yourself | `path − 60 (IPv4) / 80 (IPv6) − S4` | Recompute when you change `S4` |
 
-Do not go above the derived number to get more speed. The tunnel MTU is a ceiling. Each byte above the path limit returns as fragmentation. If you go lower than necessary, you only add per-packet overhead. On a normal path, a value below 1280 gives no benefit. On a constrained path, a value below the derived value of that path gives no benefit. At `S4 = 12` on a true 1280-byte path, those values are 1208 for IPv4 and 1188 for IPv6. The number is derived, not magic.
+The tunnel MTU is a ceiling. Do not go above the derived number to get more speed: each byte above the path limit comes back as fragmentation. A value below the derived number only adds per-packet overhead.
 
 Some setups use `RandomTrailers` without `ContentPaddingAddition`, for example 3.1 with `ContentPaddingAddition = 0`. In these setups, a lower MTU also helps in a second way. The trailer window tracks the largest datagram seen. Thus, a smaller MTU caps how far small packets can grow. This matters on asymmetric links where the upload ACK stream limits download speed.
 

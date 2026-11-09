@@ -7,9 +7,7 @@
 
 [AmneziaWG](https://docs.amnezia.org/) VPN server in one container. AmneziaWG is WireGuard with traffic obfuscation, which makes the handshake difficult for deep packet inspection to identify. The `awgctl` command keeps the server, the peers and the obfuscation parameters in one SQLite file. It makes a config and a QR code for each peer, and dnsmasq answers DNS for the peers. The image is Alpine Linux with [s6-overlay](https://github.com/just-containers/s6-overlay), for amd64 and arm64.
 
-> This project is a fork of [AYastrebov/docker-amneziawg](https://github.com/AYastrebov/docker-amneziawg). See [Credits](#credits) and [Upgrading](#upgrading).
-
-> **Breaking release.** The container is now a server only. `awgctl` replaces the env-var config, the templates and `show-peer`. A volume of an older release needs a one-time import. See [From the releases before `awgctl`](#from-the-releases-before-awgctl).
+> This project is a fork of [AYastrebov/docker-amneziawg](https://github.com/AYastrebov/docker-amneziawg) (see [Credits](#credits)). **Breaking release:** the container is now a server only, and `awgctl` replaces the env-var config. A volume of an older release needs a one-time import. See [Upgrading](#from-the-releases-before-awgctl).
 
 ## Quick start
 
@@ -41,7 +39,7 @@ services:
 4. Restart the container to apply the new peer: `docker restart amneziawg`.
 5. Scan the QR code with the [Amnezia app](https://amnezia.org/).
 
-A new server has no peers. Add one peer for each device. [`docker-compose.yml`](docker-compose.yml) lists each first-start variable with comments.
+A new server has no peers. Add one peer for each device. [`docker-compose.yml`](docker-compose.yml) shows each variable.
 
 ### Requirements
 
@@ -53,27 +51,11 @@ A new server has no peers. Add one peer for each device. [`docker-compose.yml`](
 
 ## First start
 
-On the first start, `/config` has no database. `awgctl init` reads the environment, makes the server key and the AWG parameters, and writes `/config/amneziawg.db`. It reads these variables **only on the first start**:
+On the first start, `/config` has no database. `awgctl init` reads the environment, makes the server key and the AWG parameters, and writes `/config/amneziawg.db`. It reads the first-start variables in [Settings](#settings) and the [`AWG_*` variables](#protocol-versions-and-obfuscation) **only on the first start**. After that, the database is the only source of the configuration, and the container ignores these variables. Use `awgctl` to change a value.
 
-| Variable | Default | Function |
-|---|---|---|
-| `SERVERURL` | detected | Host or IP in the peer configs. **Set it** to a DNS name or a fixed IP. `auto` is an error |
-| `SERVERPORT` | `51820` | Port in the peer configs, 1-65535 without a leading zero. The container always listens on 51820, so map `SERVERPORT:51820/udp` |
-| `INTERNAL_SUBNET` | `10.13.13.0/24` | VPN subnet, `/24` only. `.1` is the server, `.2` to `.254` are peers |
-| `ALLOWEDIPS` | `0.0.0.0/0, ::/0` | What peers send into the tunnel. The tunnel is IPv4-only, and `::/0` stops IPv6 leaks. Make it narrower for a split tunnel |
-| `DNS_UPSTREAM` | `1.1.1.1,1.0.0.1` | Upstreams for the [DNS forwarder](#dns-dnsmasq): IPv4/IPv6 addresses, each with an optional `#port` |
-| `MTU` | `1280` | Tunnel MTU of the server and of the peer configs, 576-1500 or `none`. See [Performance and MTU](#performance-and-mtu) |
-| `AWG_VERSION`, `AWG_*` | `3.1`, generated | Protocol version and obfuscation. See [Protocol versions](#protocol-versions-and-obfuscation) |
+If `SERVERURL` is not set, the container asks 3 HTTPS services for the public IPv4. It tries 3 times, after 0 s, 5 s and 15 s. If all attempts fail, the container stops and writes nothing. Set `SERVERURL` and start again. `SERVERURL=auto` is an error.
 
-If `SERVERURL` is not set, the container asks 3 HTTPS services for the public IPv4. It tries 3 times, after 0 s, 5 s and 15 s. If all attempts fail, the container stops and writes nothing. Set `SERVERURL` and start again.
-
-After the first start, the database is the only source of the configuration. The container ignores the variables above, also when they have a different value. To change a value, use `awgctl`. `PUID` and `PGID` apply at each start:
-
-| Variable | Default | Function |
-|---|---|---|
-| `PUID` / `PGID` | `911` | Owner of `/config` and of the database. Use a number from 1 to 4294967294. A value that is not valid, or `0` (root), stops the container with exit code 1 |
-
-The container ignores `PEERS`, `PERSISTENTKEEPALIVE_PEERS`, `LOG_CONFS`, `PEERDNS`, `USE_DNS` and `HEALTHCHECK_DNS_NAME`.
+`PUID` and `PGID` (default `911`) apply at each start. They set the owner of `/config` and of the database. Use a number from 1 to 4294967294. A value that is not valid, or `0` (root), stops the container with exit code 1.
 
 ## `awgctl`
 
@@ -125,25 +107,21 @@ docker restart amneziawg                                        # applies the pe
 
 ### Settings
 
-`awgctl get` shows each setting. `awgctl set <key> <value>` changes one setting. `awgctl reset <key>` sets the default again.
+`awgctl get` shows each setting. `awgctl set <key> <value>` changes one setting. `awgctl reset <key>` sets the default again. Each change applies after `docker restart amneziawg`. A change marked **new configs** needs `--yes`. After the restart, export each peer config again and import it on the device.
 
-| Key | First-start variable | Default | After a change |
+| Key | First-start variable | Default | Function |
 |---|---|---|---|
-| `server.endpoint_host` | `SERVERURL` | detected | Restart, new peer configs |
-| `server.endpoint_port` | `SERVERPORT` | `51820` | Restart, new peer configs |
-| `net.subnet` | `INTERNAL_SUBNET` | `10.13.13.0/24` | Restart, new peer configs |
-| `net.mtu` | `MTU` | `1280` | Restart |
-| `net.peer_mtu` | `MTU` | `1280` | Restart, new peer configs |
-| `peer.default_allowed_ips` | `ALLOWEDIPS` | `0.0.0.0/0, ::/0` | Restart, new peer configs |
-| `peer.keepalive_seconds` | — | `25` | Restart |
-| `fw.nat_interface` | — | `eth+` | Restart |
-| `fw.ipv6_forward_drop` | — | `true` | Restart |
-| `dns.upstream` | `DNS_UPSTREAM` | `1.1.1.1,1.0.0.1` | Restart |
-| `server.private_key` | — | generated | Only `awgctl server rotate-key --yes`. Restart, new peer configs |
-
-- **Restart**: the database keeps the new value, and the container uses it after `docker restart amneziawg`.
-- **New peer configs**: the command needs `--yes`. Then export each peer config again and import it on the device.
-- `fw.nat_interface` is the interface of the `MASQUERADE` rule: a name, or a prefix with `+`. `fw.ipv6_forward_drop` drops IPv6 that peers send through `wg0`.
+| `server.endpoint_host` | `SERVERURL` | detected | Host or IP in the peer configs. **Set it** to a DNS name or a fixed IP. New configs |
+| `server.endpoint_port` | `SERVERPORT` | `51820` | Port in the peer configs. The container always listens on 51820, so map `SERVERPORT:51820/udp`. New configs |
+| `net.subnet` | `INTERNAL_SUBNET` | `10.13.13.0/24` | VPN subnet, `/24` only. `.1` is the server, `.2` to `.254` are peers. New configs |
+| `net.mtu` | `MTU` | `1280` | Tunnel MTU of the server, 576-1500 or `none`. See [Performance and MTU](#performance-and-mtu) |
+| `net.peer_mtu` | `MTU` | `1280` | MTU in the peer configs. New configs |
+| `peer.default_allowed_ips` | `ALLOWEDIPS` | `0.0.0.0/0, ::/0` | What peers send into the tunnel. The tunnel is IPv4-only, and `::/0` stops IPv6 leaks. Make it narrower for a split tunnel. New configs |
+| `peer.keepalive_seconds` | — | `25` | `PersistentKeepalive` of the peers with keepalive on |
+| `fw.nat_interface` | — | `eth+` | Interface of the `MASQUERADE` rule: a name, or a prefix with `+` |
+| `fw.ipv6_forward_drop` | — | `true` | Drop IPv6 that peers send through `wg0` |
+| `dns.upstream` | `DNS_UPSTREAM` | `1.1.1.1,1.0.0.1` | Upstreams of the [DNS forwarder](#dns-dnsmasq): IPv4/IPv6 addresses, each with an optional `#port` |
+| `server.private_key` | — | generated | Change it only with `awgctl server rotate-key --yes`. New configs |
 
 ## Protocol versions and obfuscation
 
@@ -154,7 +132,7 @@ docker restart amneziawg                                        # applies the pe
 | `2.0` | Full DPI evasion: S1-S4 padding, H1-H4 ranges and an I1 signature (a QUIC Initial). Needs AmneziaVPN 4.8.12.9+ |
 | `1.5` | Legacy: integer H values, `S3 = S4 = 0`, no I1-I5 |
 
-The container makes each value on the first start. To start with a different version, set `AWG_VERSION` on the first start. To pin one value, set its `AWG_*` variable, for example `AWG_JC=5`. After the first start, use `awgctl awg`:
+The container makes each value on the first start. To start with a different version, set `AWG_VERSION` on the first start. To pin one value, set its `AWG_*` variable, for example `AWG_JC=5`. After the first start, use `awgctl awg`. Each AWG change applies after a restart:
 
 ```bash
 docker exec amneziawg awgctl awg show                  # the current values
@@ -162,10 +140,10 @@ docker exec amneziawg awgctl awg version 2.0 --yes     # new S, H, I and 3.x val
 docker exec amneziawg awgctl awg set s=16 --yes        # S1-S4 together
 docker exec amneziawg awgctl awg set jc=6 jmin=50 jmax=200
 docker exec amneziawg awgctl awg regenerate h1 h2 --yes
-docker restart amneziawg                               # each AWG change applies after a restart
+docker restart amneziawg
 ```
 
-- Each AWG change applies after a restart. If the change touches a value that must match, each peer needs its new config.
+- If the change touches a value that must match, the command needs `--yes`, and each peer needs its new config.
 - `awg version` sets `RandomTrailers` to `on` for 3.1 and to `off` for the other versions. It draws S, H, I and the 3.x values again. `Jc`, `Jmin`, `Jmax` and `DisableCookies` stay.
 - `awg set` takes several `key=value` pairs and checks them together. The key is the short name (`s1`, `content_padding`), the conf name (`S1`) or the variable name (`AWG_S1`).
 - A value that breaks a rule is an error. Only the S maximums and `S4 > 20` give a warning.
@@ -187,7 +165,7 @@ The server and all peers must use the same version and the same S, H, I, `Header
 
 ### Signature packets (I1-I5)
 
-Tags: `<b 0xHEX>` static bytes, `<r N>` random bytes, `<rd N>` random digits, `<rc N>` random letters, `<t>` a timestamp. Some third-party parsers, such as Keenetic, reject a tag larger than 1000 bytes. For them, write the default `<r 1178>` as `<r 1000><r 178>`, which is the same on the wire. [AmneziaWG Architect](https://architect.vai-rice.space/) makes signatures that look like QUIC, DNS, DTLS, SIP and other protocols.
+Tags: `<b 0xHEX>` static bytes, `<r N>` random bytes, `<rd N>` random digits, `<rc N>` random letters, `<t>` a timestamp. [AmneziaWG Architect](https://architect.vai-rice.space/) makes signatures that look like QUIC, DNS, DTLS, SIP and other protocols. Some third-party parsers, such as Keenetic, reject a tag larger than 1000 bytes. See [the `<r N>` size](.github/skills/amneziawg-config/references/parameters.md#r-n-size).
 
 ## Kernel module
 
@@ -285,7 +263,7 @@ docker exec amneziawg nslookup example.com 10.13.13.1   # test the upstream
 | Exit code 1 at start, log says `public IPv4 address could not be detected` | Set `SERVERURL` and start again |
 | Exit code 1 at start, log says `is not a numeric ID` or `(root) is not supported` | Set `PUID`/`PGID` to the owner of `./config` (`id -u`, `id -g`), not to 0 |
 | A variable change has no effect | The variables apply only on the first start. Use `awgctl`, then restart the container |
-| An `awgctl` change has no effect | Restart the container: `docker restart amneziawg` |
+| An `awgctl` change has no effect | Restart the container |
 | Custom `SERVERPORT` cannot be reached | Map `SERVERPORT:51820/udp` |
 | Amnezia app shows AWG 1.5 | H1-H4 are integers. Run `awgctl awg version 2.0 --yes`, or select a 3.x version |
 | Connection fails after a parameter change | Give the peers their new configs (`awgctl peer export <id> --qr`) |
@@ -349,7 +327,7 @@ An old `peer_laptop` becomes `laptop`, and `peer1` stays `peer1`. Each peer keep
 
 Breaking changes:
 
-1. The environment applies only on the first start. Use `awgctl` for later changes.
+1. The environment applies only on the first start. Use `awgctl` for later changes. The container ignores `PEERS`, `PERSISTENTKEEPALIVE_PEERS`, `LOG_CONFS`, `PEERDNS`, `USE_DNS` and `HEALTHCHECK_DNS_NAME`.
 2. `/config` holds only `amneziawg.db` and, after an import, `legacy-<timestamp>/`.
 3. `awgctl peer export` replaces `show-peer`, the peer files and `LOG_CONFS`.
 4. `awgctl peer add` replaces `PEERS` and `PERSISTENTKEEPALIVE_PEERS`. A new server has no peers.
@@ -366,12 +344,11 @@ Change `image:`, then import the volume as above. The main difference is DNS: th
 
 ## Security
 
-The database has mode `600`, and the `PUID` user owns `/config`. **Treat write access to `/config` as root access**: the database holds every key, and root processes read it. See [SECURITY.md](SECURITY.md) for details and vulnerability reports.
+**Treat write access to `/config` as root access**: the database holds every key, and root processes read it. See [SECURITY.md](SECURITY.md) for the details and for vulnerability reports.
 
-## Links
+## Contributing
 
-- [AmneziaVPN documentation](https://docs.amnezia.org/) · [kernel module](https://github.com/amnezia-vpn/amneziawg-linux-kernel-module) · [AmneziaWG Architect](https://architect.vai-rice.space/)
-- [CONTRIBUTING.md](CONTRIBUTING.md) (build and test) · [releases](https://github.com/lqflqf/docker-amneziawg/releases)
+See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Credits
 

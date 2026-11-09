@@ -44,6 +44,7 @@ The host needs Docker. It does not need a Go toolchain. `.github/scripts/go.sh` 
 .github/scripts/go.sh fmt ./...                     # gofmt
 GO_CGO=1 .github/scripts/go.sh test -race ./...     # race detector (CI lint job)
 docker build -t amneziawg-test .                    # the awgctl-builder stage runs go vet and go test
+docker buildx build --platform linux/amd64,linux/arm64 .   # both architectures
 .github/scripts/integration-test.sh amneziawg-test  # Go integration tests in the image
 .github/scripts/smoke-test.sh amneziawg-test        # black box, approximately 1 min, the CI gate
 .github/scripts/next-version.test.sh && .github/scripts/release-tags.test.sh
@@ -77,7 +78,7 @@ Set `ENGINE=nerdctl` to run `go.sh`, `integration-test.sh` and `smoke-test.sh` w
 | Package | Role |
 |---|---|
 | `cli` | The command table, each command, the exit codes, the `change` transaction (load, change, check, commit), `init` |
-| `config` | The settings registry, the `State`, `Validate`, the peer id and name rules |
+| `config` | The settings registry and its `Key*` constants, the `State`, `Validate`, `Save`, the peer operations (`AddPeers`, `RemovePeer`), the peer id and name rules |
 | `awg` | AWG keys, generators, `Validate`, `Transition` (version change), `Set`, `Regenerate`, `Is3x`/`Has2x` |
 | `seed` | The first state from the env, public IPv4 detection with retries |
 | `store` | `database/sql` with `modernc.org/sqlite`, the embedded `schema.sql`, atomic `Create` |
@@ -88,7 +89,7 @@ Set `ENGINE=nerdctl` to run `go.sh`, `integration-test.sh` and `smoke-test.sh` w
 | `legacy` | `import-legacy`: reads the old files as data, maps names, compares each peer export with the old conf |
 | `fsafe` | Symlink and owner checks in `/config`, modes, a `chown` that does not follow links |
 | `keys`, `netcheck` | X25519 keys (`crypto/ecdh`), PSKs, input checks for hosts, ports, subnets, CIDR lists, DNS upstreams |
-| `sys`, `sys/systest` | Paths, the `Runner` interface, atomic writes, the fake runner for tests |
+| `sys`, `sys/systest` | Paths and the `/config` file names, the `Runner` interface, atomic writes, the fake runner for tests |
 
 ### s6-overlay services (`root/etc/s6-overlay/s6-rc.d/`)
 
@@ -173,7 +174,7 @@ A change is one write transaction: load, change in memory, `--yes` check, `check
 
 ## Development rules
 
-- **New setting**: add one entry to `config.Registry` with its key, seed env var, default, `Reissue` flag and `Check`. Add AWG values in `internal/awg`. Write conf output only through `render` and `conf`. Document the setting in `README.md` (and `docker-compose.yml` if it has a seed env var). Add a unit test for its rules.
+- **New setting**: add a `Key*` constant and one entry to `config.Registry` with its seed env var, default, `Reissue` flag and `Check`. Use the constant in code, not the literal key. Add AWG values in `internal/awg`. Write conf output only through `render` and `conf`. Document the setting in `README.md` (and `docker-compose.yml` if it has a seed env var). Add a unit test for its rules.
 - **New command**: add one entry to `groups` in `internal/cli/commands.go`, with its flags, number of arguments, usage line and handler. The usage text comes from this table. Use `change` for each state change. Keep the exit codes: 0 done, 1 error (nothing changed), 2 usage, 3 refused without `--yes`.
 - **Schema change**: edit `internal/store/schema.sql`. There are no migrations, so a schema change needs a new database. Write the steps in the release notes.
 - **Go**: format with `gofmt`. golangci-lint must pass. Return errors with context. Do not panic. Use `sys.Runner` for each external command, so that unit tests can use the fake runner.

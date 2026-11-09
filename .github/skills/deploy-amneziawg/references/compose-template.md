@@ -1,6 +1,6 @@
 # docker-compose.yml template
 
-Fill the `<<…>>` placeholders from Phases 3-4. `README.md` "First start" describes every variable. The repository `docker-compose.yml` shows all optional variables. The container reads them only on the first start, when `config/` has no database.
+Fill the `<<…>>` placeholders from Phases 3-4. `README.md` "Settings" describes every variable. The repository `docker-compose.yml` shows all optional variables. The container reads them only on the first start, when `config/` has no database.
 
 ```yaml
 services:
@@ -31,7 +31,6 @@ services:
       - "<<SERVERPORT>>:51820/udp"
     sysctls:
       - net.ipv4.ip_forward=1
-      - net.ipv6.conf.all.disable_ipv6=0
     restart: unless-stopped
 ```
 

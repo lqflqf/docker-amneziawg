@@ -28,7 +28,7 @@ The module is optional. Without it, the container uses the bundled userspace `am
 ## Networking
 
 - Expect IPv4 on the host. IPv6-only hosts are not supported upstream.
-- Docker sets `net.ipv4.ip_forward=1` when it starts. Persist it in `/etc/sysctl.d/` to keep it after reboots. Compose sets the IPv6 sysctl inside the container. Do not require it on the host. The image does not need `src_valid_mark`.
+- Docker sets `net.ipv4.ip_forward=1` when it starts. Persist it in `/etc/sysctl.d/` to keep it after reboots. The image does not need `src_valid_mark`.
 
 ## Soft checks
 

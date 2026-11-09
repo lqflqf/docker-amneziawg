@@ -36,7 +36,7 @@ Ask in one batch. Use the `ask_user` tool with several fields. The container rea
 | `SERVERPORT` | `51820` | For a non-default port, map `SERVERPORT:51820/udp`. If carriers block high UDP ports, use 443/udp or a port ≤ 9999 |
 | Peer names | — | One name for each device, for example `laptop`, `phone`. 1-32 of `A-Z a-z 0-9 . _ -`, starting with a letter or digit. The peers come in Phase 6, not from the environment |
 
-Ask these optional settings only if the user wants them. Use `INTERNAL_SUBNET` (a `/24`) for a LAN conflict. Use `DNS_UPSTREAM` for the peer dnsmasq forwarder (default `1.1.1.1,1.0.0.1`). Use `ALLOWEDIPS` for a split tunnel. Use `MTU` (default 1280) only for a known constrained path. For meanings and defaults, see README "First start" and "Settings".
+Ask these optional settings only if the user wants them. Use `INTERNAL_SUBNET` (a `/24`) for a LAN conflict. Use `DNS_UPSTREAM` for the peer dnsmasq forwarder. Use `ALLOWEDIPS` for a split tunnel. Use `MTU` only for a known constrained path. For meanings and defaults, see README "Settings".
 
 Offer encrypted, DNSSEC-validated DNS for peers. Use Unbound on the host as in README "Recommended: Unbound on the host". Use a fixed Compose network. Bind Unbound only to the gateway address of that network. Add a host-firewall rule for the bridge. Set `DNS_UPSTREAM` to the gateway. Never bind it to `0.0.0.0` or a public address.
 
@@ -79,7 +79,7 @@ Import the conf, connect, and run `curl https://api.ipify.org`. It should show t
 
 - Do not run compose in the foreground. Do not publish 51820 over TCP.
 - Do not run `chmod 777` on `config/`. Set `PUID`/`PGID` to the user that owns it.
-- Do not change `SERVERURL`, `AWG_*` or other first-start variables to change a running server. The container ignores them and logs a `WARNING`. Use the `awgctl` command in the warning.
+- Do not change `SERVERURL`, `AWG_*` or other first-start variables to change a running server. The container ignores them. Use `awgctl` (README "Settings"), then restart the container.
 - Do not skip Phase 1. Without `/dev/net/tun` and without a kernel module, no tunnel comes up, and the container reports `unhealthy`.
 
 ## Files

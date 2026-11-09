@@ -7,9 +7,9 @@
 #      docker restart amneziawg
 #
 # The container reads the variables marked "first start" only once, when
-# ./config has no database. Later, change these values with awgctl
-# (README "Settings" and "Protocol versions and obfuscation"). A changed
-# variable only gives a WARNING with the awgctl command to use.
+# ./config has no database, and ignores them later. Then change the values
+# with awgctl. README "Settings" and "Protocol versions and obfuscation" give
+# each default and rule.
 
 services:
   amneziawg:
@@ -42,40 +42,19 @@ services:
 
       # ---- AmneziaWG, first start only (then: awgctl awg version|set|regenerate) ----
       # - AWG_VERSION=3.1                   # 3.1 (default), 3.0, 2.0 (AmneziaVPN 4.8.12.9+) or 1.5 for legacy apps
-      # The container makes each value below. Set one only to pin it.
-      # Defaults and rules: README "Protocol versions and obfuscation".
-      # - AWG_JC=5                          # Junk packet count
-      # - AWG_JMIN=50                       # Minimum junk packet size (< AWG_JMAX)
-      # - AWG_JMAX=200                      # Maximum junk packet size (<= 1280)
-      # - AWG_S1=16                         # Init packet padding. With RandomTrailers, S1 = S2 = S3 = S4
-      # - AWG_S2=16                         # Response packet padding (S1 + 56 must not equal S2)
-      # - AWG_S3=16                         # Cookie padding
-      # - AWG_S4=16                         # Transport padding, keep <= 20 (docs/mtu.md)
-      # - AWG_H1=90666522-140666522         # Header ranges that do not overlap (2.0+).
-      # - AWG_H2=623045912-673045912        # Integers make the Amnezia app show 1.5.
-      # - AWG_H3=1210341563-1260341563
-      # - AWG_H4=1820577390-1870577390
-      # - AWG_I1=<b 0xc3><b 0x00000001><b 0x08><r 8><b 0x00><b 0x00><b 0x449e><r 4><r 1178>  # default (QUIC Initial)
-      # - AWG_I2=<r 64>                     # I2-I5: optional signature packets (need I1)
-
-      # ---- AWG 3.x (AWG_VERSION=3.0 or 3.1) ----
-      # Timers are "lo-hi" ranges. Each end selects its own value from the range.
-      # - AWG_HEADER_PROTECTION_KEY=        # Base64 32-byte key, the same on each end (needs S1-S4 >= 12)
-      # - AWG_CONTENT_PADDING=0             # Must be 0 with RandomTrailers. Padding costs about 22% of download
-      # - AWG_REKEY_AFTER_TIME=110-130
-      # - AWG_REKEY_TIMEOUT=5-9
-      # - AWG_REJECT_AFTER_TIME=180-200
-      # - AWG_KEEPALIVE_TIMEOUT=10-18
-      # - AWG_MAX_HANDSHAKE_ATTEMPTS=15-22
-
-      # ---- AWG 3.1 switches (on/off) ----
-      # - AWG_RANDOM_TRAILERS=on            # Default on for 3.1, off for the other versions. Not with 1.5. The same on each end
-      # - AWG_DISABLE_COOKIES=on            # Default off. Removes the WireGuard DoS protection. Can be different on each end
+      # The container makes each value below. Set one only to pin it, for example:
+      # - AWG_JC=5                          # also AWG_JMIN, AWG_JMAX
+      # - AWG_S1=16                         # also AWG_S2-AWG_S4. With RandomTrailers, S1 = S2 = S3 = S4
+      # - AWG_H1=90666522-140666522         # also AWG_H2-AWG_H4: ranges that do not overlap (2.0+)
+      # - AWG_I2=<r 64>                     # also AWG_I1, AWG_I3-AWG_I5: signature packets
+      # - AWG_HEADER_PROTECTION_KEY=        # 3.x: also AWG_CONTENT_PADDING, AWG_REKEY_AFTER_TIME, AWG_REKEY_TIMEOUT,
+      #                                     # AWG_REJECT_AFTER_TIME, AWG_KEEPALIVE_TIMEOUT, AWG_MAX_HANDSHAKE_ATTEMPTS
+      # - AWG_RANDOM_TRAILERS=on            # on/off. Default on for 3.1, off for the other versions
+      # - AWG_DISABLE_COOKIES=on            # on/off. Default off. Removes the WireGuard DoS protection
     volumes:
       - ./config:/config                    # amneziawg.db (all keys: keep it private)
     ports:
       - 51820:51820/udp                     # SERVERPORT:51820/udp
     sysctls:
       - net.ipv4.ip_forward=1
-      - net.ipv6.conf.all.disable_ipv6=0    # The IPv6 FORWARD DROP rules need IPv6
     restart: unless-stopped                 # A fatal error at start stops the container. This policy starts it again
