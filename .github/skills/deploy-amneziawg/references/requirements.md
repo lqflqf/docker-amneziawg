@@ -23,7 +23,7 @@ Use amd64 and arm64 only. Do not use 32-bit ARM. Upstream Amnezia documents only
 
 ## Kernel module
 
-The module is optional. Without it, the container uses the bundled userspace `amneziawg-go`. This is acceptable for almost all users. Do not install the module as part of a deployment. DKMS and headers are brittle across distros. If the user asks, point to https://github.com/amnezia-vpn/amneziawg-linux-kernel-module. A plain `wireguard` module is not used.
+The module is optional. Without it, the container uses the bundled userspace `amneziawg-go`. This is acceptable for almost all users. Do not install the module as part of a deployment. DKMS and headers are brittle across distros. If the user asks, point to the signed packages for Alpine Linux and Debian at https://github.com/lqflqf/amneziawg-linux-kernel-module-packages (README "Module packages"). For other distros, point to the upstream source at https://github.com/amnezia-vpn/amneziawg-linux-kernel-module. A plain `wireguard` module is not used.
 
 ## Networking
 
