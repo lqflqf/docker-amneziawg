@@ -122,7 +122,7 @@ func Validate(p Params) (errs []error, warns []string) {
 		e("version %q is not one of %s", v, strings.Join(Versions, ", "))
 		return errs, nil
 	}
-	for _, k := range []string{"random_trailers", "disable_cookies"} {
+	for _, k := range Switches {
 		if p[k] != "on" && p[k] != "off" {
 			e("%s must be on or off, got %q", ConfKey(k), p[k])
 		}
@@ -177,7 +177,7 @@ func Validate(p Params) (errs []error, warns []string) {
 				}
 			}
 		}
-		if p.On("random_trailers") && Has2x(v) && !(s[0] == s[1] && s[1] == s[2] && s[2] == s[3]) {
+		if p.On(RandomTrailers) && Has2x(v) && !(s[0] == s[1] && s[1] == s[2] && s[2] == s[3]) {
 			e("RandomTrailers needs S1 = S2 = S3 = S4 (got %d, %d, %d, %d); set them together with: awgctl awg set s=<12-20>",
 				s[0], s[1], s[2], s[3])
 		}
@@ -214,7 +214,7 @@ func Validate(p Params) (errs []error, warns []string) {
 		}
 	}
 
-	if v == "1.5" && p.On("random_trailers") {
+	if v == "1.5" && p.On(RandomTrailers) {
 		e("RandomTrailers is not supported with AWG 1.5")
 	}
 
@@ -227,7 +227,7 @@ func Validate(p Params) (errs []error, warns []string) {
 		lo, hi, err := parseSpan(cp)
 		if err != nil {
 			e("ContentPaddingAddition: %v", err)
-		} else if p.On("random_trailers") && hi != 0 {
+		} else if p.On(RandomTrailers) && hi != 0 {
 			e("ContentPaddingAddition (%s) must be 0 with RandomTrailers: padding suppresses the trailers and costs ~22%% of download speed", cp)
 		} else if lo < 0 || hi > 1000 {
 			e("ContentPaddingAddition (%s) must be within 0-1000", cp)

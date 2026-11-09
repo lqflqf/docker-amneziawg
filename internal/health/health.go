@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"slices"
 	"strings"
 	"time"
 
@@ -17,7 +18,7 @@ import (
 // Check returns nil when wg0 is up and dnsmasq answers on the tunnel address.
 func Check(ctx context.Context, p sys.Paths, r sys.Runner) error {
 	out, _, err := r.Run(ctx, "awg", []string{"show", "interfaces"}, nil, nil)
-	if err != nil || !contains(strings.Fields(string(out)), render.Interface) {
+	if err != nil || !slices.Contains(strings.Fields(string(out)), render.Interface) {
 		return fmt.Errorf("tunnel %s is down", render.Interface)
 	}
 	state, _ := os.ReadFile(p.DNSState())
@@ -66,15 +67,6 @@ func onInterface(ip net.IP, name string) bool {
 	addrs, _ := ifc.Addrs()
 	for _, a := range addrs {
 		if n, ok := a.(*net.IPNet); ok && n.IP.Equal(ip) {
-			return true
-		}
-	}
-	return false
-}
-
-func contains(l []string, s string) bool {
-	for _, x := range l {
-		if x == s {
 			return true
 		}
 	}

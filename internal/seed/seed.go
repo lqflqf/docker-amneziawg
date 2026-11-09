@@ -75,19 +75,19 @@ func Build(ctx context.Context, r *rand.Rand, getenv Getenv, detect Detector) (*
 	}
 	// A pinned RandomTrailers changes how S is drawn: draw again first.
 	for _, kv := range pins {
-		if kv[0] == "random_trailers" {
+		if kv[0] == awg.RandomTrailers {
 			sw, ok := awg.NormalizeSwitch(kv[1])
 			if !ok {
 				return nil, nil, fmt.Errorf("AWG_RANDOM_TRAILERS must be on or off, got %q", kv[1])
 			}
-			if sw != p["random_trailers"] {
-				p["random_trailers"] = sw
+			if sw != p[awg.RandomTrailers] {
+				p[awg.RandomTrailers] = sw
 				awg.Redraw(r, p)
 			}
 		}
 	}
 	// With trailers on, one pinned S value is used for all four.
-	if p.On("random_trailers") && awg.Has2x(version) {
+	if p.On(awg.RandomTrailers) && awg.Has2x(version) {
 		var sv string
 		for _, kv := range pins {
 			if strings.HasPrefix(kv[0], "s") && len(kv[0]) == 2 {

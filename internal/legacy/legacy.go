@@ -282,7 +282,7 @@ func Analyze(opts Options) (*Report, error) {
 			st.AWG[k] = l.Value
 		}
 	}
-	for _, k := range []string{"random_trailers", "disable_cookies"} {
+	for _, k := range awg.Switches {
 		if sw, ok := awg.NormalizeSwitch(st.AWG[k]); ok {
 			st.AWG[k] = sw
 		} else {
@@ -294,16 +294,7 @@ func Analyze(opts Options) (*Report, error) {
 		version = p["AWG_VERSION"]
 	}
 	if version == "" {
-		switch {
-		case st.AWG["header_protection_key"] != "" && st.AWG.On("random_trailers"):
-			version = "3.1"
-		case st.AWG["header_protection_key"] != "":
-			version = "3.0"
-		case strings.Contains(st.AWG["h1"], "-"):
-			version = "2.0"
-		default:
-			version = "1.5"
-		}
+		version = awg.InferVersion(st.AWG)
 		note("no saved AWG_VERSION; inferred %s from wg0.conf", version)
 	}
 	st.AWG["version"] = version

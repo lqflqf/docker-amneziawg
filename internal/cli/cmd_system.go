@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/lqflqf/docker-amneziawg/internal/awg"
 	"github.com/lqflqf/docker-amneziawg/internal/config"
 	"github.com/lqflqf/docker-amneziawg/internal/fsafe"
 	"github.com/lqflqf/docker-amneziawg/internal/health"
@@ -161,7 +162,7 @@ func (a *App) seedDB(ctx context.Context) error {
 // checkKernel warns when the 3.1 switches meet a kernel module older than 3.1.
 // Only major.minor are read: the trailer fix did not change the version date.
 func (a *App) checkKernel(st *config.State) {
-	if !st.AWG.On("random_trailers") && !st.AWG.On("disable_cookies") {
+	if !st.AWG.On(awg.RandomTrailers) && !st.AWG.On(awg.DisableCookies) {
 		return
 	}
 	if _, ok := a.Getenv("WG_QUICK_USERSPACE_IMPLEMENTATION"); ok {

@@ -31,6 +31,22 @@ func TestGenerateIsValidForEveryVersion(t *testing.T) {
 	}
 }
 
+func TestInferVersion(t *testing.T) {
+	for _, v := range Versions {
+		p := Generate(seeded(5), v)
+		delete(p, "version")
+		if got := InferVersion(p); got != v {
+			t.Errorf("InferVersion of a %s set = %s", v, got)
+		}
+	}
+	// 3.0 with the switch on is 3.1: only 3.1 turns RandomTrailers on.
+	p := Generate(seeded(6), "3.0")
+	p[RandomTrailers] = "on"
+	if got := InferVersion(p); got != "3.1" {
+		t.Errorf("3.0 set with trailers on = %s, want 3.1", got)
+	}
+}
+
 func TestDefaultIs31WithEqualSAndNoPadding(t *testing.T) {
 	p := Generate(seeded(1), Default)
 	if Default != "3.1" {

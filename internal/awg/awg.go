@@ -6,9 +6,11 @@
 package awg
 
 import (
+	"cmp"
 	"fmt"
+	"maps"
 	"math/rand/v2"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -24,6 +26,18 @@ var Versions = []string{"1.5", "2.0", "3.0", "3.1"}
 
 // Default is the protocol version of a new server.
 const Default = "3.1"
+
+// The on/off switches of AWG 3.1.
+const (
+	RandomTrailers = "random_trailers"
+	DisableCookies = "disable_cookies"
+)
+
+// Switches are the keys that hold "on" or "off".
+var Switches = []string{RandomTrailers, DisableCookies}
+
+// IsSwitch reports whether k holds "on" or "off".
+func IsSwitch(k string) bool { return slices.Contains(Switches, k) }
 
 // Keys lists every parameter after "version", in conf order.
 var Keys = []string{
@@ -84,7 +98,7 @@ var mustMatch = map[string]bool{
 	"s1": true, "s2": true, "s3": true, "s4": true,
 	"h1": true, "h2": true, "h3": true, "h4": true,
 	"i1": true, "i2": true, "i3": true, "i4": true, "i5": true,
-	"header_protection_key": true, "random_trailers": true, "version": true,
+	"header_protection_key": true, RandomTrailers: true, "version": true,
 }
 
 // MustMatch reports whether a change to k needs a new conf on every peer.
@@ -97,14 +111,7 @@ func Secret(k string) bool { return k == "header_protection_key" }
 func EnvName(k string) string { return "AWG_" + strings.ToUpper(k) }
 
 // ValidVersion reports whether v is a known protocol version.
-func ValidVersion(v string) bool {
-	for _, x := range Versions {
-		if x == v {
-			return true
-		}
-	}
-	return false
-}
+func ValidVersion(v string) bool { return slices.Contains(Versions, v) }
 
 // Is3x: the version has the 3.x set (header protection, padding, timers).
 func Is3x(v string) bool { return v == "3.0" || v == "3.1" }
@@ -112,13 +119,35 @@ func Is3x(v string) bool { return v == "3.0" || v == "3.1" }
 // Has2x: the version has H ranges, S3/S4 and I1-I5.
 func Has2x(v string) bool { return v == "2.0" || Is3x(v) }
 
-// Clone returns a copy.
-func (p Params) Clone() Params {
-	c := make(Params, len(p))
-	for k, v := range p {
-		c[k] = v
+// TrailersDefault is the RandomTrailers value of a version: on for 3.1 only.
+func TrailersDefault(v string) string {
+	if v == "3.1" {
+		return "on"
 	}
-	return c
+	return "off"
+}
+
+// InferVersion returns the version that a parameter set without a saved
+// version has: a HeaderProtectionKey means 3.x (3.1 with RandomTrailers on),
+// H ranges mean 2.0, else 1.5.
+func InferVersion(p Params) string {
+	switch {
+	case p["header_protection_key"] != "" && p.On(RandomTrailers):
+		return "3.1"
+	case p["header_protection_key"] != "":
+		return "3.0"
+	case strings.Contains(p["h1"], "-"):
+		return "2.0"
+	}
+	return "1.5"
+}
+
+// Clone returns a copy. The copy of nil is an empty set.
+func (p Params) Clone() Params {
+	if p == nil {
+		return Params{}
+	}
+	return maps.Clone(p)
 }
 
 // On reports whether a switch is on.
@@ -152,15 +181,19 @@ func NewRand() *rand.Rand {
 // Generate returns a full parameter set for a version. RandomTrailers is on
 // for 3.1 and off otherwise; DisableCookies is off.
 func Generate(r *rand.Rand, version string) Params {
-	p := Params{"version": version, "random_trailers": "off", "disable_cookies": "off"}
-	if version == "3.1" {
-		p["random_trailers"] = "on"
-	}
-	p["jc"] = strconv.Itoa(between(r, 3, 8))
-	p["jmin"] = strconv.Itoa(between(r, 40, 80))
-	p["jmax"] = strconv.Itoa(between(r, 81, 250))
+	p := Params{"version": version, RandomTrailers: TrailersDefault(version), DisableCookies: "off"}
+	drawJc(r, p)
+	drawJminJmax(r, p)
 	drawVersioned(r, p)
 	return p
+}
+
+func drawJc(r *rand.Rand, p Params) { p["jc"] = strconv.Itoa(between(r, 3, 8)) }
+
+// drawJminJmax draws both, so that Jmin < Jmax stays true.
+func drawJminJmax(r *rand.Rand, p Params) {
+	p["jmin"] = strconv.Itoa(between(r, 40, 80))
+	p["jmax"] = strconv.Itoa(between(r, 81, 250))
 }
 
 // Redraw draws S, H, I and the 3.x set again for p's current version and
@@ -178,7 +211,7 @@ func drawVersioned(r *rand.Rand, p Params) {
 
 func drawS(r *rand.Rand, p Params) {
 	v := p["version"]
-	if p.On("random_trailers") && Has2x(v) {
+	if p.On(RandomTrailers) && Has2x(v) {
 		// Equal values keep every packet-type check on the true type field;
 		// 12 is the HeaderProtection floor, <= 20 keeps 1420-MTU packets in 1500.
 		s := strconv.Itoa(between(r, 12, 20))
@@ -266,7 +299,7 @@ func draw3x(r *rand.Rand, p Params, which []string) {
 		p["header_protection_key"] = keys.NewSymmetric()
 	}
 	if want["content_padding"] {
-		if p.On("random_trailers") {
+		if p.On(RandomTrailers) {
 			// Padding suppresses the trailers on the send path and costs ~22%
 			// of download speed (docs/awg-performance.md).
 			p["content_padding"] = "0"
@@ -309,12 +342,9 @@ func Transition(r *rand.Rand, p Params, version string) (Params, error) {
 	}
 	n := p.Clone()
 	n["version"] = version
-	n["random_trailers"] = "off"
-	if version == "3.1" {
-		n["random_trailers"] = "on"
-	}
-	if n["disable_cookies"] == "" {
-		n["disable_cookies"] = "off"
+	n[RandomTrailers] = TrailersDefault(version)
+	if n[DisableCookies] == "" {
+		n[DisableCookies] = "off"
 	}
 	drawVersioned(r, n)
 	return n, nil
@@ -326,9 +356,8 @@ func Transition(r *rand.Rand, p Params, version string) (Params, error) {
 func Regenerate(r *rand.Rand, p Params, names []string) (Params, error) {
 	n := p.Clone()
 	if len(names) == 0 {
-		n["jc"] = strconv.Itoa(between(r, 3, 8))
-		n["jmin"] = strconv.Itoa(between(r, 40, 80))
-		n["jmax"] = strconv.Itoa(between(r, 81, 250))
+		drawJc(r, n)
+		drawJminJmax(r, n)
 		drawVersioned(r, n)
 		return n, nil
 	}
@@ -337,20 +366,19 @@ func Regenerate(r *rand.Rand, p Params, names []string) (Params, error) {
 	for _, raw := range names {
 		k := NormalizeKey(raw)
 		switch {
-		case k == "version" || k == "random_trailers" || k == "disable_cookies":
+		case k == "version" || IsSwitch(k):
 			return nil, fmt.Errorf("%s is not drawn; use awgctl awg version or awg set", raw)
 		case k == "jc":
-			n["jc"] = strconv.Itoa(between(r, 3, 8))
+			drawJc(r, n)
 		case k == "jmin" || k == "jmax":
-			n["jmin"] = strconv.Itoa(between(r, 40, 80))
-			n["jmax"] = strconv.Itoa(between(r, 81, 250))
-		case k == "s" || contains(sKeys, k):
+			drawJminJmax(r, n)
+		case k == "s" || slices.Contains(sKeys, k):
 			s = true
-		case contains(hKeys, k):
+		case slices.Contains(hKeys, k):
 			h = append(h, k)
-		case contains(iKeys, k):
+		case slices.Contains(iKeys, k):
 			drawI(n)
-		case contains(x3Keys, k):
+		case slices.Contains(x3Keys, k):
 			if !Is3x(n["version"]) {
 				return nil, fmt.Errorf("%s exists only in AWG 3.0 and 3.1", raw)
 			}
@@ -369,15 +397,6 @@ func Regenerate(r *rand.Rand, p Params, names []string) (Params, error) {
 		draw3x(r, n, x3)
 	}
 	return n, nil
-}
-
-func contains(list []string, k string) bool {
-	for _, x := range list {
-		if x == k {
-			return true
-		}
-	}
-	return false
 }
 
 // NormalizeKey accepts "S1", "awg.s1", "AWG_S1" and conf keys ("HeaderProtectionKey").
@@ -417,14 +436,14 @@ func Set(p Params, kv [][2]string) (Params, error) {
 			for _, s := range sKeys {
 				n[s] = v
 			}
-		case k == "random_trailers" || k == "disable_cookies":
+		case IsSwitch(k):
 			sw, ok := NormalizeSwitch(v)
 			if !ok {
 				return nil, fmt.Errorf("%s must be on or off, got %q", k, v)
 			}
 			n[k] = sw
-		case contains(Keys, k):
-			if contains(x3Keys, k) && !Is3x(n["version"]) {
+		case slices.Contains(Keys, k):
+			if slices.Contains(x3Keys, k) && !Is3x(n["version"]) {
 				return nil, fmt.Errorf("%s exists only in AWG 3.0 and 3.1", k)
 			}
 			n[k] = v
@@ -448,7 +467,7 @@ func Lines(p Params) []Line {
 		if v == "" {
 			continue
 		}
-		if (k == "random_trailers" || k == "disable_cookies") && v != "on" {
+		if IsSwitch(k) && v != "on" {
 			continue
 		}
 		out = append(out, Line{confKey[k], v})
@@ -462,10 +481,7 @@ func SortedKeys(p Params) []string {
 	for i, k := range AllKeys {
 		idx[k] = i
 	}
-	var out []string
-	for k := range p {
-		out = append(out, k)
-	}
-	sort.Slice(out, func(a, b int) bool { return idx[out[a]] < idx[out[b]] })
+	out := slices.Collect(maps.Keys(p))
+	slices.SortFunc(out, func(a, b string) int { return cmp.Compare(idx[a], idx[b]) })
 	return out
 }
