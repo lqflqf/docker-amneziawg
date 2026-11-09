@@ -37,7 +37,7 @@ func newHarness(t *testing.T) *harness {
 	h := &harness{t: t, fake: systest.New(), out: &bytes.Buffer{},
 		env: map[string]string{"SERVERURL": "vpn.example.com"}}
 	h.app = &App{
-		P:      sys.Paths{Config: t.TempDir(), Run: t.TempDir()},
+		P:      sys.Paths{Config: t.TempDir(), Run: t.TempDir(), Sys: t.TempDir()},
 		R:      h.fake,
 		Out:    h.out,
 		Err:    h.out,
@@ -417,14 +417,35 @@ func TestUsageErrors(t *testing.T) {
 		{"peer", "rm", "phone", "--yes"},
 		{"import-legacy"},
 		{"import-legacy", "--rename", "nope", "/x"},
+		// Extra arguments, and flags of other commands.
+		{"init", "x"},
+		{"health", "x"},
+		{"version", "x"},
+		{"get", "--yes"},
+		{"server", "rotate-key", "x", "--yes"},
+		{"awg", "show", "x"},
+		{"awg", "set", "jc=5", "--show-secrets"},
+		{"awg", "regenerate", "--json"},
+		{"peer", "list", "--qr"},
+		{"peer", "add", "--yes"},
+		{"peer", "add-many", "2", "--name", "x"},
+		{"peer", "show", "2", "--yes"},
+		{"peer", "enable", "2", "--keepalive", "on"},
+		{"peer", "rm", "2", "3", "--yes"},
+		{"import-legacy", "/x", "--yes"},
 	} {
 		out := h.run(ExitUsage, args...)
 		if !strings.HasPrefix(out, "awgctl: ") || !strings.Contains(out, "Usage: awgctl <command>") {
 			t.Errorf("awgctl %v: no usage text:\n%s", args, out)
 		}
 	}
-	if out := h.run(ExitOK, "help"); !strings.HasPrefix(out, "Usage: awgctl") {
-		t.Fatalf("help:\n%s", out)
+	out := h.run(ExitOK, "help")
+	for _, want := range []string{"Usage: awgctl", "\nSystem:\n  init                                  s6 start-up",
+		"  peer export <id> [--qr] [--png FILE] [--conf FILE]\n",
+		"  awg set <key>=<value>... [--yes]      (s=<n> sets S1-S4 together)\n"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("help: no %q:\n%s", want, out)
+		}
 	}
 	if p := h.peer(2); p.Name != "phone" || !p.Enabled {
 		t.Fatal("a usage error changed the peer")
@@ -858,5 +879,61 @@ func TestImportLegacyPartial(t *testing.T) {
 	}
 	if len(h.state().Peers) != 2 {
 		t.Fatalf("peers %+v", h.state().Peers)
+	}
+}
+
+// Each flag of a command is registered and is in its usage line, and the
+// usage line names no other flag.
+func TestCommandTable(t *testing.T) {
+	flagRe := regexp.MustCompile(`--[a-z-]+`)
+	for _, g := range groups {
+		for _, c := range g.cmds {
+			want := map[string]bool{}
+			for _, f := range c.flags {
+				if flagDefs[f] == nil {
+					t.Errorf("%s: flag %q is not in flagDefs", c.name, f)
+				}
+				want["--"+f] = true
+			}
+			got := map[string]bool{}
+			for _, f := range flagRe.FindAllString(c.args, -1) {
+				got[f] = true
+			}
+			if fmt.Sprint(got) != fmt.Sprint(want) {
+				t.Errorf("%s: the usage line names %v, the command accepts %v", c.name, got, want)
+			}
+			if c.run == nil {
+				t.Errorf("%s: no handler", c.name)
+			}
+		}
+	}
+}
+
+func TestKernelModuleCheck(t *testing.T) {
+	for v, want := range map[string][3]int{"3.1.20250101": {3, 1, 1}, "2.0": {2, 0, 1}, "10.12.x": {10, 12, 1}} {
+		major, minor, ok := parseModuleVersion(v)
+		if major != want[0] || minor != want[1] || !ok {
+			t.Errorf("parseModuleVersion(%q) = %d %d %v", v, major, minor, ok)
+		}
+	}
+	for _, v := range []string{"", "3", "x.1", "3.y"} {
+		if _, _, ok := parseModuleVersion(v); ok {
+			t.Errorf("parseModuleVersion(%q) accepted", v)
+		}
+	}
+
+	h := newHarness(t) // AWG 3.1: RandomTrailers is on
+	os.MkdirAll(filepath.Dir(h.app.P.ModuleVersion()), 0o755)
+	const warning = "need amneziawg kernel module 3.1 or newer"
+	for v, warn := range map[string]bool{"3.0.20250101\n": true, "1.0.0": true, "3.1.20250101": false, "4.0": false} {
+		os.WriteFile(h.app.P.ModuleVersion(), []byte(v), 0o644)
+		if out := h.run(ExitOK, "init"); strings.Contains(out, warning) != warn {
+			t.Errorf("module %q: warning %v, want %v:\n%s", v, !warn, warn, out)
+		}
+	}
+	os.WriteFile(h.app.P.ModuleVersion(), []byte("3.0.0"), 0o644)
+	h.env["WG_QUICK_USERSPACE_IMPLEMENTATION"] = "amneziawg-go"
+	if out := h.run(ExitOK, "init"); strings.Contains(out, warning) {
+		t.Errorf("userspace: the kernel module warning is shown:\n%s", out)
 	}
 }

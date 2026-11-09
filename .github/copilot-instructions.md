@@ -21,7 +21,7 @@ Each topic has one file. Link to that file. Do not copy its content.
 | Topic | File |
 |---|---|
 | User setup, first-start env vars, `awgctl` commands, settings, defaults, troubleshooting, upgrade | `README.md` |
-| `awgctl` usage text and exit codes | `internal/cli/cli.go` (`usage`) |
+| `awgctl` commands, flags, usage text and exit codes | `internal/cli/commands.go` (`groups`), `internal/cli/cli.go` |
 | Settings: keys, seed env vars, defaults, rules, reissue flag | `internal/config/registry.go` |
 | AWG generators, rules and version transitions | `internal/awg/` |
 | Throughput cost of parameters, kernel-module trailer fix | `docs/awg-performance.md` |
@@ -76,7 +76,7 @@ Set `ENGINE=nerdctl` to run `go.sh`, `integration-test.sh` and `smoke-test.sh` w
 
 | Package | Role |
 |---|---|
-| `cli` | Each command, the exit codes, the `change` transaction (load, change, check, commit), `init` |
+| `cli` | The command table, each command, the exit codes, the `change` transaction (load, change, check, commit), `init` |
 | `config` | The settings registry, the `State`, `Validate`, the peer id and name rules |
 | `awg` | AWG keys, generators, `Validate`, `Transition` (version change), `Set`, `Regenerate`, `Is3x`/`Has2x` |
 | `seed` | The first state from the env, public IPv4 detection with retries |
@@ -174,7 +174,7 @@ A change is one write transaction: load, change in memory, `--yes` check, `check
 ## Development rules
 
 - **New setting**: add one entry to `config.Registry` with its key, seed env var, default, `Reissue` flag and `Check`. Add AWG values in `internal/awg`. Write conf output only through `render` and `conf`. Document the setting in `README.md` (and `docker-compose.yml` if it has a seed env var). Add a unit test for its rules.
-- **New command**: add it to `dispatch` and `usage` in `internal/cli`. Use `change` for each state change. Keep the exit codes: 0 done, 1 error (nothing changed), 2 usage, 3 refused without `--yes`.
+- **New command**: add one entry to `groups` in `internal/cli/commands.go`, with its flags, number of arguments, usage line and handler. The usage text comes from this table. Use `change` for each state change. Keep the exit codes: 0 done, 1 error (nothing changed), 2 usage, 3 refused without `--yes`.
 - **Schema change**: edit `internal/store/schema.sql`. There are no migrations, so a schema change needs a new database. Write the steps in the release notes.
 - **Go**: format with `gofmt`. golangci-lint must pass. Return errors with context. Do not panic. Use `sys.Runner` for each external command, so that unit tests can use the fake runner.
 - s6 scripts start with `#!/usr/bin/with-contenv bash` and `# shellcheck shell=bash`, and are executable. Use `local` only in functions. Put side effects in `main()`. The last lines are `if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then main "$@"; fi`. Do not use the `&&` form: it returns 1 when sourced.

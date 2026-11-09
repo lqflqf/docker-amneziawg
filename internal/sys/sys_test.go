@@ -15,7 +15,7 @@ import (
 func TestDefaultPaths(t *testing.T) {
 	t.Setenv("AWGCTL_CONFIG_DIR", "")
 	t.Setenv("AWGCTL_RUN_DIR", "")
-	if p := sys.DefaultPaths(); p.Config != "/config" || p.Run != "/run" {
+	if p := sys.DefaultPaths(); p.Config != "/config" || p.Run != "/run" || p.Sys != "/sys" {
 		t.Errorf("defaults = %+v", p)
 	}
 	t.Setenv("AWGCTL_CONFIG_DIR", "/c")

@@ -3,7 +3,6 @@ package cli
 import (
 	"context"
 	"encoding/json"
-	"flag"
 	"fmt"
 	"os"
 	"strconv"
@@ -19,136 +18,81 @@ import (
 	"github.com/lqflqf/docker-amneziawg/internal/store"
 )
 
-func (a *App) cmdPeer(ctx context.Context, args []string) error {
-	if len(args) == 0 {
-		return usagef("usage: awgctl peer add|add-many|list|show|export|rename|set|disable|enable|rotate|rm")
+func (a *App) peerRename(ctx context.Context, c *call) error {
+	if len(c.pos) == 2 == c.clear {
+		return c.cmd.usageErr()
 	}
-	sub, rest := args[0], args[1:]
-	fs := flag.NewFlagSet("peer "+sub, flag.ContinueOnError)
-	yes := fs.Bool("yes", false, "")
-	name := fs.String("name", "", "")
-	noKeepalive := fs.Bool("no-keepalive", false, "")
-	qr := fs.Bool("qr", false, "")
-	asJSON := fs.Bool("json", false, "")
-	png := fs.String("png", "", "")
-	confOut := fs.String("conf", "", "")
-	keepalive := fs.String("keepalive", "", "")
-	clearName := fs.Bool("clear", false, "")
-	pos, err := parse(fs, rest)
+	if len(c.pos) == 2 && !config.ValidPeerName(c.pos[1]) {
+		return usagef("invalid name %q: use %s", c.pos[1], config.NameRule)
+	}
+	return a.peerEdit(ctx, c.pos[0], false, func(d *config.State, p *store.Peer) (plan, error) {
+		n := config.DefaultPeerName(p.ID)
+		if len(c.pos) == 2 {
+			n = c.pos[1]
+		}
+		if n == p.Name {
+			return plan{noop: true, summary: []string{fmt.Sprintf("Peer %d is already named %q.", p.ID, n)}}, nil
+		}
+		old := p.Name
+		p.Name = n
+		return plan{summary: []string{fmt.Sprintf("Peer %d: %q -> %q", p.ID, old, p.Name)}}, nil
+	})
+}
+
+func (a *App) peerSet(ctx context.Context, c *call) error {
+	sw, ok := awg.NormalizeSwitch(c.keepalive)
+	if !ok {
+		return c.cmd.usageErr()
+	}
+	return a.peerEdit(ctx, c.pos[0], false, func(d *config.State, p *store.Peer) (plan, error) {
+		if p.Keepalive == (sw == "on") {
+			return plan{noop: true, summary: []string{fmt.Sprintf("%s: keepalive is already %s.", label(*p), sw)}}, nil
+		}
+		p.Keepalive = sw == "on"
+		return plan{summary: []string{fmt.Sprintf("%s: keepalive %s", label(*p), sw)}}, nil
+	})
+}
+
+// peerSetEnabled runs peer enable (on) and peer disable.
+func (a *App) peerSetEnabled(ctx context.Context, arg string, on bool) error {
+	word := "disabled"
+	if on {
+		word = "enabled"
+	}
+	return a.peerEdit(ctx, arg, false, func(d *config.State, p *store.Peer) (plan, error) {
+		if p.Enabled == on {
+			return plan{noop: true, summary: []string{fmt.Sprintf("%s is already %s.", label(*p), word)}}, nil
+		}
+		p.Enabled = on
+		return plan{summary: []string{fmt.Sprintf("%s: %s", label(*p), word)}}, nil
+	})
+}
+
+func (a *App) peerRotate(ctx context.Context, c *call) error {
+	return a.peerEdit(ctx, c.pos[0], c.yes, func(d *config.State, p *store.Peer) (plan, error) {
+		p.PrivateKey, p.PublicKey = keys.Pair()
+		p.PresharedKey = keys.NewSymmetric()
+		pl := plan{summary: []string{label(*p) + ": new keys"}}
+		pl.newConfs(fmt.Sprintf("peer %d", p.ID))
+		return pl, nil
+	})
+}
+
+func (a *App) peerRemove(ctx context.Context, c *call) error {
+	id, err := peerID(c.pos[0])
 	if err != nil {
 		return err
 	}
-	need := func(n int, u string) error {
-		if len(pos) != n {
-			return usagef("usage: awgctl peer %s", u)
-		}
-		return nil
+	if !c.yes {
+		return needYes("peer rm deletes the peer and its keys; run again with --yes")
 	}
-	switch sub {
-	case "add":
-		if err := need(0, "add [--name NAME] [--no-keepalive] [--qr]"); err != nil {
-			return err
-		}
-		return a.peerAdd(ctx, *name, !*noKeepalive, *qr)
-	case "add-many":
-		if err := need(1, "add-many <count> [--no-keepalive]"); err != nil {
-			return err
-		}
-		n, err := strconv.Atoi(pos[0])
-		if err != nil || n < 1 || n > config.MaxPeers {
-			return usagef("the count must be a number 1-%d", config.MaxPeers)
-		}
-		return a.peerAddMany(ctx, n, !*noKeepalive)
-	case "list":
-		if err := need(0, "list [--json]"); err != nil {
-			return err
-		}
-		return a.peerList(ctx, *asJSON)
-	case "show":
-		if err := need(1, "show <id>"); err != nil {
-			return err
-		}
-		return a.peerShow(ctx, pos[0])
-	case "export":
-		if err := need(1, "export <id> [--qr | --png FILE | --conf FILE]"); err != nil {
-			return err
-		}
-		return a.peerExport(ctx, pos[0], *qr, *png, *confOut)
-	case "rename":
-		if !(len(pos) == 2 && !*clearName || len(pos) == 1 && *clearName) {
-			return usagef("usage: awgctl peer rename <id> <new-name> | peer rename <id> --clear")
-		}
-		if len(pos) == 2 && !config.ValidPeerName(pos[1]) {
-			return usagef("invalid name %q: use %s", pos[1], config.NameRule)
-		}
-		return a.peerEdit(ctx, pos[0], false, func(d *config.State, p *store.Peer) (plan, error) {
-			n := config.DefaultPeerName(p.ID)
-			if len(pos) == 2 {
-				n = pos[1]
-			}
-			if n == p.Name {
-				return plan{noop: true, summary: []string{fmt.Sprintf("Peer %d is already named %q.", p.ID, n)}}, nil
-			}
-			old := p.Name
-			p.Name = n
-			return plan{summary: []string{fmt.Sprintf("Peer %d: %q -> %q", p.ID, old, p.Name)}}, nil
-		})
-	case "set":
-		if err := need(1, "set <id> --keepalive on|off"); err != nil {
-			return err
-		}
-		sw, ok := awg.NormalizeSwitch(*keepalive)
-		if !ok {
-			return usagef("usage: awgctl peer set <id> --keepalive on|off")
-		}
-		return a.peerEdit(ctx, pos[0], false, func(d *config.State, p *store.Peer) (plan, error) {
-			if p.Keepalive == (sw == "on") {
-				return plan{noop: true, summary: []string{fmt.Sprintf("%s: keepalive is already %s.", label(*p), sw)}}, nil
-			}
-			p.Keepalive = sw == "on"
-			return plan{summary: []string{fmt.Sprintf("%s: keepalive %s", label(*p), sw)}}, nil
-		})
-	case "disable", "enable":
-		if err := need(1, sub+" <id>"); err != nil {
-			return err
-		}
-		return a.peerEdit(ctx, pos[0], false, func(d *config.State, p *store.Peer) (plan, error) {
-			if p.Enabled == (sub == "enable") {
-				return plan{noop: true, summary: []string{fmt.Sprintf("%s is already %sd.", label(*p), sub)}}, nil
-			}
-			p.Enabled = sub == "enable"
-			return plan{summary: []string{fmt.Sprintf("%s: %sd", label(*p), sub)}}, nil
-		})
-	case "rotate":
-		if err := need(1, "rotate <id> --yes"); err != nil {
-			return err
-		}
-		return a.peerEdit(ctx, pos[0], *yes, func(d *config.State, p *store.Peer) (plan, error) {
-			p.PrivateKey, p.PublicKey = keys.Pair()
-			p.PresharedKey = keys.NewSymmetric()
-			return plan{reissue: fmt.Sprintf("peer %d", p.ID),
-				summary: []string{label(*p) + ": new keys"}}, nil
-		})
-	case "rm":
-		if err := need(1, "rm <id> --yes"); err != nil {
-			return err
-		}
-		id, err := peerID(pos[0])
+	return a.change(ctx, true, func(d *config.State) (plan, error) {
+		p, err := d.RemovePeer(id)
 		if err != nil {
-			return err
+			return plan{}, err
 		}
-		if !*yes {
-			return needYes("peer rm deletes the peer and its keys; run again with --yes")
-		}
-		return a.change(ctx, true, func(d *config.State) (plan, error) {
-			p, err := d.RemovePeer(id)
-			if err != nil {
-				return plan{}, err
-			}
-			return plan{summary: []string{label(p) + ": deleted"}}, nil
-		})
-	}
-	return usagef("unknown peer command %q", sub)
+		return plan{summary: []string{label(p) + ": deleted"}}, nil
+	})
 }
 
 // peerID parses a peer id argument. Names and "#5" are usage errors.
@@ -184,14 +128,15 @@ func (a *App) peerEdit(ctx context.Context, arg string, yes bool, f func(*config
 	})
 }
 
-func (a *App) peerAdd(ctx context.Context, name string, keepalive, qr bool) error {
+func (a *App) peerAdd(ctx context.Context, c *call) error {
+	name, qr := c.name, c.qr
 	if name != "" && !config.ValidPeerName(name) {
 		return usagef("invalid name %q: use %s", name, config.NameRule)
 	}
 	var added store.Peer
 	var code string
 	err := a.change(ctx, false, func(d *config.State) (plan, error) {
-		ps, err := d.AddPeers(1, name, keepalive)
+		ps, err := d.AddPeers(1, name, !c.noKeepalive)
 		if err != nil {
 			return plan{}, err
 		}
@@ -202,7 +147,7 @@ func (a *App) peerAdd(ctx context.Context, name string, keepalive, qr bool) erro
 				return plan{}, err
 			}
 		}
-		return plan{summary: []string{fmt.Sprintf("%s added: address %s", label(added), config.PeerAddress(d.Subnet(), added.ID))}}, nil
+		return plan{summary: []string{addedLine(d, added)}}, nil
 	})
 	if err != nil {
 		return err
@@ -216,19 +161,27 @@ func (a *App) peerAdd(ctx context.Context, name string, keepalive, qr bool) erro
 	return nil
 }
 
-func (a *App) peerAddMany(ctx context.Context, n int, keepalive bool) error {
+func (a *App) peerAddMany(ctx context.Context, c *call) error {
+	n, err := strconv.Atoi(c.pos[0])
+	if err != nil || n < 1 || n > config.MaxPeers {
+		return usagef("the count must be a number 1-%d", config.MaxPeers)
+	}
 	return a.change(ctx, false, func(d *config.State) (plan, error) {
-		ps, err := d.AddPeers(n, "", keepalive)
+		ps, err := d.AddPeers(n, "", !c.noKeepalive)
 		if err != nil {
 			return plan{}, err
 		}
 		var pl plan
 		for _, p := range ps {
-			pl.summary = append(pl.summary, fmt.Sprintf("%s added: address %s", label(p), config.PeerAddress(d.Subnet(), p.ID)))
+			pl.summary = append(pl.summary, addedLine(d, p))
 		}
 		pl.summary = append(pl.summary, fmt.Sprintf("%d peer(s) added. Export each one: awgctl peer export <id> --qr", len(ps)))
 		return pl, nil
 	})
+}
+
+func addedLine(d *config.State, p store.Peer) string {
+	return fmt.Sprintf("%s added: address %s", label(p), config.PeerAddress(d.Subnet(), p.ID))
 }
 
 // qrText renders the conf of p as a QR code for the terminal.
@@ -237,7 +190,12 @@ func qrText(st *config.State, p store.Peer) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	q, err := qrcode.New(f.String(), qrcode.Low)
+	return qrSmall(f.String())
+}
+
+// qrSmall renders text as a QR code for the terminal.
+func qrSmall(text string) (string, error) {
+	q, err := qrcode.New(text, qrcode.Low)
 	if err != nil {
 		return "", err
 	}
@@ -256,9 +214,23 @@ type peerRow struct {
 	Sent          int64  `json:"tx_bytes"`
 }
 
+// peerStats are the counters of one peer on the running wg0.
+type peerStats struct {
+	handshake int64 // Unix time of the last handshake (0 = none)
+	rx, tx    int64 // bytes received and sent
+}
+
+// lastHandshake returns the handshake time in RFC 3339, or "" for none.
+func (s peerStats) lastHandshake() string {
+	if s.handshake <= 0 {
+		return ""
+	}
+	return time.Unix(s.handshake, 0).UTC().Format(time.RFC3339)
+}
+
 // runtimePeers reads handshakes and transfer counters from wg0 (empty when down).
-func (a *App) runtimePeers(ctx context.Context) map[string][3]int64 {
-	out := map[string][3]int64{}
+func (a *App) runtimePeers(ctx context.Context) map[string]peerStats {
+	out := map[string]peerStats{}
 	b, _, err := a.R.Run(ctx, "awg", []string{"show", render.Interface, "dump"}, nil, nil)
 	if err != nil {
 		return out
@@ -269,15 +241,16 @@ func (a *App) runtimePeers(ctx context.Context) map[string][3]int64 {
 		if len(f) < 7 {
 			continue
 		}
-		hs, _ := strconv.ParseInt(f[4], 10, 64)
-		rx, _ := strconv.ParseInt(f[5], 10, 64)
-		tx, _ := strconv.ParseInt(f[6], 10, 64)
-		out[f[0]] = [3]int64{hs, rx, tx}
+		var s peerStats
+		s.handshake, _ = strconv.ParseInt(f[4], 10, 64)
+		s.rx, _ = strconv.ParseInt(f[5], 10, 64)
+		s.tx, _ = strconv.ParseInt(f[6], 10, 64)
+		out[f[0]] = s
 	}
 	return out
 }
 
-func (a *App) peerList(ctx context.Context, asJSON bool) error {
+func (a *App) peerList(ctx context.Context, c *call) error {
 	st, err := a.view(ctx)
 	if err != nil {
 		return err
@@ -288,14 +261,11 @@ func (a *App) peerList(ctx context.Context, asJSON bool) error {
 		r := peerRow{ID: p.ID, Name: p.Name, Address: config.PeerAddress(st.Subnet(), p.ID),
 			PublicKey: p.PublicKey, Enabled: p.Enabled, Keepalive: p.Keepalive}
 		if x, ok := rt[p.PublicKey]; ok {
-			if x[0] > 0 {
-				r.LastHandshake = time.Unix(x[0], 0).UTC().Format(time.RFC3339)
-			}
-			r.Received, r.Sent = x[1], x[2]
+			r.LastHandshake, r.Received, r.Sent = x.lastHandshake(), x.rx, x.tx
 		}
 		rows = append(rows, r)
 	}
-	if asJSON {
+	if c.json {
 		enc := json.NewEncoder(a.Out)
 		enc.SetIndent("", "  ")
 		if rows == nil {
@@ -332,8 +302,8 @@ func human(n int64) string {
 	return fmt.Sprintf("%.1f%ciB", float64(n)/float64(div), "KMGTPE"[exp])
 }
 
-func (a *App) peerShow(ctx context.Context, arg string) error {
-	id, err := peerID(arg)
+func (a *App) peerShow(ctx context.Context, c *call) error {
+	id, err := peerID(c.pos[0])
 	if err != nil {
 		return err
 	}
@@ -348,15 +318,16 @@ func (a *App) peerShow(ctx context.Context, arg string) error {
 	fmt.Fprintf(a.Out, "id          %d\nname        %s\naddress     %s/32\npublic key  %s\npreshared   %t\nenabled     %t\nkeepalive   %t\n",
 		p.ID, p.Name, config.PeerAddress(st.Subnet(), p.ID), p.PublicKey, p.PresharedKey != "",
 		p.Enabled, p.Keepalive)
-	if x, ok := a.runtimePeers(ctx)[p.PublicKey]; ok && x[0] > 0 {
+	if x, ok := a.runtimePeers(ctx)[p.PublicKey]; ok && x.lastHandshake() != "" {
 		fmt.Fprintf(a.Out, "handshake   %s\ntransfer    %s received, %s sent\n",
-			time.Unix(x[0], 0).UTC().Format(time.RFC3339), human(x[1]), human(x[2]))
+			x.lastHandshake(), human(x.rx), human(x.tx))
 	}
 	return nil
 }
 
-func (a *App) peerExport(ctx context.Context, arg string, qr bool, png, confOut string) error {
-	id, err := peerID(arg)
+func (a *App) peerExport(ctx context.Context, c *call) error {
+	qr, png, confOut := c.qr, c.png, c.conf
+	id, err := peerID(c.pos[0])
 	if err != nil {
 		return err
 	}
@@ -393,12 +364,12 @@ func (a *App) peerExport(ctx context.Context, arg string, qr bool, png, confOut 
 		wrote = true
 	}
 	if qr {
-		q, err := qrcode.New(text, qrcode.Low)
+		code, err := qrSmall(text)
 		if err != nil {
 			return err
 		}
 		fmt.Fprintf(a.Out, "%s (the QR code holds the peer's private key):\n", label(*p))
-		fmt.Fprint(a.Out, q.ToSmallString(false))
+		fmt.Fprint(a.Out, code)
 		return nil
 	}
 	if !wrote {

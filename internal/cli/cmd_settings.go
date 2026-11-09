@@ -2,7 +2,6 @@ package cli
 
 import (
 	"context"
-	"flag"
 	"fmt"
 	"strings"
 
@@ -13,16 +12,8 @@ import (
 
 const masked = "******** (secret; --show-secrets)"
 
-func (a *App) cmdGet(ctx context.Context, args []string) error {
-	fs := flag.NewFlagSet("get", flag.ContinueOnError)
-	show := fs.Bool("show-secrets", false, "")
-	pos, err := parse(fs, args)
-	if err != nil {
-		return err
-	}
-	if len(pos) > 1 {
-		return usagef("get takes at most one key")
-	}
+func (a *App) cmdGet(ctx context.Context, c *call) error {
+	pos, show := c.pos, c.showSecrets
 	st, err := a.view(ctx)
 	if err != nil {
 		return err
@@ -37,7 +28,7 @@ func (a *App) cmdGet(ctx context.Context, args []string) error {
 			return usagef("unknown setting %q", k)
 		}
 		v := st.Get(k)
-		if s.Secret && !*show {
+		if s.Secret && !show {
 			v = masked
 		}
 		fmt.Fprintln(a.Out, v)
@@ -46,7 +37,7 @@ func (a *App) cmdGet(ctx context.Context, args []string) error {
 	for _, s := range config.Registry {
 		v := st.Get(s.Key)
 		note := ""
-		if s.Secret && !*show {
+		if s.Secret && !show {
 			v = masked
 		} else if s.Default != "" && v == s.Default {
 			note = "  (default)"
@@ -94,64 +85,38 @@ func (a *App) setOne(ctx context.Context, k, v string, yes bool) error {
 		d.Settings[k] = n
 		pl := plan{summary: []string{fmt.Sprintf("%s: %s -> %s", k, old, n)}}
 		if s.Reissue {
-			pl.reissue = allPeers(d)
+			pl.newConfs(allPeers(d))
 		}
 		return pl, nil
 	})
 }
 
-func (a *App) cmdSet(ctx context.Context, args []string) error {
-	fs := flag.NewFlagSet("set", flag.ContinueOnError)
-	yes := fs.Bool("yes", false, "")
-	pos, err := parse(fs, args)
-	if err != nil {
-		return err
-	}
-	if len(pos) != 2 {
-		return usagef("usage: awgctl set <key> <value> [--yes]")
-	}
-	return a.setOne(ctx, pos[0], pos[1], *yes)
+func (a *App) cmdSet(ctx context.Context, c *call) error {
+	return a.setOne(ctx, c.pos[0], c.pos[1], c.yes)
 }
 
-func (a *App) cmdReset(ctx context.Context, args []string) error {
-	fs := flag.NewFlagSet("reset", flag.ContinueOnError)
-	yes := fs.Bool("yes", false, "")
-	pos, err := parse(fs, args)
-	if err != nil {
-		return err
-	}
-	if len(pos) != 1 {
-		return usagef("usage: awgctl reset <key> [--yes]")
-	}
-	s, err := settable(pos[0])
+func (a *App) cmdReset(ctx context.Context, c *call) error {
+	s, err := settable(c.pos[0])
 	if err != nil {
 		return err
 	}
 	if s.Default == "" {
 		return usagef("%s has no built-in default; use awgctl set", s.Key)
 	}
-	return a.setOne(ctx, s.Key, s.Default, *yes)
+	return a.setOne(ctx, s.Key, s.Default, c.yes)
 }
 
-func (a *App) cmdServer(ctx context.Context, args []string) error {
-	fs := flag.NewFlagSet("server", flag.ContinueOnError)
-	yes := fs.Bool("yes", false, "")
-	pos, err := parse(fs, args)
-	if err != nil {
-		return err
-	}
-	if len(pos) != 1 || pos[0] != "rotate-key" {
-		return usagef("usage: awgctl server rotate-key --yes")
-	}
-	return a.change(ctx, *yes, func(d *config.State) (plan, error) {
+// cmdServerRotateKey always needs --yes: a new server key cuts every peer off.
+func (a *App) cmdServerRotateKey(ctx context.Context, c *call) error {
+	return a.change(ctx, c.yes, func(d *config.State) (plan, error) {
 		d.Settings[config.KeyServerPrivateKey] = keys.NewPrivate()
 		pub, _ := keys.Public(d.Settings[config.KeyServerPrivateKey])
-		return plan{reissue: allPeersOrServer(d),
+		return plan{needsYes: true, reissue: allPeersOrServer(d),
 			summary: []string{"New server public key: " + pub}}, nil
 	})
 }
 
-// allPeersOrServer always asks for --yes: a new server key cuts every peer off.
+// allPeersOrServer names who needs a new conf after a new server key.
 func allPeersOrServer(d *config.State) string {
 	if r := allPeers(d); r != "" {
 		return r

@@ -2,7 +2,6 @@ package cli
 
 import (
 	"context"
-	"flag"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -40,11 +39,7 @@ func (a *App) legacyFiles() []string {
 
 // cmdInit runs at each container start (s6 oneshot). Any error is fatal: the
 // s6 script stops the container, and the restart policy tries again.
-func (a *App) cmdInit(ctx context.Context, args []string) error {
-	fs := flag.NewFlagSet("init", flag.ContinueOnError)
-	if _, err := parse(fs, args); err != nil {
-		return err
-	}
+func (a *App) cmdInit(ctx context.Context, _ *call) error {
 	// Stale runtime state from before a docker restart (/run survives it).
 	for _, p := range []string{a.P.Settled(), a.P.DNSState()} {
 		os.Remove(p)
@@ -160,7 +155,6 @@ func (a *App) seedDB(ctx context.Context) error {
 }
 
 // checkKernel warns when the 3.1 switches meet a kernel module older than 3.1.
-// Only major.minor are read: the trailer fix did not change the version date.
 func (a *App) checkKernel(st *config.State) {
 	if !st.AWG.On(awg.RandomTrailers) && !st.AWG.On(awg.DisableCookies) {
 		return
@@ -168,31 +162,31 @@ func (a *App) checkKernel(st *config.State) {
 	if _, ok := a.Getenv("WG_QUICK_USERSPACE_IMPLEMENTATION"); ok {
 		return
 	}
-	b, err := os.ReadFile("/sys/module/amneziawg/version")
+	b, err := os.ReadFile(a.P.ModuleVersion())
 	if err != nil {
 		return
 	}
 	v := strings.TrimSpace(string(b))
-	parts := strings.SplitN(v, ".", 3)
-	if len(parts) < 2 {
-		return
-	}
-	major, err1 := strconv.Atoi(parts[0])
-	minor, err2 := strconv.Atoi(parts[1])
-	if err1 != nil || err2 != nil {
-		return
-	}
-	if major < 3 || major == 3 && minor < 1 {
+	if major, minor, ok := parseModuleVersion(v); ok && (major < 3 || major == 3 && minor < 1) {
 		a.warnf("RandomTrailers/DisableCookies need amneziawg kernel module 3.1 or newer, but %s is loaded. "+
 			"Upgrade the host module, or turn the switches off with: awgctl awg set random_trailers=off disable_cookies=off --yes", v)
 	}
 }
 
-func (a *App) cmdHealth(ctx context.Context, args []string) error {
-	fs := flag.NewFlagSet("health", flag.ContinueOnError)
-	if _, err := parse(fs, args); err != nil {
-		return err
+// parseModuleVersion reads major.minor of a kernel module version
+// ("3.1.20250101"). It ignores the rest: the trailer fix did not change the
+// version date.
+func parseModuleVersion(v string) (major, minor int, ok bool) {
+	parts := strings.SplitN(v, ".", 3)
+	if len(parts) < 2 {
+		return 0, 0, false
 	}
+	major, err1 := strconv.Atoi(parts[0])
+	minor, err2 := strconv.Atoi(parts[1])
+	return major, minor, err1 == nil && err2 == nil
+}
+
+func (a *App) cmdHealth(ctx context.Context, _ *call) error {
 	if err := health.Check(ctx, a.P, a.R); err != nil {
 		fmt.Fprintln(a.Out, err)
 		return &exitError{ExitError, err}
@@ -201,11 +195,7 @@ func (a *App) cmdHealth(ctx context.Context, args []string) error {
 	return nil
 }
 
-func (a *App) cmdVersion(ctx context.Context, args []string) error {
-	fs := flag.NewFlagSet("version", flag.ContinueOnError)
-	if _, err := parse(fs, args); err != nil {
-		return err
-	}
+func (a *App) cmdVersion(ctx context.Context, _ *call) error {
 	fmt.Fprintf(a.Out, "awgctl        %s\n", Version)
 	for _, c := range [][]string{{"awg", "--version"}, {"amneziawg-go", "--version"}} {
 		out, _, err := a.R.Run(ctx, c[0], c[1:], nil, nil)

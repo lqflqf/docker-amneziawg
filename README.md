@@ -95,7 +95,7 @@ Run `awgctl` in the running container: `docker exec amneziawg awgctl <command>`.
 |---|---|
 | 0 | Done |
 | 1 | Error. Nothing changed |
-| 2 | Usage error |
+| 2 | Usage error: an unknown command, a flag that the command does not accept, or a wrong number of arguments |
 | 3 | Refused: the change needs `--yes` |
 
 A command needs `--yes` when a peer needs a new config after the change. `peer rm` and `server rotate-key` always need `--yes`. Without `--yes`, the command exits with code 3 and changes nothing.
@@ -121,7 +121,7 @@ docker restart amneziawg                                        # applies the pe
 - A name has 1-32 letters, digits, spaces, `.`, `_` or `-`. It starts with a letter or a digit and does not end with a space. Each name is unique.
 - A peer without `--name` gets the name `peer <id>`, for example `peer 5`. Only peer 5 can have the name `peer 5`. `peer rename <id> --clear` sets this name again.
 - Keepalive is on (25 s) for a new peer. To save phone batteries, use `--no-keepalive` or `peer set <id> --keepalive off`.
-- The container does not keep peer configs or QR codes on disk. Use `peer export` (`--qr`, `--png FILE` or `--conf FILE`) each time. An export shows the saved config, which works after the next restart.
+- The container does not keep peer configs or QR codes on disk. Use `peer export` (`--qr`, `--png FILE` or `--conf FILE`, or more than one of them) each time. An export shows the saved config, which works after the next restart.
 
 ### Settings
 

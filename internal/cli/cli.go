@@ -88,45 +88,6 @@ func needYes(format string, args ...any) error {
 	return &exitError{ExitNeedYes, fmt.Errorf(format, args...)}
 }
 
-const usage = `Usage: awgctl <command> [arguments]
-
-Each change is saved in the database. Restart the container to apply it.
-
-System:
-  init                                  s6 start-up: create or check the DB, render /run
-  health                                Docker health check
-  version                               versions of awgctl, awg and amneziawg-go
-
-Settings (not AWG):
-  get [key] [--show-secrets]
-  set <key> <value> [--yes]
-  reset <key> [--yes]
-  server rotate-key --yes
-
-AmneziaWG parameters:
-  awg show [--show-secrets]
-  awg version <1.5|2.0|3.0|3.1> --yes
-  awg set <key>=<value>... [--yes]        (s=<n> sets S1-S4 together)
-  awg regenerate [keys...] --yes
-
-Peers (<id> = the peer id, a number 2-254, also the last octet of its address):
-  peer add [--name NAME] [--no-keepalive] [--qr]
-  peer add-many <count> [--no-keepalive]
-  peer list [--json]
-  peer show <id>
-  peer export <id> [--qr | --png FILE | --conf FILE]
-  peer rename <id> <new-name> | peer rename <id> --clear
-  peer set <id> --keepalive on|off
-  peer disable <id> | peer enable <id>
-  peer rotate <id> --yes
-  peer rm <id> --yes
-
-Migration (run with: docker run --rm --entrypoint awgctl -v <dir>:/config <image>):
-  import-legacy <dir> [--dry-run] [--force-partial] [--rename OLD=NEW]...
-
-Exit codes: 0 done, 1 error (nothing changed), 2 usage, 3 refused without --yes.
-`
-
 // Main runs one command and returns the exit code.
 func (a *App) Main(args []string) int {
 	ctx := context.Background()
@@ -151,33 +112,20 @@ func (a *App) dispatch(ctx context.Context, args []string) error {
 	if len(args) == 0 {
 		return usagef("no command")
 	}
-	cmd, rest := args[0], args[1:]
-	switch cmd {
+	switch args[0] {
 	case "-h", "--help", "help":
 		fmt.Fprint(a.Out, usage)
 		return nil
-	case "init":
-		return a.cmdInit(ctx, rest)
-	case "health":
-		return a.cmdHealth(ctx, rest)
-	case "version":
-		return a.cmdVersion(ctx, rest)
-	case "get":
-		return a.cmdGet(ctx, rest)
-	case "set":
-		return a.cmdSet(ctx, rest)
-	case "reset":
-		return a.cmdReset(ctx, rest)
-	case "server":
-		return a.cmdServer(ctx, rest)
-	case "awg":
-		return a.cmdAWG(ctx, rest)
-	case "peer":
-		return a.cmdPeer(ctx, rest)
-	case "import-legacy":
-		return a.cmdImportLegacy(ctx, rest)
 	}
-	return usagef("unknown command %q", cmd)
+	c, rest, err := findCommand(args)
+	if err != nil {
+		return err
+	}
+	cl, err := c.parse(rest)
+	if err != nil {
+		return err
+	}
+	return c.run(a, ctx, cl)
 }
 
 // parse parses flags that may come before, between or after the positional
@@ -229,9 +177,18 @@ func (a *App) view(ctx context.Context) (*config.State, error) {
 
 // plan is what a mutation reports before the commit.
 type plan struct {
-	noop    bool   // nothing changes; nothing is saved
-	reissue string // who needs a new conf ("" = nobody)
-	summary []string
+	noop     bool   // nothing changes; nothing is saved
+	needsYes bool   // the change is saved only with --yes; reissue says why
+	reissue  string // who needs a new conf, for the messages ("" = nobody)
+	summary  []string
+}
+
+// newConfs records that who needs a new conf, so the change needs --yes.
+// An empty who (no peers) needs nothing.
+func (p *plan) newConfs(who string) {
+	if who != "" {
+		p.reissue, p.needsYes = who, true
+	}
 }
 
 // errNoop rolls back a mutation that changes nothing.
@@ -261,7 +218,7 @@ func (a *App) change(ctx context.Context, yes bool, mutate func(*config.State) (
 		if pl.noop {
 			return errNoop
 		}
-		if pl.reissue != "" && !yes {
+		if pl.needsYes && !yes {
 			return needYes("%s needs a new conf after this change; run again with --yes", pl.reissue)
 		}
 		if err := a.env().Check(ctx, d); err != nil {

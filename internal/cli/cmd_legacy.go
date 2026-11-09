@@ -2,7 +2,6 @@ package cli
 
 import (
 	"context"
-	"flag"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -33,27 +32,16 @@ func keepInConfig(name string) bool {
 		strings.HasPrefix(name, "."+sys.DBName)
 }
 
-func (a *App) cmdImportLegacy(ctx context.Context, args []string) error {
-	fs := flag.NewFlagSet("import-legacy", flag.ContinueOnError)
-	dry := fs.Bool("dry-run", false, "")
-	force := fs.Bool("force-partial", false, "")
-	ren := renameFlag{}
-	fs.Var(ren, "rename", "")
-	pos, err := parse(fs, args)
-	if err != nil {
-		return err
-	}
-	if len(pos) != 1 {
-		return usagef("usage: awgctl import-legacy <dir> [--dry-run] [--force-partial] [--rename OLD=NEW]...")
-	}
-	dir, err := filepath.Abs(pos[0])
+func (a *App) cmdImportLegacy(ctx context.Context, c *call) error {
+	dry, force := c.dryRun, c.forcePartial
+	dir, err := filepath.Abs(c.pos[0])
 	if err != nil {
 		return err
 	}
 	if _, err := os.Lstat(a.P.DB()); err == nil {
 		return fmt.Errorf("%s exists: import-legacy runs only once, into an empty volume", a.P.DB())
 	}
-	rep, err := legacy.Analyze(legacy.Options{Dir: dir, Rename: ren})
+	rep, err := legacy.Analyze(legacy.Options{Dir: dir, Rename: c.rename})
 	if err != nil {
 		return err
 	}
@@ -89,10 +77,10 @@ func (a *App) cmdImportLegacy(ctx context.Context, args []string) error {
 	if same {
 		fmt.Fprintln(a.Out, "result:   every peer conf is unchanged: no peer needs a new conf")
 	}
-	if len(rep.Dropped) > 0 && !*force {
+	if len(rep.Dropped) > 0 && !force {
 		return fmt.Errorf("%d item(s) cannot be imported (see drop above). Fix them on the old image, or import without them with --force-partial", len(rep.Dropped))
 	}
-	if *dry {
+	if dry {
 		fmt.Fprintln(a.Out, "dry run:  nothing was written")
 		return nil
 	}

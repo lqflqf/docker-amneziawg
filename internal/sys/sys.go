@@ -21,12 +21,13 @@ const (
 type Paths struct {
 	Config string // the /config volume
 	Run    string // /run
+	Sys    string // /sys
 }
 
 // DefaultPaths are /config and /run, unless AWGCTL_CONFIG_DIR or
 // AWGCTL_RUN_DIR say otherwise (tests).
 func DefaultPaths() Paths {
-	p := Paths{Config: "/config", Run: "/run"}
+	p := Paths{Config: "/config", Run: "/run", Sys: "/sys"}
 	if v := os.Getenv("AWGCTL_CONFIG_DIR"); v != "" {
 		p.Config = v
 	}
@@ -44,6 +45,9 @@ func (p Paths) DNSDir() string     { return filepath.Join(p.Run, "dnsmasq") }
 func (p Paths) DNSConf() string    { return filepath.Join(p.DNSDir(), "dnsmasq.conf") }
 func (p Paths) DNSAddress() string { return filepath.Join(p.DNSDir(), "address") }
 func (p Paths) DNSState() string   { return filepath.Join(p.Run, "dnsmasq-state") }
+
+// ModuleVersion is the version file of the amneziawg kernel module.
+func (p Paths) ModuleVersion() string { return filepath.Join(p.Sys, "module", "amneziawg", "version") }
 
 // Runner runs a program. The real one is Exec; tests use a fake.
 type Runner interface {
