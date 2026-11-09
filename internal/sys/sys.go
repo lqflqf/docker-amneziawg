@@ -6,11 +6,15 @@ package sys
 import (
 	"bytes"
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"os"
 	"os/exec"
 	"path/filepath"
+)
+
+// File names in the /config volume.
+const (
+	DBName              = "amneziawg.db"
+	LegacyArchivePrefix = "legacy-" // directories that import-legacy makes
 )
 
 // Paths are the locations awgctl reads and writes.
@@ -32,7 +36,7 @@ func DefaultPaths() Paths {
 	return p
 }
 
-func (p Paths) DB() string         { return filepath.Join(p.Config, "amneziawg.db") }
+func (p Paths) DB() string         { return filepath.Join(p.Config, DBName) }
 func (p Paths) RunDir() string     { return filepath.Join(p.Run, "amneziawg") }
 func (p Paths) WG0() string        { return filepath.Join(p.RunDir(), "wg0.conf") }
 func (p Paths) Settled() string    { return filepath.Join(p.Run, "amneziawg-settled") }
@@ -69,13 +73,11 @@ func WriteAtomic(path string, data []byte, mode os.FileMode) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
-	rnd := make([]byte, 6)
-	rand.Read(rnd)
-	tmp := filepath.Join(filepath.Dir(path), "."+filepath.Base(path)+".tmp-"+hex.EncodeToString(rnd))
-	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, mode)
+	f, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".tmp-*")
 	if err != nil {
 		return err
 	}
+	tmp := f.Name()
 	_, err = f.Write(data)
 	if err == nil {
 		err = f.Chmod(mode)

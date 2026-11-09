@@ -5,10 +5,8 @@ package store
 
 import (
 	"context"
-	"crypto/rand"
 	"database/sql"
 	_ "embed"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
@@ -77,13 +75,11 @@ func Open(path string) (*DB, error) {
 // rename never replaces a file at path. On any failure nothing is left at path.
 func Create(path string, fn func(*Tx) error) (err error) {
 	dir := filepath.Dir(path)
-	rnd := make([]byte, 6)
-	rand.Read(rnd)
-	tmp := filepath.Join(dir, "."+filepath.Base(path)+".seed-"+hex.EncodeToString(rnd))
-	f, err := os.OpenFile(tmp, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0o600)
+	f, err := os.CreateTemp(dir, "."+filepath.Base(path)+".seed-*")
 	if err != nil {
 		return err
 	}
+	tmp := f.Name()
 	f.Close()
 	defer func() {
 		if err != nil {

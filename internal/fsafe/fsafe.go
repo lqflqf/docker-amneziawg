@@ -11,6 +11,8 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+
+	"github.com/lqflqf/docker-amneziawg/internal/sys"
 )
 
 // Owner is the uid:gid that owns /config (the abc user, PUID:PGID).
@@ -85,12 +87,13 @@ func Harden(configDir string) error {
 			firstErr = err
 		}
 	}
-	if fi, err := os.Lstat(filepath.Join(configDir, "amneziawg.db")); err == nil && fi.Mode().IsRegular() {
-		keep(os.Chmod(filepath.Join(configDir, "amneziawg.db"), 0o600))
+	db := filepath.Join(configDir, sys.DBName)
+	if fi, err := os.Lstat(db); err == nil && fi.Mode().IsRegular() {
+		keep(os.Chmod(db, 0o600))
 	}
 	entries, _ := os.ReadDir(configDir)
 	for _, e := range entries {
-		if !e.IsDir() || !strings.HasPrefix(e.Name(), "legacy-") {
+		if !e.IsDir() || !strings.HasPrefix(e.Name(), sys.LegacyArchivePrefix) {
 			continue
 		}
 		dir := filepath.Join(configDir, e.Name())

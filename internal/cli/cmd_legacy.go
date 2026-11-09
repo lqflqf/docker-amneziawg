@@ -11,6 +11,7 @@ import (
 
 	"github.com/lqflqf/docker-amneziawg/internal/legacy"
 	"github.com/lqflqf/docker-amneziawg/internal/store"
+	"github.com/lqflqf/docker-amneziawg/internal/sys"
 )
 
 type renameFlag map[string]string
@@ -27,8 +28,8 @@ func (r renameFlag) Set(v string) error {
 
 // keepInConfig are the entries of /config that are not legacy files.
 func keepInConfig(name string) bool {
-	return name == "amneziawg.db" || strings.HasPrefix(name, "legacy-") ||
-		strings.HasPrefix(name, ".amneziawg.db")
+	return name == sys.DBName || strings.HasPrefix(name, sys.LegacyArchivePrefix) ||
+		strings.HasPrefix(name, "."+sys.DBName)
 }
 
 func (a *App) cmdImportLegacy(ctx context.Context, args []string) error {
@@ -127,7 +128,7 @@ func (a *App) cmdImportLegacy(ctx context.Context, args []string) error {
 
 // archiveLegacy moves the old files of /config into a new legacy-<time> directory.
 func (a *App) archiveLegacy() (string, error) {
-	dst := filepath.Join(a.P.Config, "legacy-"+time.Now().UTC().Format("20060102T150405Z"))
+	dst := filepath.Join(a.P.Config, sys.LegacyArchivePrefix+time.Now().UTC().Format("20060102T150405Z"))
 	if err := os.Mkdir(dst, 0o700); err != nil {
 		return "", err
 	}
