@@ -175,6 +175,17 @@ The bundled userspace `amneziawg-go` works without a kernel module. For better t
 - The kernel datapath applies only the options that the module knows. A module older than 3.1 rejects `RandomTrailers` and `DisableCookies` with `Unable to modify interface: Invalid argument`. The container gives a warning if it can read `/sys/module/amneziawg/version`.
 - With `RandomTrailers`, use a module built from upstream `4569c4c6` (2026-09-06) or newer. Older 3.1 modules send some oversized handshake packets. The version string does not show the fix. See [how to check](docs/awg-performance.md#checking-whether-your-module-has-the-fix).
 
+### Module packages
+
+[amneziawg-linux-kernel-module-packages](https://github.com/lqflqf/amneziawg-linux-kernel-module-packages) has signed packages of the kernel module for the host:
+
+| Host | Package | Architectures |
+|---|---|---|
+| Alpine Linux 3.23, 3.24 (`linux-virt`, `linux-lts` kernels) | Pre-compiled `amneziawg-virt` or `amneziawg-lts` (APK) | `x86_64`, `aarch64` |
+| Debian 12, 13 | `amneziawg-dkms` (DEB). DKMS compiles the module for each kernel | `amd64`, `arm64` |
+
+Follow the install procedure in that repository. It includes the key check. Then load the module (`modprobe amneziawg`) and restart the container. The container logs `AmneziaWG kernel module is active`. The image already has `awg`, so the host does not need `amneziawg-tools`.
+
 ## DNS (dnsmasq)
 
 Each peer config gets `DNS = <subnet>.1`, the server end of the tunnel. dnsmasq answers there and forwards to `dns.upstream`, to the first upstream that answers. It caches, but it does not recurse or check DNSSEC, and it sends plain DNS. For encrypted lookups with DNSSEC, use [Unbound on the host](#recommended-unbound-on-the-host).
