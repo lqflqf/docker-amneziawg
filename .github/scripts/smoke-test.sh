@@ -378,9 +378,12 @@ else
         exit 1
     }
     engine network create --subnet 10.199.53.0/24 "$network" >/dev/null
-    engine run -d --name "$up" --network "$network" --ip 10.199.53.53 --entrypoint dnsmasq "$image" \
+    # --no-healthcheck: healthy() runs awgctl health itself. nerdctl runs the
+    # HEALTHCHECK with a systemd timer, and "nerdctl restart" fails when the
+    # unit of the last check is still loaded.
+    engine run -d --name "$up" --network "$network" --ip 10.199.53.53 --no-healthcheck --entrypoint dnsmasq "$image" \
         -k --no-resolv --no-hosts --user=root --log-facility=- --address=/upstream.test/192.0.2.53 >/dev/null
-    engine run -d --name "$srv" --network "$network" --ip 10.199.53.10 \
+    engine run -d --name "$srv" --network "$network" --ip 10.199.53.10 --no-healthcheck \
         --cap-add NET_ADMIN --device /dev/net/tun -v "$volume-srv":/config \
         -e SERVERURL=10.199.53.10 -e INTERNAL_SUBNET=10.58.58.0 -e DNS_UPSTREAM=10.199.53.53 "$image" >/dev/null
     wait_tunnel "$srv"
@@ -393,7 +396,7 @@ else
     # address directly. A split tunnel needs no src_valid_mark.
     engine exec "$srv" awgctl peer export 2 | sed -e '/^DNS = /d' \
         -e 's|^AllowedIPs = .*|AllowedIPs = 10.58.58.0/24|' > "$tmpdir/cli.conf"
-    engine run -d --name "$cli" --network "$network" --cap-add NET_ADMIN --device /dev/net/tun \
+    engine run -d --name "$cli" --network "$network" --no-healthcheck --cap-add NET_ADMIN --device /dev/net/tun \
         -v "$tmpdir":/t:ro --entrypoint sh "$image" -c 'cp /t/cli.conf /tmp/wg0.conf && awg-quick up /tmp/wg0.conf && sleep infinity' >/dev/null
     for _ in $(seq 1 20); do
         engine exec "$cli" ping -c1 -W2 10.58.58.1 >/dev/null 2>&1 && break
