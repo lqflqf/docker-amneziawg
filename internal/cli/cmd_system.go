@@ -101,7 +101,7 @@ func (a *App) cmdInit(ctx context.Context, args []string) error {
 		a.warnf("could not set the owner of everything in /config (read-only or remote volume?): %v", err)
 	}
 	a.logf("AmneziaWG %s, endpoint %s:%s, subnet %s, %d peer(s)", st.AWG["version"],
-		st.Get("server.endpoint_host"), st.Get("server.endpoint_port"), st.Subnet(), len(st.Peers))
+		st.Get(config.KeyEndpointHost), st.Get(config.KeyEndpointPort), st.Subnet(), len(st.Peers))
 	if len(st.Peers) == 0 {
 		a.logf("No peers yet. Add one with: docker exec -it <container> awgctl peer add --qr, then restart the container")
 	}
@@ -133,7 +133,7 @@ func (a *App) render(ctx context.Context, st *config.State) error {
 	if err := sys.WriteAtomic(a.P.WG0(), []byte(srv.String()), 0o600); err != nil {
 		return err
 	}
-	if err := sys.WriteAtomic(a.P.DNSConf(), []byte(render.Dnsmasq(st.Get("dns.upstream"))), 0o644); err != nil {
+	if err := sys.WriteAtomic(a.P.DNSConf(), []byte(render.Dnsmasq(st.Get(config.KeyDNSUpstream))), 0o644); err != nil {
 		return err
 	}
 	return sys.WriteAtomic(a.P.DNSAddress(), []byte(config.ServerAddress(st.Subnet())+"\n"), 0o644)
@@ -151,7 +151,7 @@ func (a *App) seedDB(ctx context.Context) error {
 	if err := a.env().Check(ctx, st); err != nil {
 		return fmt.Errorf("the seeded config is not valid: %w", err)
 	}
-	err = store.Create(a.P.DB(), st.SaveSettings)
+	err = store.Create(a.P.DB(), func(tx *store.Tx) error { return st.Save(tx, nil) })
 	if err != nil {
 		return fmt.Errorf("could not create the database: %w", err)
 	}

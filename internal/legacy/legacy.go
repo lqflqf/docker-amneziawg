@@ -10,7 +10,6 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"sort"
 	"strconv"
 	"strings"
 
@@ -225,13 +224,21 @@ func Analyze(opts Options) (*Report, error) {
 		}
 		st.Settings[k] = n
 	}
+	// def returns the registry default of k. A wrong key stops the import.
+	def := func(k string) string {
+		v, err := config.Default(k)
+		if err != nil {
+			block("%v", err)
+		}
+		return v
+	}
 
 	// Server key
 	priv := iface.Get("PrivateKey")
 	if f := readKey(filepath.Join(dir, "server", "privatekey-server")); f != "" && f != priv {
 		block("server/privatekey-server does not match the PrivateKey in wg0.conf")
 	}
-	set("server.private_key", priv)
+	set(config.KeyServerPrivateKey, priv)
 
 	// Subnet from the installed address, not from the env or INTERFACE.
 	addr := strings.TrimSuffix(strings.Split(iface.Get("Address"), ",")[0], "/24")
@@ -240,13 +247,13 @@ func Analyze(opts Options) (*Report, error) {
 		return nil, fmt.Errorf("wg0.conf Address %q is not <subnet>.1", iface.Get("Address"))
 	}
 	subnet := strings.TrimSuffix(addr, ".1") + ".0/24"
-	set("net.subnet", subnet)
+	set(config.KeySubnet, subnet)
 	prefix := netcheck.Prefix24(subnet) + "."
 
 	if m := iface.Get("MTU"); m != "" {
-		set("net.mtu", m)
+		set(config.KeyMTU, m)
 	} else {
-		st.Settings["net.mtu"] = "none"
+		st.Settings[config.KeyMTU] = "none"
 	}
 
 	// Firewall
@@ -270,11 +277,11 @@ func Analyze(opts Options) (*Report, error) {
 		}
 	}
 	if nat == "" {
-		nat = "eth+"
-		note("no MASQUERADE rule found; using eth+")
+		nat = def(config.KeyNATInterface)
+		note("no MASQUERADE rule found; using %s", nat)
 	}
-	set("fw.nat_interface", nat)
-	st.Settings["fw.ipv6_forward_drop"] = strconv.FormatBool(v6)
+	set(config.KeyNATInterface, nat)
+	st.Settings[config.KeyIPv6ForwardDrop] = strconv.FormatBool(v6)
 
 	// AWG values from the installed conf
 	for _, l := range iface.Lines {
@@ -309,7 +316,7 @@ func Analyze(opts Options) (*Report, error) {
 		}
 	}
 	if keepaliveSeconds != "" {
-		set("peer.keepalive_seconds", keepaliveSeconds)
+		set(config.KeyKeepaliveSeconds, keepaliveSeconds)
 	}
 
 	// Peers
@@ -415,15 +422,15 @@ func Analyze(opts Options) (*Report, error) {
 		peerMTU = iface.Get("MTU")
 	}
 	if endpointPort == "" {
-		endpointPort = "51820"
+		endpointPort = def(config.KeyEndpointPort)
 	}
-	set("server.endpoint_host", endpointHost)
-	set("server.endpoint_port", endpointPort)
+	set(config.KeyEndpointHost, endpointHost)
+	set(config.KeyEndpointPort, endpointPort)
 	if allowed == "" {
-		allowed = "0.0.0.0/0, ::/0"
+		allowed = def(config.KeyAllowedIPs)
 	}
-	set("peer.default_allowed_ips", allowed)
-	set("net.peer_mtu", peerMTU)
+	set(config.KeyAllowedIPs, allowed)
+	set(config.KeyPeerMTU, peerMTU)
 
 	// DNS
 	upstream := ""
@@ -442,9 +449,9 @@ func Analyze(opts Options) (*Report, error) {
 		}
 	}
 	if upstream == "" {
-		upstream = "1.1.1.1,1.0.0.1"
+		upstream = def(config.KeyDNSUpstream)
 	}
-	set("dns.upstream", upstream)
+	set(config.KeyDNSUpstream, upstream)
 	if b, err := os.ReadFile(filepath.Join(dir, "templates", "dnsmasq.conf")); err == nil {
 		for _, l := range strings.Split(string(b), "\n") {
 			l = strings.TrimSpace(l)
@@ -455,7 +462,7 @@ func Analyze(opts Options) (*Report, error) {
 		}
 	}
 
-	sort.Slice(st.Peers, func(i, j int) bool { return st.Peers[i].ID < st.Peers[j].ID })
+	st.SortPeers()
 	if errs, warns := st.Validate(); len(errs) > 0 {
 		for _, e := range errs {
 			block("%v", e)

@@ -126,5 +126,5 @@ func (e Env) Check(ctx context.Context, d *config.State) error {
 	if err := e.ParseCheck(ctx, pc.String(), "the peer conf"); err != nil {
 		return err
 	}
-	return e.DnsmasqTest(ctx, render.Dnsmasq(d.Get("dns.upstream")))
+	return e.DnsmasqTest(ctx, render.Dnsmasq(d.Get(config.KeyDNSUpstream)))
 }

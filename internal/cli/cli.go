@@ -267,10 +267,7 @@ func (a *App) change(ctx context.Context, yes bool, mutate func(*config.State) (
 		if err := a.env().Check(ctx, d); err != nil {
 			return err
 		}
-		if err := d.SaveSettings(tx); err != nil {
-			return err
-		}
-		return syncPeers(tx, old, d)
+		return d.Save(tx, old)
 	})
 	if err != nil && !errors.Is(err, errNoop) {
 		return err
@@ -285,39 +282,6 @@ func (a *App) change(ctx context.Context, yes bool, mutate func(*config.State) (
 		fmt.Fprintf(a.Out, "New conf needed for %s after the restart: awgctl peer export <id> --qr\n", pl.reissue)
 	}
 	fmt.Fprintln(a.Out, "Saved. Restart the container to apply.")
-	return nil
-}
-
-// syncPeers writes the peer changes between old and d: missing peers are
-// deleted first, then peers with an id that old does not have are inserted
-// and changed ones updated.
-func syncPeers(tx *store.Tx, old, d *config.State) error {
-	keep := map[int]bool{}
-	for _, p := range d.Peers {
-		keep[p.ID] = true
-	}
-	byID := map[int]store.Peer{}
-	for _, p := range old.Peers {
-		byID[p.ID] = p
-		if !keep[p.ID] {
-			if err := tx.DeletePeer(p.ID); err != nil {
-				return err
-			}
-		}
-	}
-	for _, p := range d.Peers {
-		o, ok := byID[p.ID]
-		switch {
-		case !ok:
-			if err := tx.AddPeer(p); err != nil {
-				return err
-			}
-		case o != p:
-			if err := tx.UpdatePeer(p); err != nil {
-				return err
-			}
-		}
-	}
 	return nil
 }
 

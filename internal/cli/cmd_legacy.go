@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/lqflqf/docker-amneziawg/internal/config"
 	"github.com/lqflqf/docker-amneziawg/internal/legacy"
 	"github.com/lqflqf/docker-amneziawg/internal/store"
 	"github.com/lqflqf/docker-amneziawg/internal/sys"
@@ -70,7 +71,7 @@ func (a *App) cmdImportLegacy(ctx context.Context, args []string) error {
 	}
 	st := rep.State
 	fmt.Fprintf(a.Out, "server:   endpoint %s:%s, subnet %s, AWG %s, %d peer(s)\n",
-		st.Get("server.endpoint_host"), st.Get("server.endpoint_port"), st.Subnet(), st.AWG["version"], len(st.Peers))
+		st.Get(config.KeyEndpointHost), st.Get(config.KeyEndpointPort), st.Subnet(), st.AWG["version"], len(st.Peers))
 	same := true
 	for _, v := range rep.Verdicts {
 		line := fmt.Sprintf("peer:     %-20s %s", v.Name, v.Result)
@@ -98,17 +99,7 @@ func (a *App) cmdImportLegacy(ctx context.Context, args []string) error {
 	if err := a.env().Check(ctx, st); err != nil {
 		return fmt.Errorf("the imported config does not pass the checks: %w", err)
 	}
-	err = store.Create(a.P.DB(), func(tx *store.Tx) error {
-		if err := st.SaveSettings(tx); err != nil {
-			return err
-		}
-		for _, p := range st.Peers {
-			if err := tx.AddPeer(p); err != nil {
-				return err
-			}
-		}
-		return nil
-	})
+	err = store.Create(a.P.DB(), func(tx *store.Tx) error { return st.Save(tx, nil) })
 	if err != nil {
 		return fmt.Errorf("could not write the database: %w", err)
 	}

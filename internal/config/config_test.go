@@ -327,3 +327,89 @@ func withID(p store.Peer, name string, id int) store.Peer {
 	p.Name, p.ID = name, id
 	return p
 }
+
+func TestAddAndRemovePeers(t *testing.T) {
+	st := state(t)
+	addPeer(st, "phone", 3)
+	ps, err := st.AddPeers(2, "", true)
+	if err != nil || len(ps) != 2 || ps[0].ID != 2 || ps[1].ID != 4 || ps[0].Name != "peer 2" || !ps[1].Keepalive {
+		t.Fatalf("AddPeers: %+v %v", ps, err)
+	}
+	if st.Peers[0].ID != 2 || st.Peers[1].ID != 3 || st.Peers[2].ID != 4 {
+		t.Fatalf("peers are not in id order: %+v", st.Peers)
+	}
+	if err := st.Err(); err != nil {
+		t.Fatalf("the new peers are not valid: %v", err)
+	}
+	before := len(st.Peers)
+	if _, err := st.AddPeers(1, "phone", false); err == nil || err.Error() != `the name "phone" is used by peer 3` {
+		t.Fatalf("duplicate name: %v", err)
+	}
+	if len(st.Peers) != before {
+		t.Fatal("a failed AddPeers changed the state")
+	}
+	p, err := st.RemovePeer(3)
+	if err != nil || p.Name != "phone" || len(st.Peers) != before-1 {
+		t.Fatalf("RemovePeer: %+v %v", p, err)
+	}
+	if _, err := st.RemovePeer(3); err == nil || err.Error() != "no peer with id 3" {
+		t.Fatalf("RemovePeer of a missing id: %v", err)
+	}
+}
+
+func TestSaveSyncsPeers(t *testing.T) {
+	st := state(t)
+	addPeer(st, "a", 2)
+	addPeer(st, "b", 3)
+	path := filepath.Join(t.TempDir(), "amneziawg.db")
+	if err := store.Create(path, func(tx *store.Tx) error { return st.Save(tx, nil) }); err != nil {
+		t.Fatal(err)
+	}
+	db, err := store.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+	load := func() *config.State {
+		var got *config.State
+		if err := db.View(ctx, func(tx *store.Tx) (err error) { got, err = config.Load(tx); return err }); err != nil {
+			t.Fatal(err)
+		}
+		return got
+	}
+	old := load()
+	d := old.Clone()
+	d.Peers[0].Enabled = false
+	if _, err := d.RemovePeer(3); err != nil {
+		t.Fatal(err)
+	}
+	addPeer(d, "c", 9)
+	if err := db.Update(ctx, func(tx *store.Tx) error { return d.Save(tx, old) }); err != nil {
+		t.Fatal(err)
+	}
+	got := load()
+	if len(got.Peers) != 2 || got.Peers[0] != d.Peers[0] || got.Peers[1] != d.Peers[1] {
+		t.Fatalf("saved peers %+v, want %+v", got.Peers, d.Peers)
+	}
+}
+
+func TestDefaultAndBool(t *testing.T) {
+	if v, err := config.Default(config.KeyEndpointPort); err != nil || v != "51820" {
+		t.Errorf("Default(port) = %q %v", v, err)
+	}
+	if _, err := config.Default("no.such.key"); err == nil {
+		t.Error("Default of an unknown key returned nil")
+	}
+	if _, err := config.Default(config.KeyEndpointHost); err == nil {
+		t.Error("Default of a setting without a default returned nil")
+	}
+	st := &config.State{Settings: map[string]string{config.KeyIPv6ForwardDrop: "false"}}
+	if st.Bool(config.KeyIPv6ForwardDrop) {
+		t.Error("Bool(false) = true")
+	}
+	delete(st.Settings, config.KeyIPv6ForwardDrop)
+	if !st.Bool(config.KeyIPv6ForwardDrop) {
+		t.Error("Bool does not use the default true")
+	}
+}

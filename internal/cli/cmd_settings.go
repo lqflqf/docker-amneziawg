@@ -144,8 +144,8 @@ func (a *App) cmdServer(ctx context.Context, args []string) error {
 		return usagef("usage: awgctl server rotate-key --yes")
 	}
 	return a.change(ctx, *yes, func(d *config.State) (plan, error) {
-		d.Settings["server.private_key"] = keys.NewPrivate()
-		pub, _ := keys.Public(d.Settings["server.private_key"])
+		d.Settings[config.KeyServerPrivateKey] = keys.NewPrivate()
+		pub, _ := keys.Public(d.Settings[config.KeyServerPrivateKey])
 		return plan{reissue: allPeersOrServer(d),
 			summary: []string{"New server public key: " + pub}}, nil
 	})

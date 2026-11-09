@@ -1,9 +1,12 @@
 package config
 
 import (
+	"cmp"
 	"errors"
 	"fmt"
+	"maps"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -34,8 +37,11 @@ func (s *State) Get(k string) string {
 	return ""
 }
 
+// Bool returns a true/false setting as a bool.
+func (s *State) Bool(k string) bool { return s.Get(k) == "true" }
+
 // Subnet returns the tunnel subnet ("10.13.13.0/24").
-func (s *State) Subnet() string { return s.Get("net.subnet") }
+func (s *State) Subnet() string { return s.Get(KeySubnet) }
 
 // Load reads the configuration.
 func Load(tx *store.Tx) (*State, error) {
@@ -73,13 +79,57 @@ func (s *State) SaveSettings(tx *store.Tx) error {
 	return tx.ReplacePrefix("awg.", vals)
 }
 
+// Save writes s in tx: the settings, the AWG set and the peer changes from
+// old. A nil old is an empty database, so every peer is inserted.
+func (s *State) Save(tx *store.Tx, old *State) error {
+	if err := s.SaveSettings(tx); err != nil {
+		return err
+	}
+	var before []store.Peer
+	if old != nil {
+		before = old.Peers
+	}
+	return syncPeers(tx, before, s.Peers)
+}
+
+// syncPeers writes the peer changes from before to after: missing peers are
+// deleted first, then new ids are inserted and changed peers updated.
+func syncPeers(tx *store.Tx, before, after []store.Peer) error {
+	keep := map[int]bool{}
+	for _, p := range after {
+		keep[p.ID] = true
+	}
+	byID := map[int]store.Peer{}
+	for _, p := range before {
+		byID[p.ID] = p
+		if !keep[p.ID] {
+			if err := tx.DeletePeer(p.ID); err != nil {
+				return err
+			}
+		}
+	}
+	for _, p := range after {
+		o, ok := byID[p.ID]
+		switch {
+		case !ok:
+			if err := tx.AddPeer(p); err != nil {
+				return err
+			}
+		case o != p:
+			if err := tx.UpdatePeer(p); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
 // Clone returns a deep copy.
 func (s *State) Clone() *State {
-	c := &State{Settings: map[string]string{}, AWG: s.AWG.Clone()}
-	for k, v := range s.Settings {
-		c.Settings[k] = v
+	c := &State{Settings: maps.Clone(s.Settings), AWG: s.AWG.Clone(), Peers: slices.Clone(s.Peers)}
+	if c.Settings == nil {
+		c.Settings = map[string]string{}
 	}
-	c.Peers = append([]store.Peer(nil), s.Peers...)
 	return c
 }
 
@@ -155,7 +205,7 @@ func (s *State) Validate() (errs []error, warns []string) {
 		e("%d peers; the maximum for a /24 is %d", len(s.Peers), MaxPeers)
 	}
 	names, ids, pubs := map[string]bool{}, map[int]bool{}, map[string]bool{}
-	serverPub, _ := keys.Public(s.Get("server.private_key"))
+	serverPub, _ := keys.Public(s.Get(KeyServerPrivateKey))
 	for _, p := range s.Peers {
 		id := fmt.Sprintf("peer %d", p.ID)
 		if p.ID < MinPeerID || p.ID > MaxPeerID {
@@ -233,4 +283,56 @@ func (s *State) FindPeer(id int) (*store.Peer, error) {
 		}
 	}
 	return nil, fmt.Errorf("no peer with id %d", id)
+}
+
+// NameOwner returns the id of the peer with name.
+func (s *State) NameOwner(name string) (int, bool) {
+	for _, p := range s.Peers {
+		if p.Name == name {
+			return p.ID, true
+		}
+	}
+	return 0, false
+}
+
+// AddPeers adds n peers with new keys at the lowest free ids and returns
+// them. An empty name gives each peer its default name "peer <id>". On an
+// error, s does not change.
+func (s *State) AddPeers(n int, name string, keepalive bool) ([]store.Peer, error) {
+	ids, err := s.FreeIDs(n)
+	if err != nil {
+		return nil, err
+	}
+	var out []store.Peer
+	for _, id := range ids {
+		nm := name
+		if nm == "" {
+			nm = DefaultPeerName(id)
+		}
+		if other, ok := s.NameOwner(nm); ok {
+			return nil, fmt.Errorf("the name %q is used by peer %d", nm, other)
+		}
+		priv, pub := keys.Pair()
+		out = append(out, store.Peer{ID: id, Name: nm, PrivateKey: priv, PublicKey: pub,
+			PresharedKey: keys.NewSymmetric(), Keepalive: keepalive, Enabled: true})
+	}
+	s.Peers = append(s.Peers, out...)
+	s.SortPeers()
+	return out, nil
+}
+
+// RemovePeer removes the peer with id and returns it.
+func (s *State) RemovePeer(id int) (store.Peer, error) {
+	i := slices.IndexFunc(s.Peers, func(p store.Peer) bool { return p.ID == id })
+	if i < 0 {
+		return store.Peer{}, fmt.Errorf("no peer with id %d", id)
+	}
+	p := s.Peers[i]
+	s.Peers = slices.Delete(s.Peers, i, i+1)
+	return p, nil
+}
+
+// SortPeers puts the peers in id order.
+func (s *State) SortPeers() {
+	slices.SortFunc(s.Peers, func(a, b store.Peer) int { return cmp.Compare(a.ID, b.ID) })
 }

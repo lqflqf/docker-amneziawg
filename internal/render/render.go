@@ -60,9 +60,9 @@ func Server(st *config.State) (*conf.File, error) {
 	iface := conf.Section{Name: "Interface"}
 	iface.Add("Address", config.ServerAddress(subnet)+"/24")
 	iface.Add("ListenPort", ListenPort)
-	iface.Add("PrivateKey", st.Get("server.private_key"))
-	iface.Add("MTU", mtu(st.Get("net.mtu")))
-	up, down := FirewallRules(st.Get("fw.nat_interface"), st.Get("fw.ipv6_forward_drop") == "true")
+	iface.Add("PrivateKey", st.Get(config.KeyServerPrivateKey))
+	iface.Add("MTU", mtu(st.Get(config.KeyMTU)))
+	up, down := FirewallRules(st.Get(config.KeyNATInterface), st.Bool(config.KeyIPv6ForwardDrop))
 	for _, c := range up {
 		iface.Add("PostUp", c)
 	}
@@ -71,7 +71,7 @@ func Server(st *config.State) (*conf.File, error) {
 	}
 	addAWG(&iface, st.AWG)
 	f := &conf.File{Sections: []conf.Section{iface}}
-	keepalive := st.Get("peer.keepalive_seconds")
+	keepalive := st.Get(config.KeyKeepaliveSeconds)
 	for _, p := range st.Peers {
 		if !p.Enabled {
 			continue
@@ -93,22 +93,22 @@ func Server(st *config.State) (*conf.File, error) {
 // Peer renders the conf for one peer.
 func Peer(st *config.State, p store.Peer) (*conf.File, error) {
 	subnet := st.Subnet()
-	serverPub, err := keys.Public(st.Get("server.private_key"))
+	serverPub, err := keys.Public(st.Get(config.KeyServerPrivateKey))
 	if err != nil {
 		return nil, fmt.Errorf("server key: %w", err)
 	}
 	iface := conf.Section{Name: "Interface"}
 	iface.Add("Address", config.PeerAddress(subnet, p.ID)+"/32")
 	iface.Add("PrivateKey", p.PrivateKey)
-	iface.Add("MTU", mtu(st.Get("net.peer_mtu")))
+	iface.Add("MTU", mtu(st.Get(config.KeyPeerMTU)))
 	iface.Add("DNS", config.ServerAddress(subnet))
 	// I1-I5 must be in [Interface]: the Amnezia app ignores them under [Peer].
 	addAWG(&iface, st.AWG)
 	peer := conf.Section{Name: "Peer"}
 	peer.Add("PublicKey", serverPub)
 	peer.Add("PresharedKey", p.PresharedKey)
-	peer.Add("Endpoint", st.Get("server.endpoint_host")+":"+st.Get("server.endpoint_port"))
-	peer.Add("AllowedIPs", st.Get("peer.default_allowed_ips"))
+	peer.Add("Endpoint", st.Get(config.KeyEndpointHost)+":"+st.Get(config.KeyEndpointPort))
+	peer.Add("AllowedIPs", st.Get(config.KeyAllowedIPs))
 	f := &conf.File{Sections: []conf.Section{iface, peer}}
 	return f, f.Check()
 }

@@ -35,17 +35,17 @@ func Build(ctx context.Context, r *rand.Rand, getenv Getenv, detect Detector) (*
 			v, _ = getenv(s.Env)
 		}
 		switch {
-		case s.Key == "server.private_key":
+		case s.Key == config.KeyServerPrivateKey:
 			st.Settings[s.Key] = keys.NewPrivate()
 			continue
-		case s.Key == "server.endpoint_host" && v == "":
+		case s.Key == config.KeyEndpointHost && v == "":
 			ip, err := detect(ctx)
 			if err != nil {
 				return nil, nil, fmt.Errorf("SERVERURL is not set and the public IPv4 address could not be detected: %w. Set SERVERURL to this server's DNS name or IP", err)
 			}
 			notes = append(notes, fmt.Sprintf("SERVERURL is not set, detected public IPv4 %s. Set SERVERURL to a DNS name or fixed IP: if the address changes, each peer needs a new conf.", ip))
 			v = ip
-		case s.Key == "server.endpoint_host" && strings.EqualFold(v, "auto"):
+		case s.Key == config.KeyEndpointHost && strings.EqualFold(v, "auto"):
 			return nil, nil, fmt.Errorf("SERVERURL=auto is not supported: leave SERVERURL unset to detect the public IPv4, or set a DNS name or IP")
 		case v == "":
 			st.Settings[s.Key] = s.Default

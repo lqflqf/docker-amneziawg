@@ -6,7 +6,6 @@ import (
 	"flag"
 	"fmt"
 	"os"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -142,19 +141,11 @@ func (a *App) cmdPeer(ctx context.Context, args []string) error {
 			return needYes("peer rm deletes the peer and its keys; run again with --yes")
 		}
 		return a.change(ctx, true, func(d *config.State) (plan, error) {
-			p, err := d.FindPeer(id)
+			p, err := d.RemovePeer(id)
 			if err != nil {
 				return plan{}, err
 			}
-			l := label(*p)
-			out := d.Peers[:0]
-			for _, q := range d.Peers {
-				if q.ID != id {
-					out = append(out, q)
-				}
-			}
-			d.Peers = out
-			return plan{summary: []string{l + ": deleted"}}, nil
+			return plan{summary: []string{label(p) + ": deleted"}}, nil
 		})
 	}
 	return usagef("unknown peer command %q", sub)
@@ -193,36 +184,6 @@ func (a *App) peerEdit(ctx context.Context, arg string, yes bool, f func(*config
 	})
 }
 
-// newPeers adds n peers with new keys at the lowest free ids. An empty name
-// gives each peer its default name "peer <id>".
-func newPeers(d *config.State, n int, name string, keepalive bool) ([]store.Peer, error) {
-	ids, err := d.FreeIDs(n)
-	if err != nil {
-		return nil, err
-	}
-	names := map[string]int{}
-	for _, p := range d.Peers {
-		names[p.Name] = p.ID
-	}
-	var out []store.Peer
-	for _, id := range ids {
-		nm := name
-		if nm == "" {
-			nm = config.DefaultPeerName(id)
-		}
-		if other, ok := names[nm]; ok {
-			return nil, fmt.Errorf("the name %q is used by peer %d", nm, other)
-		}
-		priv, pub := keys.Pair()
-		p := store.Peer{ID: id, Name: nm, PrivateKey: priv, PublicKey: pub,
-			PresharedKey: keys.NewSymmetric(), Keepalive: keepalive, Enabled: true}
-		d.Peers = append(d.Peers, p)
-		out = append(out, p)
-	}
-	sort.Slice(d.Peers, func(i, j int) bool { return d.Peers[i].ID < d.Peers[j].ID })
-	return out, nil
-}
-
 func (a *App) peerAdd(ctx context.Context, name string, keepalive, qr bool) error {
 	if name != "" && !config.ValidPeerName(name) {
 		return usagef("invalid name %q: use %s", name, config.NameRule)
@@ -230,7 +191,7 @@ func (a *App) peerAdd(ctx context.Context, name string, keepalive, qr bool) erro
 	var added store.Peer
 	var code string
 	err := a.change(ctx, false, func(d *config.State) (plan, error) {
-		ps, err := newPeers(d, 1, name, keepalive)
+		ps, err := d.AddPeers(1, name, keepalive)
 		if err != nil {
 			return plan{}, err
 		}
@@ -257,7 +218,7 @@ func (a *App) peerAdd(ctx context.Context, name string, keepalive, qr bool) erro
 
 func (a *App) peerAddMany(ctx context.Context, n int, keepalive bool) error {
 	return a.change(ctx, false, func(d *config.State) (plan, error) {
-		ps, err := newPeers(d, n, "", keepalive)
+		ps, err := d.AddPeers(n, "", keepalive)
 		if err != nil {
 			return plan{}, err
 		}
