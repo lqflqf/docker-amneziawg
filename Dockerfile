@@ -17,11 +17,11 @@ ARG AMNEZIAWG_TOOLS_COMMIT=ee0f0a9aa34ff0a0da4b3433b9512781cfe02843
 # Stage 1: Compile amneziawg-go
 # ============================================================================
 # Base images are pinned by digest (Dependabot keeps them current).
-FROM golang:1.27.3-alpine@sha256:d200d2dd76b03a99b52651fd1325aff7dcd35422c35c01bac56571b0507f3deb AS go-builder
+FROM golang:1.27.4-alpine@sha256:0a5f7fe796599ff487605987432e7619ae45beeb2fba4c2ce0b907879932aebf AS go-builder
 
 ARG AMNEZIAWG_GO_VERSION
 ARG AMNEZIAWG_GO_COMMIT
-RUN apk add --no-cache git=2.54.0-r0 build-base=0.5-r4
+RUN apk add --no-cache git=2.54.1-r0 build-base=0.5-r4
 
 WORKDIR /src
 RUN git clone --branch ${AMNEZIAWG_GO_VERSION} --depth 1 https://github.com/amnezia-vpn/amneziawg-go.git . && \
@@ -38,7 +38,7 @@ FROM alpine:3.24.4@sha256:f59abe656b692d901e184be3445e084786602108599d2a51d229c0
 
 ARG AMNEZIAWG_TOOLS_VERSION
 ARG AMNEZIAWG_TOOLS_COMMIT
-RUN apk add --no-cache git=2.54.0-r0 build-base=0.5-r4 linux-headers=7.0.0-r1 bash=5.3.9-r1
+RUN apk add --no-cache git=2.54.1-r0 build-base=0.5-r4 linux-headers=7.0.0-r1 bash=5.3.9-r1
 
 WORKDIR /src
 RUN git clone --branch ${AMNEZIAWG_TOOLS_VERSION} --depth 1 https://github.com/amnezia-vpn/amneziawg-tools.git . && \
@@ -57,7 +57,7 @@ RUN make && \
 # ============================================================================
 # Stage 3: Build awgctl (this repository's Go code), after vet and unit tests
 # ============================================================================
-FROM golang:1.27.3-alpine@sha256:d200d2dd76b03a99b52651fd1325aff7dcd35422c35c01bac56571b0507f3deb AS awgctl-builder
+FROM golang:1.27.4-alpine@sha256:0a5f7fe796599ff487605987432e7619ae45beeb2fba4c2ce0b907879932aebf AS awgctl-builder
 
 WORKDIR /src
 ENV CGO_ENABLED=0
