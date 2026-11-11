@@ -12,6 +12,7 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 
 	_ "modernc.org/sqlite"
 
@@ -524,6 +525,22 @@ func (r dumpRunner) Run(ctx context.Context, name string, args []string, stdin [
 	return r.Fake.Run(ctx, name, args, stdin, env)
 }
 
+func TestAgo(t *testing.T) {
+	for d, want := range map[time.Duration]string{
+		-5 * time.Second:                      "0s ago",
+		0:                                     "0s ago",
+		59*time.Second + 900*time.Millisecond: "59s ago",
+		time.Minute:                           "1m 0s ago",
+		59*time.Minute + 59*time.Second:       "59m 59s ago",
+		time.Hour + 30*time.Second:            "1h 0m ago",
+		50*time.Hour + 7*time.Minute:          "2d 2h ago",
+	} {
+		if got := ago(d); got != want {
+			t.Errorf("ago(%v) = %q, want %q", d, got, want)
+		}
+	}
+}
+
 func TestPeerListShowExport(t *testing.T) {
 	h := newHarness(t)
 	h.boot()
@@ -554,10 +571,11 @@ func TestPeerListShowExport(t *testing.T) {
 	}
 
 	phone := h.peer(2)
+	h.app.Now = func() time.Time { return time.Unix(1700000000+3*3600+25*60+9, 0) }
 	h.app.R = dumpRunner{Fake: h.fake, dump: "priv\tpub\t51820\toff\n" + phone.PublicKey +
 		"\tpsk\t(none)\t10.13.13.2/32\t1700000000\t1536\t3221225472\toff\nshort line\n"}
 	out = h.run(ExitOK, "peer", "list")
-	if !regexp.MustCompile(`(?m)^2\s+phone\s+10\.13\.13\.2\s+true\s+true\s+2023-11-14T22:13:20Z\s+1\.5KiB/3\.0GiB$`).MatchString(out) ||
+	if !regexp.MustCompile(`(?m)^2\s+phone\s+10\.13\.13\.2\s+true\s+true\s+3h 25m ago\s+1\.5KiB/3\.0GiB$`).MatchString(out) ||
 		!regexp.MustCompile(`(?m)^3\s+laptop\s+10\.13\.13\.3\s+true\s+false\s+-\s+0B/0B$`).MatchString(out) {
 		t.Fatalf("list:\n%s", out)
 	}

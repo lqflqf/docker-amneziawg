@@ -9,6 +9,7 @@ import (
 	"io"
 	"math/rand/v2"
 	"os"
+	"time"
 
 	"github.com/lqflqf/docker-amneziawg/internal/awg"
 	"github.com/lqflqf/docker-amneziawg/internal/check"
@@ -40,6 +41,7 @@ type App struct {
 	Detect seed.Detector
 	Rand   *rand.Rand
 	Owner  func() (fsafe.Owner, error)
+	Now    func() time.Time // nil: time.Now
 }
 
 // New returns the real App.
@@ -60,6 +62,13 @@ func New() *App {
 		return seed.DetectIPv4(ctx, seed.DetectURLs, nil)
 	}, func(s string) { a.logf("%s", s) })
 	return a
+}
+
+func (a *App) now() time.Time {
+	if a.Now == nil {
+		return time.Now()
+	}
+	return a.Now()
 }
 
 func (a *App) env() check.Env { return check.Env{R: a.R} }
