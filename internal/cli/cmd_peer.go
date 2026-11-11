@@ -212,6 +212,7 @@ type peerRow struct {
 	LastHandshake string `json:"last_handshake,omitempty"`
 	Received      int64  `json:"rx_bytes"`
 	Sent          int64  `json:"tx_bytes"`
+	handshake     int64  // Unix time of the last handshake (0 = none)
 }
 
 // peerStats are the counters of one peer on the running wg0.
@@ -261,7 +262,7 @@ func (a *App) peerList(ctx context.Context, c *call) error {
 		r := peerRow{ID: p.ID, Name: p.Name, Address: config.PeerAddress(st.Subnet(), p.ID),
 			PublicKey: p.PublicKey, Enabled: p.Enabled, Keepalive: p.Keepalive}
 		if x, ok := rt[p.PublicKey]; ok {
-			r.LastHandshake, r.Received, r.Sent = x.lastHandshake(), x.rx, x.tx
+			r.LastHandshake, r.Received, r.Sent, r.handshake = x.lastHandshake(), x.rx, x.tx, x.handshake
 		}
 		rows = append(rows, r)
 	}
@@ -278,15 +279,32 @@ func (a *App) peerList(ctx context.Context, c *call) error {
 		return nil
 	}
 	fmt.Fprintf(a.Out, "%-4s %-32s %-15s %-8s %-9s %-20s %s\n", "ID", "NAME", "ADDRESS", "ENABLED", "KEEPALIVE", "LAST HANDSHAKE", "RX/TX")
+	now := a.now()
 	for _, r := range rows {
 		hs := "-"
-		if r.LastHandshake != "" {
-			hs = r.LastHandshake
+		if r.handshake > 0 {
+			hs = ago(now.Sub(time.Unix(r.handshake, 0)))
 		}
 		fmt.Fprintf(a.Out, "%-4d %-32s %-15s %-8t %-9t %-20s %s/%s\n", r.ID, r.Name, r.Address, r.Enabled, r.Keepalive, hs,
 			human(r.Received), human(r.Sent))
 	}
 	return nil
+}
+
+// ago returns a short relative time, for example "3m 12s ago". A negative
+// duration (clock skew) shows as "0s ago".
+func ago(d time.Duration) string {
+	s := max(int64(d/time.Second), 0)
+	switch {
+	case s < 60:
+		return fmt.Sprintf("%ds ago", s)
+	case s < 3600:
+		return fmt.Sprintf("%dm %ds ago", s/60, s%60)
+	case s < 86400:
+		return fmt.Sprintf("%dh %dm ago", s/3600, s%3600/60)
+	default:
+		return fmt.Sprintf("%dd %dh ago", s/86400, s%86400/3600)
+	}
 }
 
 func human(n int64) string {
