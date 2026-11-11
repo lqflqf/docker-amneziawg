@@ -33,9 +33,26 @@ services:
     restart: unless-stopped
 ```
 
-1. Start the container: `docker compose up -d`.
+To use `docker run` instead of Docker Compose, use this command:
+
+```bash
+docker run -d \
+  --name amneziawg \
+  --cap-add NET_ADMIN \
+  --device /dev/net/tun:/dev/net/tun \
+  -e PUID=1000 \
+  -e PGID=1000 \
+  -e SERVERURL=vpn.example.com \
+  -v "$PWD/config":/config \
+  -p 51820:51820/udp \
+  --sysctl net.ipv4.ip_forward=1 \
+  --restart unless-stopped \
+  ghcr.io/lqflqf/docker-amneziawg:latest
+```
+
+1. Start the container: `docker compose up -d`, or the `docker run` command above.
 2. Wait for `Config initialization finished` and `Tunnel wg0 is up` in `docker logs amneziawg`.
-3. Add a peer and show its QR code: `docker exec -it amneziawg awgctl peer add --name phone --qr`.
+3. Add a peer and show its QR code: `docker exec amneziawg awgctl peer add --name phone --qr`.
 4. Restart the container to apply the new peer: `docker restart amneziawg`.
 5. Scan the QR code with the [Amnezia app](https://amnezia.org/).
 
@@ -85,11 +102,11 @@ A command needs `--yes` when a peer needs a new config after the change. `peer r
 ### Peers
 
 ```bash
-docker exec -it amneziawg awgctl peer add --name laptop --qr   # new peer, QR code in the terminal
+docker exec amneziawg awgctl peer add --name laptop --qr        # new peer, QR code in the terminal
 docker exec amneziawg awgctl peer add-many 5                    # 5 new peers: "peer 3" to "peer 7"
-docker exec amneziawg awgctl peer list                          # ids, names, addresses, handshakes, traffic
+docker exec amneziawg awgctl peer list                          # ids, names, addresses, handshake age, traffic
 docker exec amneziawg awgctl peer export 2 > laptop.conf
-docker exec -it amneziawg awgctl peer export 2 --qr
+docker exec amneziawg awgctl peer export 2 --qr
 docker exec amneziawg awgctl peer rename 2 "work laptop"        # or: peer rename 2 --clear
 docker exec amneziawg awgctl peer disable 2                     # keeps the keys
 docker exec amneziawg awgctl peer rotate 2 --yes                # new keys, export again

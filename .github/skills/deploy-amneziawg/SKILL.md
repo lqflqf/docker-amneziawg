@@ -62,10 +62,10 @@ Shared values (version, `S`, `H`, `I`, `HeaderProtectionKey`, `RandomTrailers`) 
 
 ## Phase 6 — Add peers and hand off configs
 
-For each peer name, run `docker exec -it amneziawg awgctl peer add --name <name> --qr`. It prints the peer id and a terminal QR code for the Amnezia app. For a number of peers without names, run `docker exec amneziawg awgctl peer add-many <count>`. After the last peer, run `docker restart amneziawg`: changes apply only at a restart. Tell the user:
+For each peer name, run `docker exec amneziawg awgctl peer add --name <name> --qr`. It prints the peer id and a terminal QR code for the Amnezia app. For a number of peers without names, run `docker exec amneziawg awgctl peer add-many <count>`. After the last peer, run `docker restart amneziawg`: changes apply only at a restart. Tell the user:
 
 - Each peer command takes the peer id (2-254) from `awgctl peer list`, not the name.
-- To show a QR code again, run `docker exec -it amneziawg awgctl peer export <id> --qr`.
+- To show a QR code again, run `docker exec amneziawg awgctl peer export <id> --qr`.
 - To get a file, run `docker exec amneziawg awgctl peer export <id> > <name>.conf`. The file holds the private key of the peer.
 - The container does not keep peer confs on disk. Back up `config/amneziawg.db`: it holds the server key and all peer keys. Stop the container before the copy.
 - To add a peer later, run `awgctl peer add`. To remove one, run `awgctl peer rm <id> --yes`. Restart the container to apply each change.

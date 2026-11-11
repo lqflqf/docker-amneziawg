@@ -3,7 +3,7 @@
 # 1. Set PUID/PGID and, before the first start, SERVERURL.
 # 2. docker compose up -d
 # 3. Add a peer and show its QR code, then restart to apply it:
-#      docker exec -it amneziawg awgctl peer add --name phone --qr
+#      docker exec amneziawg awgctl peer add --name phone --qr
 #      docker restart amneziawg
 #
 # The container reads the variables marked "first start" only once, when

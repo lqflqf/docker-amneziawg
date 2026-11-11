@@ -98,7 +98,7 @@ func (a *App) cmdInit(ctx context.Context, _ *call) error {
 	a.logf("AmneziaWG %s, endpoint %s:%s, subnet %s, %d peer(s)", st.AWG["version"],
 		st.Get(config.KeyEndpointHost), st.Get(config.KeyEndpointPort), st.Subnet(), len(st.Peers))
 	if len(st.Peers) == 0 {
-		a.logf("No peers yet. Add one with: docker exec -it <container> awgctl peer add --qr, then restart the container")
+		a.logf("No peers yet. Add one with: docker exec <container> awgctl peer add --qr, then restart the container")
 	}
 	a.logf("Config initialization finished")
 	return nil

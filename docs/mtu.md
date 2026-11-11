@@ -63,7 +63,7 @@ On the first start, the `MTU` variable sets both values. The default is 1280. La
 docker exec amneziawg awgctl set net.mtu 1280
 docker restart amneziawg
 docker exec amneziawg awgctl set net.peer_mtu 1280 --yes
-docker exec -it amneziawg awgctl peer export <id> --qr
+docker exec amneziawg awgctl peer export <id> --qr
 ```
 
 Each value is 576-1500, or `none` for the `awg-quick` default. `awgctl reset net.mtu` and `awgctl reset net.peer_mtu` set 1280 again. Keys and addresses do not change. Import each new peer conf or QR code on the device.
