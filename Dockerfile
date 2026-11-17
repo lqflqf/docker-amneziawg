@@ -8,8 +8,8 @@
 # pinned to the commit it pointed at when it was reviewed: a moved tag fails the
 # build instead of shipping different code. An empty *_COMMIT (ad-hoc builds
 # with a version override) skips that check.
-ARG AMNEZIAWG_GO_VERSION=v3.1.20260828
-ARG AMNEZIAWG_GO_COMMIT=b5928efb6ca19f0153958460c3d141f04abc5c2e
+ARG AMNEZIAWG_GO_VERSION=v3.1.20261116
+ARG AMNEZIAWG_GO_COMMIT=08fe3d33bbb116be09a6183d02609311b8b0c9e8
 ARG AMNEZIAWG_TOOLS_VERSION=v3.1.20260812
 ARG AMNEZIAWG_TOOLS_COMMIT=ee0f0a9aa34ff0a0da4b3433b9512781cfe02843
 
