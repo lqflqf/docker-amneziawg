@@ -1,7 +1,7 @@
 # Docker AmneziaWG
 
 [![Docker Build](https://github.com/lqflqf/docker-amneziawg/actions/workflows/docker-build.yml/badge.svg)](https://github.com/lqflqf/docker-amneziawg/actions/workflows/docker-build.yml)
-[![GitHub Container Registry](https://img.shields.io/badge/ghcr.io-docker--amneziawg-blue?logo=docker)](https://github.com/lqflqf/docker-amneziawg/pkgs/container/docker-amneziawg)
+[![GitHub Container Registry](https://img.shields.io/badge/ghcr.io-amneziawg-blue?logo=docker)](https://github.com/lqflqf/docker-amneziawg/pkgs/container/amneziawg)
 [![GitHub release](https://img.shields.io/github/v/release/lqflqf/docker-amneziawg)](https://github.com/lqflqf/docker-amneziawg/releases)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
@@ -14,7 +14,7 @@
 ```yaml
 services:
   amneziawg:
-    image: ghcr.io/lqflqf/docker-amneziawg:latest
+    image: ghcr.io/lqflqf/amneziawg:latest
     container_name: amneziawg
     cap_add:
       - NET_ADMIN
@@ -47,7 +47,7 @@ docker run -d \
   -p 51820:51820/udp \
   --sysctl net.ipv4.ip_forward=1 \
   --restart unless-stopped \
-  ghcr.io/lqflqf/docker-amneziawg:latest
+  ghcr.io/lqflqf/amneziawg:latest
 ```
 
 1. Start the container: `docker compose up -d`, or the `docker run` command above.
@@ -328,7 +328,7 @@ Set `rc_cgroup_mode="unified"` (cgroup v2) in `/etc/rc.conf` and restart the hos
 
 ## Upgrading
 
-Each release has the tag `<amneziawg-tools>-r<N>` (for example `3.1.20260812-r14`) and [release notes](https://github.com/lqflqf/docker-amneziawg/releases).
+Each release has the tag `<amneziawg-tools>-r<N>` (for example `3.1.20260812-r21`) and [release notes](https://github.com/lqflqf/docker-amneziawg/releases).
 
 ### From the releases before `awgctl`
 
@@ -338,7 +338,7 @@ The older releases kept their config in `.donoteditthisfile`, `wg_confs/`, `serv
 2. Read the import report. This step changes nothing:
 
    ```bash
-   docker run --rm --entrypoint awgctl -v ./config:/config ghcr.io/lqflqf/docker-amneziawg:latest import-legacy /config --dry-run
+   docker run --rm --entrypoint awgctl -v ./config:/config ghcr.io/lqflqf/amneziawg:latest import-legacy /config --dry-run
    ```
 
 3. Run the same command without `--dry-run`.

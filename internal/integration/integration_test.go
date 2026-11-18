@@ -11,7 +11,11 @@ import (
 	"math/rand/v2"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"regexp"
+	"slices"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/lqflqf/docker-amneziawg/internal/check"
@@ -19,6 +23,7 @@ import (
 	"github.com/lqflqf/docker-amneziawg/internal/config"
 	"github.com/lqflqf/docker-amneziawg/internal/fsafe"
 	"github.com/lqflqf/docker-amneziawg/internal/keys"
+	"github.com/lqflqf/docker-amneziawg/internal/legacy/legacytest"
 	"github.com/lqflqf/docker-amneziawg/internal/render"
 	"github.com/lqflqf/docker-amneziawg/internal/store"
 	"github.com/lqflqf/docker-amneziawg/internal/sys"
@@ -188,6 +193,79 @@ func TestInterfaceChangesApplyAtRestart(t *testing.T) {
 	}
 	if !strings.Contains(sh(t, "awg", "show", "wg0", "allowed-ips"), "10.67.0.2/32") {
 		t.Fatal("the new peer is not in the new subnet")
+	}
+}
+
+// TestImportLegacyVolume imports a volume of the last shell release, as the
+// README command does, then starts the tunnel from the new database. The
+// volume belongs to PUID 1000, as in a real deployment.
+func TestImportLegacyVolume(t *testing.T) {
+	b := newBox(t)
+	puid := fsafe.Owner{UID: 1000, GID: 1000}
+	b.app.Owner = func() (fsafe.Owner, error) { return puid, nil }
+	cfg := b.app.P.Config
+	v := legacytest.New(t, "1,laptop", "peer1", "peer_laptop")
+	v.Dir = cfg
+	v.Params = legacytest.Params("3.1")
+	v.Keepalive = []string{"peer1"}
+	v.Write(t)
+	v.Chown(t, puid.UID, puid.GID)
+	read := func(rel string) string {
+		t.Helper()
+		out, err := os.ReadFile(filepath.Join(cfg, rel))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(out)
+	}
+	oldConf := read("peer_laptop/peer_laptop.conf")
+	oldPubs := []string{strings.TrimSpace(read("peer1/publickey-peer1")), strings.TrimSpace(read("peer_laptop/publickey-peer_laptop"))}
+
+	out := b.run(cli.ExitOK, "import-legacy", cfg, "--dry-run")
+	for _, want := range []string{"AWG 3.1, 2 peer(s)", "every peer conf is unchanged"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("dry run: no %q:\n%s", want, out)
+		}
+	}
+	b.run(cli.ExitOK, "import-legacy", cfg)
+	b.start()
+
+	st := state(t, b)
+	laptop := -1
+	for _, p := range st.Peers {
+		if p.Name == "laptop" {
+			laptop = p.ID
+		}
+	}
+	if laptop != 3 {
+		t.Fatalf("laptop has id %d, want its old address octet 3", laptop)
+	}
+	exp := b.run(cli.ExitOK, "peer", "export", "3")
+	for _, k := range []string{"PrivateKey", "PublicKey", "PresharedKey", "Endpoint", "H1", "S1", "I1",
+		"HeaderProtectionKey", "RandomTrailers"} {
+		re := regexp.MustCompile(`(?m)^` + k + ` = .+$`)
+		if o, n := re.FindString(oldConf), re.FindString(exp); o == "" || o != n {
+			t.Errorf("%s: old %q, export %q", k, o, n)
+		}
+	}
+	got := wgPeers(t)
+	slices.Sort(got)
+	slices.Sort(oldPubs)
+	if !slices.Equal(got, oldPubs) {
+		t.Fatalf("wg0 peers %v, want the old keys %v", got, oldPubs)
+	}
+	archives, _ := filepath.Glob(filepath.Join(cfg, sys.LegacyArchivePrefix+"*", "wg_confs", "wg0.conf"))
+	if len(archives) != 1 {
+		t.Fatalf("the old files were not kept in legacy-*: %v", archives)
+	}
+	for _, p := range []string{b.app.P.DB(), filepath.Dir(filepath.Dir(archives[0]))} {
+		fi, err := os.Lstat(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if st := fi.Sys().(*syscall.Stat_t); int(st.Uid) != puid.UID || int(st.Gid) != puid.GID {
+			t.Errorf("%s is owned by %d:%d, want %d:%d", p, st.Uid, st.Gid, puid.UID, puid.GID)
+		}
 	}
 }
 

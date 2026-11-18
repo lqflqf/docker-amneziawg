@@ -13,7 +13,7 @@
 
 services:
   amneziawg:
-    image: ghcr.io/lqflqf/docker-amneziawg:latest
+    image: ghcr.io/lqflqf/amneziawg:latest
     container_name: amneziawg
     # Remove the comment marks to build the image locally
     # build:

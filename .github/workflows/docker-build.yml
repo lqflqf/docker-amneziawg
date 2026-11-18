@@ -58,7 +58,9 @@ permissions:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository }}
+  # The image name differs from the repository name. The image.source label
+  # in the Dockerfile links the package to this repository.
+  IMAGE_NAME: ${{ github.repository_owner }}/amneziawg
   DOCKER_BUILDKIT: 1
   # Upstream versions are read from the Dockerfile ARG pins (single source of truth).
   # workflow_dispatch inputs override them for one-off (ad-hoc) builds.
@@ -95,7 +97,7 @@ jobs:
           PUSH_BEFORE: ${{ github.event.before }}
         run: |
           IMAGE_PATHS='^(Dockerfile$|root/|cmd/|internal/|go\.(mod|sum)$|\.golangci\.yml$|\.dockerignore$|\.github/workflows/docker-build\.yml$|\.github/scripts/)'
-          TEST_PATHS='(_test\.go$|^internal/integration/|^internal/sys/systest/)'
+          TEST_PATHS='(_test\.go$|^internal/integration/|^internal/sys/systest/|^internal/legacy/legacytest/)'
 
           if [[ "$EVENT" == "pull_request" ]]; then
             MODE="pr"

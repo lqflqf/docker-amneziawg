@@ -5,7 +5,7 @@ Fill the `<<…>>` placeholders from Phases 3-4. `README.md` "Settings" describe
 ```yaml
 services:
   amneziawg:
-    image: ghcr.io/lqflqf/docker-amneziawg:latest
+    image: ghcr.io/lqflqf/amneziawg:latest
     container_name: amneziawg
     cap_add:
       - NET_ADMIN

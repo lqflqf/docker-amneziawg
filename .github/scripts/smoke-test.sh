@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Smoke-test a locally built image as a black box: image contents, the s6
 # graph, start-up and its failure modes, identity, dnsmasq, awgctl through
-# docker exec, the import of an old volume, and an end-to-end tunnel. The
-# config logic itself is covered by the Go unit and integration tests.
+# docker exec, and an end-to-end tunnel. The config logic itself, and the
+# import of an old volume, are covered by the Go unit and integration tests.
 #
 # Usage: smoke-test.sh <image>
 # ENGINE=nerdctl runs every container with nerdctl (containerd) instead of
@@ -29,17 +29,14 @@ network="awgci-net-$$"
 tmpdir=$(mktemp -d)
 cleanup() {
     local c
-    for c in "$container" "$container-up" "$container-srv" "$container-cli" "$container-old"; do
+    for c in "$container" "$container-up" "$container-srv" "$container-cli"; do
         engine rm -f "$c" >/dev/null 2>&1 || true
     done
-    engine volume rm -f "$volume" "$volume-srv" "$volume-old" >/dev/null 2>&1 || true
+    engine volume rm -f "$volume" "$volume-srv" >/dev/null 2>&1 || true
     engine network rm "$network" >/dev/null 2>&1 || true
     rm -rf "$tmpdir"
 }
 trap cleanup EXIT
-
-# The last release of the shell-based image, for the import-legacy check.
-legacy_image=ghcr.io/lqflqf/docker-amneziawg:3.1.20260812-r15@sha256:aa54a84d9c61a1f14b6fd5cf59f057184be1e0864dfcce8c009edd82f8af1799
 
 # Runs a list of checks inside the image. Each argument is one shell
 # condition; the first one that fails stops the group with a non-zero exit.
@@ -321,42 +318,6 @@ logs_have 'could not be detected' || fail "no detection error"
     || fail "a failed seed left files in /config"
 ok "a failed public IP detection (after retries) stops the container and writes nothing"
 passed "Fatal start-up errors"
-
-# ----------------------------------------------------------------------------
-# import-legacy: a volume written by the last shell release keeps its keys and
-# peer confs.
-# ----------------------------------------------------------------------------
-section "Import of an old volume"
-engine run -d --name "$container-old" --cap-add NET_ADMIN -v "$volume-old":/config \
-    -e PEERS=1,laptop -e SERVERURL=old.example.com -e PUID=1000 -e PGID=1000 "$legacy_image" >/dev/null
-for _ in $(seq 1 60); do
-    logs_have 'Config initialization finished' "$container-old" && break
-    sleep 1
-done
-logs_have 'Config initialization finished' "$container-old" || fail "the old image did not start"
-old_conf=$(engine exec "$container-old" cat /config/peer_laptop/peer_laptop.conf)
-engine rm -f "$container-old" >/dev/null
-report=$(engine run --rm --entrypoint awgctl -v "$volume-old":/config "$image" import-legacy /config --dry-run)
-grep -q 'every peer conf is unchanged' <<<"$report" || { echo "$report"; fail "dry run: peer confs would change"; }
-engine run --rm --entrypoint awgctl -v "$volume-old":/config "$image" import-legacy /config >/dev/null \
-    || fail "import-legacy failed"
-engine rm -f "$container" >/dev/null 2>&1 || true
-engine run -d --name "$container" --cap-add NET_ADMIN -v "$volume-old":/config -e PUID=1000 -e PGID=1000 "$image" >/dev/null
-for _ in $(seq 1 60); do
-    logs_have 'Config initialization finished' && break
-    sleep 1
-done
-logs_have 'Config initialization finished' || fail "the new image did not start on the imported volume"
-laptop_id=$(dx awgctl peer list | awk '$2 == "laptop" {print $1}')
-[[ "$laptop_id" == 3 ]] || fail "laptop has id ${laptop_id:-none}, expected its old octet 3"
-new_conf=$(dx awgctl peer export "$laptop_id")
-for k in PrivateKey PublicKey PresharedKey Endpoint H1 S1 I1 HeaderProtectionKey; do
-    [[ "$(grep "^$k = " <<<"$old_conf")" == "$(grep "^$k = " <<<"$new_conf")" ]] || fail "the import changed $k of laptop"
-done
-dx sh -c 'ls -d /config/legacy-*' >/dev/null || fail "the old files were not kept in legacy-*"
-ok "keys, endpoint and AWG values of each peer are unchanged after the import"
-engine rm -f "$container" >/dev/null
-passed "Import of an old volume"
 
 # ----------------------------------------------------------------------------
 # End to end: a server, a peer container (the same image running awg-quick on
