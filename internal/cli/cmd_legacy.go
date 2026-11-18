@@ -78,7 +78,7 @@ func (a *App) cmdImportLegacy(ctx context.Context, c *call) error {
 		fmt.Fprintln(a.Out, "result:   every peer conf is unchanged: no peer needs a new conf")
 	}
 	if len(rep.Dropped) > 0 && !force {
-		return fmt.Errorf("%d item(s) cannot be imported (see drop above). Fix them on the old image, or import without them with --force-partial", len(rep.Dropped))
+		return fmt.Errorf("%d item(s) cannot be imported (see drop above). Fix them in the old files, or import without them with --force-partial", len(rep.Dropped))
 	}
 	if dry {
 		fmt.Fprintln(a.Out, "dry run:  nothing was written")

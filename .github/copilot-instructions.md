@@ -198,7 +198,7 @@ A change is one write transaction: load, change in memory, `--yes` check, `check
   - Thus `smoke` runs unless a needed job fails or is cancelled. If `validate` is not `true`, each step is skipped and the job passes.
   - `docker`: then Trivy (fails on fixable CRITICAL findings).
   - `nerdctl`: rootful containerd + nerdctl (pinned `nerdctl-full`, sha256). It stops Docker first, so that one containerd owns the socket. The tests run with `sudo env`, which passes `ENGINE`, `BUILD_DATE` and the GitHub variables.
-- Release (push to the default branch, or `workflow_dispatch` without overrides): boots arm64 under QEMU and runs `awgctl version`, `awgctl peer add` and `peer export` there. Then it pushes amd64+arm64 with provenance and SBOM as `:<tools>-r<N>` (immutable), `:<tools>`, `:latest`, `:sha-<short>`. It creates the tag `v<tools>-r<N>` and a GitHub Release. A superseded run publishes only its immutable tag.
+- Release (push to the default branch, or `workflow_dispatch` without overrides): boots arm64 under QEMU and runs `awgctl version`, `awgctl peer add` and `peer export` there. Then it pushes amd64+arm64 to `ghcr.io/lqflqf/amneziawg` with provenance and SBOM as `:<tools>-r<N>` (immutable), `:<tools>`, `:latest`, `:sha-<short>`. It creates the tag `v<tools>-r<N>` and a GitHub Release. A superseded run publishes only its immutable tag.
 - `workflow_dispatch` with version overrides publishes only `:dispatch-<run>`.
 - Never push `v*-r*` tags manually. They are the build counter.
 - Jobs use `runs-on: ubuntu-24.04`, not `ubuntu-latest`. Thus the runner changes only in a PR of its own, after CI passes on the new image.
