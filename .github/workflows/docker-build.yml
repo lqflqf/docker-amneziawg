@@ -95,7 +95,7 @@ jobs:
           PUSH_BEFORE: ${{ github.event.before }}
         run: |
           IMAGE_PATHS='^(Dockerfile$|root/|cmd/|internal/|go\.(mod|sum)$|\.golangci\.yml$|\.dockerignore$|\.github/workflows/docker-build\.yml$|\.github/scripts/)'
-          TEST_PATHS='(_test\.go$|^internal/integration/|^internal/sys/systest/)'
+          TEST_PATHS='(_test\.go$|^internal/integration/|^internal/sys/systest/|^internal/legacy/legacytest/)'
 
           if [[ "$EVENT" == "pull_request" ]]; then
             MODE="pr"

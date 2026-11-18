@@ -16,10 +16,9 @@ import (
 
 	_ "modernc.org/sqlite"
 
-	"github.com/lqflqf/docker-amneziawg/internal/awg"
 	"github.com/lqflqf/docker-amneziawg/internal/config"
 	"github.com/lqflqf/docker-amneziawg/internal/fsafe"
-	"github.com/lqflqf/docker-amneziawg/internal/keys"
+	"github.com/lqflqf/docker-amneziawg/internal/legacy/legacytest"
 	"github.com/lqflqf/docker-amneziawg/internal/store"
 	"github.com/lqflqf/docker-amneziawg/internal/sys"
 	"github.com/lqflqf/docker-amneziawg/internal/sys/systest"
@@ -768,58 +767,12 @@ func TestSeedFailures(t *testing.T) {
 	}
 }
 
-// writeLegacy writes a volume of the shell release into dir: one conf per
-// peer id, keys in files and the saved state as ORIG_ lines.
-func writeLegacy(t *testing.T, dir, peers, extraUp string, ids ...string) {
-	t.Helper()
-	w := func(rel, body string) {
-		p := filepath.Join(dir, rel)
-		os.MkdirAll(filepath.Dir(p), 0o700)
-		if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
-			t.Fatal(err)
-		}
-	}
-	params := awg.Generate(rand.New(rand.NewPCG(1, 1)), "2.0")
-	var awgLines, paramFile strings.Builder
-	for _, l := range awg.Lines(params) {
-		fmt.Fprintf(&awgLines, "%s = %s\n", l.Key, l.Value)
-	}
-	for _, k := range awg.AllKeys {
-		fmt.Fprintf(&paramFile, "%s=%s\n", awg.EnvName(k), params[k])
-	}
-	sp, spub := keys.Pair()
-	w("server/privatekey-server", sp+"\n")
-	w("server/publickey-server", spub+"\n")
-	w("server/awg_params", paramFile.String())
-	w(".donoteditthisfile", fmt.Sprintf("ORIG_SERVERURL=\"vpn.example.com\"\nORIG_SERVERPORT=\"51820\"\nORIG_PEERS=\"%s\"\n"+
-		"ORIG_INTERFACE=\"10.20.30\"\nORIG_ALLOWEDIPS=\"0.0.0.0/0, ::/0\"\n", peers))
-	srv := "[Interface]\nAddress = 10.20.30.1\nListenPort = 51820\nPrivateKey = " + sp + "\nMTU = 1280\n" +
-		"PostUp = iptables -A FORWARD -i %i -j ACCEPT\nPostUp = iptables -A FORWARD -o %i -j ACCEPT\n" +
-		"PostUp = iptables -t nat -A POSTROUTING -o eth+ -j MASQUERADE\n" + extraUp +
-		"PostDown = iptables -t nat -D POSTROUTING -o eth+ -j MASQUERADE || true\n" +
-		"PostDown = iptables -D FORWARD -o %i -j ACCEPT || true\nPostDown = iptables -D FORWARD -i %i -j ACCEPT || true\n" +
-		awgLines.String() + "\n"
-	for i, id := range ids {
-		pp, ppub := keys.Pair()
-		psk := keys.NewSymmetric()
-		ip := fmt.Sprintf("10.20.30.%d", i+2)
-		w(id+"/privatekey-"+id, pp+"\n")
-		w(id+"/publickey-"+id, ppub+"\n")
-		w(id+"/presharedkey-"+id, psk+"\n")
-		w(id+"/"+id+".conf", "[Interface]\nAddress = "+ip+"\nPrivateKey = "+pp+"\nMTU = 1280\nDNS = 10.20.30.1\n"+
-			awgLines.String()+"\n[Peer]\nPublicKey = "+spub+"\nPresharedKey = "+psk+
-			"\nEndpoint = vpn.example.com:51820\nAllowedIPs = 0.0.0.0/0, ::/0\n")
-		srv += "[Peer]\n# " + id + "\nPublicKey = " + ppub + "\nPresharedKey = " + psk +
-			"\nAllowedIPs = " + ip + "/32\nPersistentKeepalive = 25\n\n"
-	}
-	w("wg_confs/wg0.conf", srv)
-	w("templates/dnsmasq.conf", "domain-needed\nbogus-priv\nno-hosts\ncache-size=1000\n${DNS_SERVER_LINES}\n")
-}
-
 func TestImportLegacyInPlace(t *testing.T) {
 	h := newHarness(t)
 	cfg := h.app.P.Config
-	writeLegacy(t, cfg, "1,peer1", "", "peer1", "peer_peer1")
+	v := legacytest.New(t, "1,peer1", "peer1", "peer_peer1")
+	v.Dir = cfg
+	v.Write(t)
 	h.run(ExitError, "init")
 
 	out := h.run(ExitError, "import-legacy", cfg)
@@ -870,8 +823,10 @@ func TestImportLegacyInPlace(t *testing.T) {
 
 func TestImportLegacyPartial(t *testing.T) {
 	h := newHarness(t)
-	old := t.TempDir()
-	writeLegacy(t, old, "2", "PostUp = iptables -A FORWARD -p tcp --dport 22 -j DROP\n", "peer1", "peer2")
+	v := legacytest.New(t, "2", "peer1", "peer2")
+	v.ExtraUp = "PostUp = iptables -A FORWARD -p tcp --dport 22 -j DROP\n"
+	v.Write(t)
+	old := v.Dir
 	os.WriteFile(filepath.Join(old, "peer2", "peer2.conf"), []byte("[Interface]\nPrivateKey = x\n"), 0o600)
 	os.Remove(filepath.Join(old, "server", "awg_params"))
 	if out := h.run(ExitError, "import-legacy", filepath.Join(old, "missing")); !strings.Contains(out, "missing") {

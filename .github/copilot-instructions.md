@@ -52,11 +52,11 @@ docker buildx build --platform linux/amd64,linux/arm64 .   # both architectures
 
 Set `ENGINE=nerdctl` to run `go.sh`, `integration-test.sh` and `smoke-test.sh` with nerdctl. Use only commands and flags that docker and nerdctl both accept. CI runs golangci-lint v2.15.0 with `.golangci.yml` and `--build-tags integration`.
 
-**Unit tests** (`internal/*/*_test.go`): no root and no real binaries. A package that runs `awg`, `awg-quick` or `dnsmasq` uses the `sys.Runner` interface. Tests use the fake runner in `internal/sys/systest`. It models a running `wg0` and can make a command fail. Put each new test in the test file of its package.
+**Unit tests** (`internal/*/*_test.go`): no root and no real binaries. A package that runs `awg`, `awg-quick` or `dnsmasq` uses the `sys.Runner` interface. Tests use the fake runner in `internal/sys/systest`. It models a running `wg0` and can make a command fail. `internal/legacy/legacytest` writes a volume of the last shell release (r15) for the `import-legacy` tests. Put each new test in the test file of its package.
 
-**Integration tests** (`internal/integration`, build tag `integration`): `integration-test.sh` compiles the test binary in the `golang` image. Then it runs the binary as root in a container of the image, with `NET_ADMIN` and `/dev/net/tun`. The tests use the real `awg`, `awg-quick`, `amneziawg-go` and `dnsmasq`. Without `/dev/net/tun`, a local run skips them. CI must supply it.
+**Integration tests** (`internal/integration`, build tag `integration`): `integration-test.sh` compiles the test binary in the `golang` image. Then it runs the binary as root in a container of the image, with `NET_ADMIN` and `/dev/net/tun`. The tests use the real `awg`, `awg-quick`, `amneziawg-go` and `dnsmasq`. `TestImportLegacyVolume` imports a `legacytest` volume and starts the tunnel from the new database. Without `/dev/net/tun`, a local run skips them. CI must supply it.
 
-**Smoke tests** (`smoke-test.sh`): a black-box test of the image. It examines the image contents, the s6 graph, the first start, fatal start errors, identity and dnsmasq. It also examines `awgctl` through `docker exec`, `import-legacy` of a volume from the last shell release, and an end-to-end tunnel. Read the script for the full list.
+**Smoke tests** (`smoke-test.sh`): a black-box test of the image. It examines the image contents, the s6 graph, the first start, fatal start errors, identity and dnsmasq. It also examines `awgctl` through `docker exec` and an end-to-end tunnel. It uses no other image. Read the script for the full list.
 
 - Each check must fail by itself. Do not use `test ... && echo`: errexit ignores the left side of `&&`.
 - Do not use `cmd | grep -q` (SIGPIPE + pipefail). Use `grep -q ... <<<"$(cmd)"`.
@@ -87,7 +87,7 @@ Set `ENGINE=nerdctl` to run `go.sh`, `integration-test.sh` and `smoke-test.sh` w
 | `conf` | The conf model, the one writer, the parser (legacy import, diff) |
 | `check` | `Check`: the rules, then the server conf, one peer conf and the dnsmasq conf with the real parsers (`awg setconf`, `dnsmasq --test`) |
 | `health` | `awgctl health`. Reads only `/run` and the running system |
-| `legacy` | `import-legacy`: reads the old files as data, maps names, compares each peer export with the old conf |
+| `legacy`, `legacy/legacytest` | `import-legacy`: reads the old files as data, maps names, compares each peer export with the old conf. `legacytest` writes r15 volumes for the tests |
 | `fsafe` | Symlink and owner checks in `/config`, modes, a `chown` that does not follow links |
 | `keys`, `netcheck` | X25519 keys (`crypto/ecdh`), PSKs, input checks for hosts, ports, subnets, CIDR lists, DNS upstreams |
 | `sys`, `sys/systest` | Paths and the `/config` file names, the `Runner` interface, atomic writes, the fake runner for tests |
@@ -189,7 +189,7 @@ A change is one write transaction: load, change in memory, `--yes` check, `check
 
 **`docker-build.yml`**: `changes` → `version`, and `lint` in parallel. Then `smoke` (matrix: `docker`, `nerdctl`) → `build` → `release`.
 
-- Only `Dockerfile`, `root/**`, `cmd/**`, `internal/**`, `go.mod`, `go.sum`, `.golangci.yml`, `.dockerignore`, `docker-build.yml` and `.github/scripts/` change the image (output `image`). Other changes never publish. A change to Go tests only (`*_test.go`, `internal/integration/`, `internal/sys/systest/`) runs the tests (output `validate`), but it does not publish.
+- Only `Dockerfile`, `root/**`, `cmd/**`, `internal/**`, `go.mod`, `go.sum`, `.golangci.yml`, `.dockerignore`, `docker-build.yml` and `.github/scripts/` change the image (output `image`). Other changes never publish. A change to Go tests only (`*_test.go`, `internal/integration/`, `internal/sys/systest/`, `internal/legacy/legacytest/`) runs the tests (output `validate`), but it does not publish.
 - `lint` runs on each event: shellcheck on each bash script, hadolint, actionlint, golangci-lint (with `--build-tags integration`) and `go test -race`. Each linter has a pinned version and sha256. The Go steps run in the `golang` image of the Dockerfile.
 - `BUILD_DATE` is the UTC time that `version` calculates once. Each build of the run uses it. The Dockerfile declares `BUILD_DATE` and `VERSION` after the package layers, so a new date keeps the cache of those layers.
 - On the default branch, the gate compares with the **last release tag**, so a failed run does not lose a change. Manual runs always build.
